@@ -1,0 +1,30 @@
+services:
+  manager:
+    build:
+      context: .
+      dockerfile: manager/Dockerfile
+    container_name: cryptobot-manager
+    env_file:
+      - .env
+    ports:
+      - "${MANAGER_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    container_name: cryptobot-agent
+    env_file:
+      - .env
+    environment:
+      - MANAGER_URL=${MANAGER_URL:-http://manager:8000}
+      - AGENT_NAME=${AGENT_NAME:-agent-1}
+      - AGENT_PORT=${AGENT_PORT:-8100}
+    depends_on:
+      - manager
+    ports:
+      - "${AGENT_PORT:-8100}:8100"
+    restart: unless-stopped

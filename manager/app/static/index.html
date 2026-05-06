@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CryptoBot Manager</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #1e293b;
+        --panel-soft: #334155;
+        --text: #e2e8f0;
+        --accent: #22d3ee;
+        --good: #10b981;
+        --bad: #ef4444;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--text);
+        background: radial-gradient(circle at 20% 20%, #1d4ed8 0%, transparent 35%),
+          radial-gradient(circle at 80% 0%, #0ea5e9 0%, transparent 35%), var(--bg);
+        min-height: 100vh;
+      }
+
+      header {
+        padding: 24px;
+        border-bottom: 1px solid #475569;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 1.8rem;
+        letter-spacing: 0.02em;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: 360px 1fr;
+        gap: 16px;
+        padding: 16px;
+      }
+
+      .card {
+        background: color-mix(in srgb, var(--panel) 88%, black);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 14px;
+      }
+
+      label {
+        display: block;
+        font-size: 0.85rem;
+        margin-top: 8px;
+      }
+
+      input,
+      select,
+      button,
+      textarea {
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid #475569;
+        background: var(--panel-soft);
+        color: var(--text);
+        padding: 8px;
+        margin-top: 4px;
+      }
+
+      button {
+        cursor: pointer;
+        background: linear-gradient(135deg, #0891b2, #2563eb);
+        border: none;
+        font-weight: 600;
+      }
+
+      button.secondary {
+        background: #475569;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        text-align: left;
+        border-bottom: 1px solid #334155;
+        padding: 8px;
+        font-size: 0.9rem;
+      }
+
+      .pnl-positive {
+        color: var(--good);
+      }
+
+      .pnl-negative {
+        color: var(--bad);
+      }
+
+      .bot-actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      .layout-right {
+        display: grid;
+        grid-template-rows: auto auto;
+        gap: 16px;
+      }
+
+      .popup-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(2, 6, 23, 0.65);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+      }
+
+      .popup {
+        width: min(460px, 92vw);
+        border-radius: 14px;
+        border: 1px solid #475569;
+        background: #0f172a;
+        padding: 16px;
+        box-shadow: 0 20px 40px rgba(15, 23, 42, 0.45);
+      }
+
+      .popup h3 {
+        margin: 0 0 8px;
+      }
+
+      .popup p {
+        margin: 0 0 12px;
+        color: #cbd5e1;
+      }
+
+      .events-list {
+        max-height: 220px;
+        overflow: auto;
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 8px;
+      }
+
+      .event-item {
+        border-bottom: 1px solid #334155;
+        padding: 8px 4px;
+        font-size: 0.9rem;
+      }
+
+      .event-item:last-child {
+        border-bottom: none;
+      }
+
+      .event-time {
+        color: #94a3b8;
+        font-size: 0.8rem;
+      }
+
+      @media (max-width: 980px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>CryptoBot Manager Dashboard</h1>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>Create Bot</h2>
+        <label>Name <input id="name" value="GridBot-1" /></label>
+        <label>Market <input id="market" value="BTC-EUR" /></label>
+        <label>Base currency <input id="base_currency" value="BTC" /></label>
+        <label>Quote currency <input id="quote_currency" value="EUR" /></label>
+        <label>Mode
+          <select id="mode">
+            <option value="simulation">simulation</option>
+            <option value="live">live (placeholder)</option>
+          </select>
+        </label>
+        <label>Start price <input id="start_price" type="number" value="100" /></label>
+        <label>Tick seconds <input id="tick_seconds" type="number" value="3" /></label>
+
+        <h3>Grid</h3>
+        <label>Lower <input id="lower_price" type="number" value="90" /></label>
+        <label>Upper <input id="upper_price" type="number" value="110" /></label>
+        <label>Levels <input id="levels" type="number" value="10" /></label>
+        <label>Order size (quote) <input id="order_size_quote" type="number" value="25" /></label>
+
+        <h3>Budget</h3>
+        <label>Quote budget <input id="quote_budget" type="number" value="1000" /></label>
+        <label>Base budget <input id="base_budget" type="number" value="0" /></label>
+        <label>Profit mode
+          <select id="profit_mode">
+            <option value="compound">compound</option>
+            <option value="skim">skim</option>
+          </select>
+        </label>
+        <label>Skim ratio <input id="skim_ratio" type="number" step="0.05" value="0.5" /></label>
+        <button id="create">Create bot</button>
+
+        <h3>Backtest (quick)</h3>
+        <button id="backtest" class="secondary">Run backtest on current form</button>
+        <pre id="backtest_result"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Bots</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Equity</th>
+              <th>PnL</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="bots_body"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>Agents</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Approval</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="agents_body"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>Agent Notifications</h2>
+        <div id="events_list" class="events-list"></div>
+      </section>
+    </main>
+
+    <div id="popup_backdrop" class="popup-backdrop" role="dialog" aria-modal="true">
+      <div class="popup">
+        <h3>Nieuwe agent ontdekt</h3>
+        <p id="popup_text"></p>
+        <button id="popup_close">Sluiten</button>
+      </div>
+    </div>
+
+    <script>
+      const seenEventIds = new Set();
+
+      async function api(url, options = {}) {
+        const res = await fetch(url, {
+          headers: { "Content-Type": "application/json" },
+          ...options,
+        });
+        if (!res.ok) {
+          const txt = await res.text();
+          throw new Error(txt || `HTTP ${res.status}`);
+        }
+        return res.headers.get("content-type")?.includes("application/json") ? res.json() : res.text();
+      }
+
+      function currentConfig() {
+        return {
+          market: document.getElementById("market").value,
+          base_currency: document.getElementById("base_currency").value,
+          quote_currency: document.getElementById("quote_currency").value,
+          mode: document.getElementById("mode").value,
+          strategy: "static_grid",
+          tick_seconds: Number(document.getElementById("tick_seconds").value),
+          start_price: Number(document.getElementById("start_price").value),
+          grid: {
+            lower_price: Number(document.getElementById("lower_price").value),
+            upper_price: Number(document.getElementById("upper_price").value),
+            levels: Number(document.getElementById("levels").value),
+            order_size_quote: Number(document.getElementById("order_size_quote").value),
+          },
+          budget: {
+            quote_budget: Number(document.getElementById("quote_budget").value),
+            base_budget: Number(document.getElementById("base_budget").value),
+            profit_mode: document.getElementById("profit_mode").value,
+            skim_ratio: Number(document.getElementById("skim_ratio").value),
+          },
+        };
+      }
+
+      async function loadBots() {
+        const bots = await api("/api/bots");
+        const body = document.getElementById("bots_body");
+        body.innerHTML = "";
+
+        for (const bot of bots) {
+          const metrics = bot.latest_metrics || {};
+          const pnl = Number(metrics.unrealized_pnl_quote || 0);
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${bot.name}</td>
+            <td>${bot.status}</td>
+            <td>${Number(metrics.total_equity_quote || 0).toFixed(2)}</td>
+            <td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${pnl.toFixed(2)}</td>
+            <td>
+              <div class="bot-actions">
+                <button data-start="${bot.id}">Start</button>
+                <button class="secondary" data-stop="${bot.id}">Stop</button>
+              </div>
+            </td>
+          `;
+          body.appendChild(tr);
+        }
+
+        body.querySelectorAll("button[data-start]").forEach((btn) => {
+          btn.onclick = async () => {
+            await api(`/api/bots/${btn.dataset.start}/start`, { method: "POST", body: JSON.stringify({}) });
+            await loadBots();
+          };
+        });
+
+        body.querySelectorAll("button[data-stop]").forEach((btn) => {
+          btn.onclick = async () => {
+            await api(`/api/bots/${btn.dataset.stop}/stop`, { method: "POST" });
+            await loadBots();
+          };
+        });
+      }
+
+      function showPopup(message) {
+        document.getElementById("popup_text").textContent = message;
+        document.getElementById("popup_backdrop").style.display = "flex";
+      }
+
+      async function loadAgents() {
+        const agents = await api("/api/agents");
+        const body = document.getElementById("agents_body");
+        body.innerHTML = "";
+
+        for (const agent of agents) {
+          const tr = document.createElement("tr");
+          let actionsHtml = `<span>-</span>`;
+          if (agent.approval_status === "pending") {
+            actionsHtml = `<div class="bot-actions"><button data-approve="${agent.id}">Approve</button><button class="secondary" data-reject="${agent.id}">Reject</button></div>`;
+          } else if (agent.approval_status === "approved") {
+            actionsHtml = `<button class="secondary" data-unapprove="${agent.id}">Unapprove</button>`;
+          } else if (agent.approval_status === "rejected") {
+            actionsHtml = `<button data-approve="${agent.id}">Approve</button>`;
+          }
+
+          tr.innerHTML = `
+            <td>${agent.name}</td>
+            <td>${agent.status}</td>
+            <td>${agent.approval_status}</td>
+            <td>
+              ${actionsHtml}
+            </td>
+          `;
+          body.appendChild(tr);
+        }
+
+        body.querySelectorAll("button[data-approve]").forEach((btn) => {
+          btn.onclick = async () => {
+            await api(`/api/agents/${btn.dataset.approve}/approve`, { method: "POST" });
+            await loadAgents();
+            await loadEvents();
+          };
+        });
+
+        body.querySelectorAll("button[data-reject]").forEach((btn) => {
+          btn.onclick = async () => {
+            await api(`/api/agents/${btn.dataset.reject}/reject`, { method: "POST" });
+            await loadAgents();
+            await loadEvents();
+          };
+        });
+
+        body.querySelectorAll("button[data-unapprove]").forEach((btn) => {
+          btn.onclick = async () => {
+            await api(`/api/agents/${btn.dataset.unapprove}/unapprove`, { method: "POST" });
+            await loadAgents();
+            await loadEvents();
+          };
+        });
+      }
+
+      async function loadEvents() {
+        const events = await api("/api/agent-events");
+        const list = document.getElementById("events_list");
+        list.innerHTML = "";
+
+        for (const event of events) {
+          if (event.event_type === "discovered" && !seenEventIds.has(event.id)) {
+            seenEventIds.add(event.id);
+            showPopup(event.message);
+          }
+
+          const item = document.createElement("div");
+          item.className = "event-item";
+          const timeLabel = new Date(event.timestamp).toLocaleString();
+          item.innerHTML = `
+            <div><strong>[${event.event_type}]</strong> ${event.message}</div>
+            <div class="event-time">${timeLabel}</div>
+          `;
+          list.appendChild(item);
+        }
+      }
+
+      document.getElementById("create").onclick = async () => {
+        const payload = {
+          name: document.getElementById("name").value,
+          config: currentConfig(),
+        };
+        await api("/api/bots", { method: "POST", body: JSON.stringify(payload) });
+        await loadBots();
+      };
+
+      document.getElementById("backtest").onclick = async () => {
+        const payload = { config: currentConfig() };
+        const result = await api("/api/backtest", { method: "POST", body: JSON.stringify(payload) });
+        document.getElementById("backtest_result").textContent = JSON.stringify(result, null, 2);
+      };
+
+      document.getElementById("popup_close").onclick = () => {
+        document.getElementById("popup_backdrop").style.display = "none";
+      };
+
+      loadBots();
+      loadAgents();
+      loadEvents();
+      setInterval(async () => {
+        await loadBots();
+        await loadAgents();
+        await loadEvents();
+      }, 5000);
+    </script>
+  </body>
+</html>
