@@ -1,3 +1,8 @@
+"""Database engine and session factory for the CryptoBot manager.
+
+Reads ``DB_URL`` from the environment (defaults to a local SQLite file)
+and exposes a ``get_db()`` FastAPI dependency for request-scoped sessions.
+"""
 from __future__ import annotations
 
 import os
@@ -14,6 +19,11 @@ Base = declarative_base()
 
 
 def get_db():
+    """
+    Yield a SQLAlchemy session and ensure it is closed after the request.
+
+    :return: A generator yielding a SQLAlchemy Session instance.
+    """
     db = SessionLocal()
     try:
         yield db

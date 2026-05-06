@@ -1,9 +1,20 @@
+"""Pre-trade profitability analysis for static grid configurations."""
 from __future__ import annotations
 
 from common.models import GridConfig
 
 
 def build_static_grid_profit_preview(grid: GridConfig, fee_rate: float) -> dict:
+    """
+    Compute per-trade profit for each adjacent level pair in a grid.
+
+    Returns a summary dict indicating whether every trade cycle is
+    profitable after accounting for fee_rate (buy + sell fees).
+
+    :param grid: Grid configuration with price range, levels, and order size.
+    :param fee_rate: The exchange fee rate per trade (e.g. 0.0025 for 0.25%).
+    :return: Dict with profitability summary, step sizes, and per-trade profit stats.
+    """
     step = (grid.upper_price - grid.lower_price) / (grid.levels - 1)
     levels = [grid.lower_price + i * step for i in range(grid.levels)]
 

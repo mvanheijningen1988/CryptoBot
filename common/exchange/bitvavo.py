@@ -1,3 +1,8 @@
+"""Live Bitvavo exchange adapter using websocket API v2.
+
+Authenticates via HMAC-SHA256, subscribes to ticker events for real-time
+prices, and executes market orders through the websocket action API.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +19,13 @@ from common.models import TradeSignal
 
 
 class BitvavoExchange(Exchange):
+    """Websocket-based Bitvavo exchange adapter.
+
+    Maintains a persistent websocket connection, a background reader
+    thread, and synchronous request/response helpers for order execution
+    and balance queries.
+    """
+
     def __init__(
         self,
         api_key: str,
@@ -22,7 +34,17 @@ class BitvavoExchange(Exchange):
         base_currency: str,
         quote_currency: str,
         ws_url: str = "wss://ws.bitvavo.com/v2/",
-    ):
+    ) -> None:
+        """
+        Create an adapter for a market using the given API credentials.
+
+        :param api_key: Bitvavo API key.
+        :param api_secret: Bitvavo API secret.
+        :param market: Trading pair symbol (e.g. 'BTC-EUR').
+        :param base_currency: Base currency code (e.g. 'BTC').
+        :param quote_currency: Quote currency code (e.g. 'EUR').
+        :param ws_url: Bitvavo websocket endpoint URL.
+        """
         self.api_key = api_key
         self.api_secret = api_secret
         self.market = market
@@ -46,12 +68,19 @@ class BitvavoExchange(Exchange):
         self.price_update_event = threading.Event()
 
     def _next_request_id(self) -> int:
+        """Thread-safe auto-incrementing request ID."""
         with self.lock:
             rid = self.request_id
             self.request_id += 1
             return rid
 
     def _create_signature(self, timestamp_ms: int) -> str:
+        """
+        Compute the HMAC-SHA256 signature for websocket authentication.
+
+        :param timestamp_ms: Current timestamp in milliseconds.
+        :return: Hex-encoded HMAC-SHA256 signature string.
+        """
         payload = f"{timestamp_ms}GET/v2/websocket"
         return hmac.new(
             self.api_secret.encode("utf-8"),
@@ -60,11 +89,26 @@ class BitvavoExchange(Exchange):
         ).hexdigest()
 
     def _send_json(self, payload: dict[str, Any]) -> None:
+        """
+        Send a JSON-encoded payload on the websocket.
+
+        :param payload: Dictionary to serialize and send.
+        :raises RuntimeError: If the websocket is not connected.
+        """
         if not self.ws:
             raise RuntimeError("Bitvavo websocket is not connected")
         self.ws.send(json.dumps(payload))
 
     def _call_action(self, action: str, body: dict[str, Any], timeout: float = 6.0) -> dict[str, Any]:
+        """
+        Send an action and block until the response arrives or timeout elapses.
+
+        :param action: The Bitvavo websocket action name.
+        :param body: Request body parameters.
+        :param timeout: Maximum seconds to wait for a response.
+        :return: The parsed response dictionary.
+        :raises TimeoutError: If no response arrives within the timeout.
+        """
         request_id = self._next_request_id()
         event = threading.Event()
         self.pending_events[request_id] = event
@@ -84,6 +128,14 @@ class BitvavoExchange(Exchange):
         return response
 
     def _extract_price(self, message: dict[str, Any]) -> float | None:
+        """
+        Try to extract a price from a websocket message.
+
+        Checks 'price', 'last', then midpoint of 'bestBid'/'bestAsk'.
+
+        :param message: Parsed websocket message dictionary.
+        :return: Extracted price as float, or None if not found.
+        """
         for key in ("price", "last"):
             if key in message:
                 try:
@@ -102,6 +154,14 @@ class BitvavoExchange(Exchange):
         return None
 
     def _handle_message(self, message_text: str) -> None:
+        """
+        Parse a raw websocket message and dispatch it.
+
+        Routes request/response pairs to pending events and updates
+        the latest price from ticker or market messages.
+
+        :param message_text: Raw JSON string received from the websocket.
+        """
         try:
             message = json.loads(message_text)
         except json.JSONDecodeError:
@@ -132,6 +192,7 @@ class BitvavoExchange(Exchange):
                 self.price_update_event.set()
 
     def _reader_loop(self) -> None:
+        """Background loop that reads from the websocket until stopped."""
         while self.running and self.ws:
             try:
                 raw = self.ws.recv()
@@ -142,6 +203,7 @@ class BitvavoExchange(Exchange):
         self.running = False
 
     def start(self) -> None:
+        """Open the websocket, authenticate, and subscribe to ticker events."""
         if self.running:
             return
 
@@ -180,6 +242,7 @@ class BitvavoExchange(Exchange):
         self._refresh_balances()
 
     def stop(self) -> None:
+        """Close the websocket and stop the reader thread."""
         self.running = False
         self.authenticated = False
         if self.ws:
@@ -190,6 +253,7 @@ class BitvavoExchange(Exchange):
         self.ws = None
 
     def _refresh_balances(self) -> None:
+        """Fetch latest balances from Bitvavo and update local state."""
         if not self.authenticated:
             return
         response = self._call_action("privateGetBalance", {})
@@ -210,6 +274,13 @@ class BitvavoExchange(Exchange):
                 self.base_balance = amount
 
     def get_price(self, fallback_price: float | None = None) -> float:
+        """
+        Return the latest known price, or fallback_price if not yet received.
+
+        :param fallback_price: Price to return when no live price is available.
+        :return: The current market price.
+        :raises RuntimeError: If no price is available and no fallback is given.
+        """
         if self.latest_price is not None:
             return self.latest_price
         if fallback_price is not None:
@@ -217,6 +288,13 @@ class BitvavoExchange(Exchange):
         raise RuntimeError("Bitvavo price is not available yet")
 
     def wait_for_price_update(self, last_price: float | None = None, timeout_seconds: float = 15.0) -> float:
+        """
+        Block until a price different from last_price arrives.
+
+        :param last_price: The previous price to compare against.
+        :param timeout_seconds: Maximum seconds to wait for a new price.
+        :return: The updated market price.
+        """
         current = self.latest_price
         if current is not None and current != last_price:
             return current
@@ -229,10 +307,19 @@ class BitvavoExchange(Exchange):
         return self.get_price(last_price)
 
     def get_balances(self) -> tuple[float, float]:
+        """Refresh and return ``(quote_balance, base_balance)`` from Bitvavo."""
         self._refresh_balances()
         return self.quote_balance, self.base_balance
 
     def execute(self, signal: TradeSignal, price: float | None = None) -> bool:
+        """
+        Place a market order for the given signal.
+
+        :param signal: The trade signal describing side and quote amount.
+        :param price: The market price for calculating sell amounts.
+        :return: True if the order succeeded, False on error.
+        :raises RuntimeError: If the websocket is not authenticated.
+        """
         if not self.authenticated:
             raise RuntimeError("Bitvavo websocket is not authenticated")
 

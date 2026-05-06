@@ -1,14 +1,32 @@
+"""SQLAlchemy ORM models for the CryptoBot manager database.
+
+Defines the ``User``, ``Agent``, and ``Bot`` tables used by the
+manager API for authentication, agent discovery, and bot lifecycle.
+"""
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from manager.app.database import Base
 
 
+class User(Base):
+    """Application user with role-based access and locale preference."""
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    username: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="viewer")
+    locale: Mapped[str] = mapped_column(String(8), default="en")
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Agent(Base):
+    """Remote agent node that can run bots on behalf of the manager."""
     __tablename__ = "agents"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -21,6 +39,7 @@ class Agent(Base):
 
 
 class Bot(Base):
+    """Trading bot instance with its strategy configuration and latest metrics."""
     __tablename__ = "bots"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

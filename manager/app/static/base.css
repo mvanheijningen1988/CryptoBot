@@ -1,0 +1,52 @@
+/* ──────────────────────────────────────────────────────────────
+   CryptoBot Manager – Shared Base Stylesheet
+   Common CSS custom properties, reset, typography, and base
+   form-element styles used by both login.css and dashboard.css.
+   ────────────────────────────────────────────────────────────── */
+
+/* ── Design tokens ── */
+
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --panel-soft: #334155;
+  --text: #e2e8f0;
+  --accent: #22d3ee;
+  --good: #10b981;
+  --bad: #ef4444;
+}
+
+/* ── Reset ── */
+
+* { box-sizing: border-box; }
+
+/* ── Base body ── */
+
+body {
+  margin: 0;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: var(--text);
+  background: radial-gradient(circle at 20% 20%, #1d4ed8 0%, transparent 35%),
+    radial-gradient(circle at 80% 0%, #0ea5e9 0%, transparent 35%), var(--bg);
+  min-height: 100vh;
+}
+
+/* ── Form elements (shared defaults) ── */
+
+label { display: block; font-size: 0.85rem; }
+
+input, select, button, textarea {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #475569;
+  background: var(--panel-soft);
+  color: var(--text);
+  padding: 8px;
+}
+
+button {
+  cursor: pointer;
+  background: linear-gradient(135deg, #0891b2, #2563eb);
+  border: none;
+  font-weight: 600;
+}

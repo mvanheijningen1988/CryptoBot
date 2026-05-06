@@ -1,0 +1,249 @@
+/* ──────────────────────────────────────────────────────────────
+   CryptoBot Manager – Dashboard Stylesheet
+   Covers: layout, cards, tables, modals, tooltips, market stats,
+   user bar, tabs, and responsive breakpoints.
+   ────────────────────────────────────────────────────────────── */
+
+@import url("base.css");
+
+/* ── Header / user bar ── */
+
+header {
+  padding: 16px 24px;
+  border-bottom: 1px solid #475569;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+h1 { margin: 0; font-size: 1.8rem; letter-spacing: 0.02em; }
+
+.user-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 0.85rem;
+}
+.user-bar .user-name { color: var(--accent); font-weight: 600; }
+.user-bar .role-badge {
+  background: #475569;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+}
+.user-bar select {
+  width: auto;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--text);
+  border: 1px solid #475569;
+}
+.lang-flags { display: flex; gap: 4px; }
+.lang-flag {
+  width: auto;
+  padding: 2px 6px;
+  font-size: 1.25rem;
+  line-height: 1;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity .15s, border-color .15s;
+}
+.lang-flag:hover { opacity: 0.8; }
+.lang-flag.active { opacity: 1; border-color: var(--accent); }
+.user-bar button {
+  width: auto;
+  padding: 4px 14px;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  background: #475569;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+}
+
+/* ── Main layout ── */
+
+main { padding: 16px; }
+
+/* ── Tabs ── */
+
+.tab-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid #334155;
+  margin-bottom: 16px;
+}
+.tab-btn {
+  width: auto;
+  padding: 10px 24px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: #94a3b8;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  margin-bottom: -2px;
+}
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: transparent;
+}
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+
+/* ── Dashboard grid / cards ── */
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.card {
+  background: color-mix(in srgb, var(--panel) 88%, black);
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 14px;
+}
+
+/* ── Form elements (dashboard overrides) ── */
+
+label { margin-top: 8px; }
+
+input, select, button, textarea {
+  margin-top: 4px;
+}
+button.secondary { background: #475569; }
+
+/* ── Tooltips ── */
+
+.info-tip {
+  position: relative;
+  display: inline-block;
+  cursor: help;
+  color: #94a3b8;
+  font-size: 0.85rem;
+  margin-left: 4px;
+}
+.info-tip::after { display: none; }
+
+.tip-popup {
+  position: fixed;
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  white-space: normal;
+  width: max-content;
+  max-width: min(260px, 90vw);
+  pointer-events: none;
+  z-index: 10000;
+  line-height: 1.35;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+}
+
+/* ── Balance hint ── */
+
+.balance-hint { font-size: 0.78rem; color: #94a3b8; margin-top: 2px; margin-bottom: 2px; }
+.balance-hint .bal-val { color: var(--accent); font-weight: 600; }
+
+/* ── Table ── */
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-size: 0.9rem; }
+.pnl-positive { color: var(--good); }
+.pnl-negative { color: var(--bad); }
+.bot-actions { display: flex; gap: 8px; }
+
+/* ── Agent popup (discovery notification) ── */
+
+.popup-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(2,6,23,0.65);
+  display: none; align-items: center; justify-content: center; z-index: 1000;
+}
+.popup {
+  width: min(460px, 92vw);
+  border-radius: 14px; border: 1px solid #475569;
+  background: #0f172a; padding: 16px;
+  box-shadow: 0 20px 40px rgba(15,23,42,0.45);
+}
+.popup h3 { margin: 0 0 8px; }
+.popup p { margin: 0 0 12px; color: #cbd5e1; }
+
+/* ── Event list ── */
+
+.events-list {
+  max-height: 220px; overflow: auto;
+  border: 1px solid #334155; border-radius: 10px; padding: 8px;
+}
+.event-item { border-bottom: 1px solid #334155; padding: 8px 4px; font-size: 0.9rem; }
+.event-item:last-child { border-bottom: none; }
+.event-time { color: #94a3b8; font-size: 0.8rem; }
+
+/* ── Profitability preview ── */
+
+.profit-preview {
+  margin-top: 10px; border: 1px solid #334155; border-radius: 10px;
+  padding: 10px; background: rgba(15,23,42,0.4); font-size: 0.9rem;
+}
+.profit-ok { color: #10b981; }
+.profit-warn { color: #f59e0b; }
+
+/* ── Market stats ── */
+
+.market-stats {
+  margin-top: 12px; border: 1px solid #334155; border-radius: 10px;
+  padding: 10px; background: rgba(15,23,42,0.4);
+}
+.market-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px; }
+.market-label { color: #94a3b8; font-size: 0.8rem; }
+.market-value { font-size: 1rem; font-weight: 600; }
+.market-positive { color: #10b981; }
+.market-negative { color: #ef4444; }
+
+/* ── Agent logs ── */
+
+.logs-list {
+  max-height: 260px; overflow: auto;
+  border: 1px solid #334155; border-radius: 10px; padding: 8px;
+}
+.log-item { border-bottom: 1px solid #334155; padding: 8px 4px; font-size: 0.9rem; }
+.log-item:last-child { border-bottom: none; }
+.log-category { color: #93c5fd; }
+
+/* ── Modal (create bot, logs) ── */
+
+.modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(2,6,23,0.72);
+  display: none; align-items: center; justify-content: center; z-index: 1100;
+}
+.modal {
+  width: min(980px, 95vw); max-height: 86vh; overflow: hidden;
+  border-radius: 14px; border: 1px solid #475569; background: #0b1220;
+  box-shadow: 0 20px 45px rgba(15,23,42,0.45);
+  display: grid; grid-template-rows: auto auto 1fr auto;
+}
+.modal-header, .modal-controls, .modal-footer { padding: 12px 14px; border-bottom: 1px solid #334155; }
+.modal-footer { border-top: 1px solid #334155; border-bottom: none; }
+.modal-title { margin: 0; }
+.modal-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
+.modal-body { padding: 10px 14px; overflow: auto; }
+
+/* ── Responsive ── */
+
+@media (max-width: 980px) {
+  main { padding: 8px; }
+  .dashboard-grid { grid-template-columns: 1fr; }
+}

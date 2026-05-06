@@ -1,3 +1,9 @@
+"""Shared Pydantic models for the CryptoBot system.
+
+Defines bot configuration, grid parameters, budget rules, trade signals,
+and the snapshot schema used by agents to report live metrics back to
+the manager.
+"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -6,10 +12,13 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-ProfitMode = Literal["compound", "skim"]
+ProfitMode = Literal["withdraw", "compound", "skim"]
+"""How unrealised profit is handled: keep (compound), withdraw, or skim a fraction."""
 
 
 class BudgetConfig(BaseModel):
+    """Capital allocation and profit-handling rules for a bot."""
+
     quote_budget: float = Field(default=0.0, ge=0)
     base_budget: float = Field(default=0.0, ge=0)
     profit_mode: ProfitMode = "compound"
@@ -17,6 +26,8 @@ class BudgetConfig(BaseModel):
 
 
 class GridConfig(BaseModel):
+    """Parameters defining a static grid: price range, number of levels, and order size."""
+
     lower_price: float = Field(..., gt=0)
     upper_price: float = Field(..., gt=0)
     levels: int = Field(..., ge=2)
@@ -24,6 +35,8 @@ class GridConfig(BaseModel):
 
 
 class BotConfig(BaseModel):
+    """Full configuration for a trading bot instance."""
+
     market: str
     base_currency: str
     quote_currency: str
@@ -35,11 +48,15 @@ class BotConfig(BaseModel):
 
 
 class TradeSignal(BaseModel):
+    """A directional trade instruction emitted by a strategy."""
+
     side: Literal["buy", "sell"]
     quote_amount: float = Field(..., gt=0)
 
 
 class BotSnapshot(BaseModel):
+    """Point-in-time metrics snapshot pushed from an agent to the manager."""
+
     bot_id: str
     timestamp: datetime
     price: float

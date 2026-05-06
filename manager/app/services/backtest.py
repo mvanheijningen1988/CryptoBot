@@ -1,3 +1,4 @@
+"""Simple back-test runner for evaluating strategy performance."""
 from __future__ import annotations
 
 import random
@@ -9,6 +10,17 @@ from common.strategy.static_grid import StaticGridStrategy
 
 
 def run_backtest(config: BotConfig, prices: list[float] | None = None) -> dict:
+    """
+    Run a back-test using a bot configuration over a list of prices.
+
+    If prices is omitted, 500 random-walk prices are generated from
+    ``config.start_price``.
+
+    :param config: Full bot configuration (grid, budget, market settings).
+    :param prices: Optional list of historical prices to replay.
+    :return: Dict with initial_equity_quote, final_equity_quote,
+        total_pnl_quote, and trades_executed.
+    """
     if not prices:
         prices = []
         p = config.start_price

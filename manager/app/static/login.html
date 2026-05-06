@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CryptoBot – Login</title>
+    <link rel="stylesheet" href="/static/login.css" />
+  </head>
+  <body>
+    <!-- Login form -->
+    <div class="login-card">
+      <h1 id="login_title">Login</h1>
+      <label id="lbl_user">Username</label>
+      <input id="username" type="text" autocomplete="username" />
+      <label id="lbl_pass">Password</label>
+      <input id="password" type="password" autocomplete="current-password" />
+      <div id="error_msg" class="error"></div>
+      <button id="btn_login">Login</button>
+      <div class="lang-switch">
+        <a id="lang_en" class="active" data-lang="en">EN</a> |
+        <a id="lang_nl" data-lang="nl">NL</a>
+      </div>
+    </div>
+
+    <!-- Password-change overlay (shown when must_change_password is true) -->
+    <div id="pw_overlay" class="pw-overlay">
+      <div class="pw-card">
+        <h1 id="pw_title">Change Password</h1>
+        <p id="pw_msg">You must change your password before continuing.</p>
+        <label id="lbl_new_pw">New password</label>
+        <input id="new_password" type="password" autocomplete="new-password" />
+        <label id="lbl_confirm_pw">Confirm password</label>
+        <input id="confirm_password" type="password" autocomplete="new-password" />
+        <div id="pw_error" class="error"></div>
+        <button id="btn_change_pw">Change password</button>
+      </div>
+    </div>
+
+    <!-- Scripts: i18n dictionary must load before login-app.js -->
+    <script src="/static/i18n.js"></script>
+    <script src="/static/login-app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,86 @@
+/* ──────────────────────────────────────────────────────────────
+   CryptoBot Manager – Login Page Stylesheet
+   Covers: login card, form elements, password-change overlay,
+   language switcher, and error messages.
+   ────────────────────────────────────────────────────────────── */
+
+@import url("base.css");
+
+/* ── Login-specific body layout ── */
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Login card ── */
+
+.login-card {
+  background: color-mix(in srgb, var(--panel) 88%, black);
+  border: 1px solid #334155;
+  border-radius: 14px;
+  padding: 32px;
+  width: min(400px, 92vw);
+}
+
+h1 { margin: 0 0 24px; font-size: 1.6rem; text-align: center; }
+
+/* ── Form elements (login overrides) ── */
+
+label { margin-top: 12px; }
+
+input, button {
+  padding: 10px;
+  margin-top: 6px;
+  font-size: 0.95rem;
+}
+
+button {
+  margin-top: 20px;
+}
+
+/* ── Error message ── */
+
+.error {
+  color: var(--bad);
+  font-size: 0.85rem;
+  margin-top: 8px;
+  display: none;
+}
+
+/* ── Language switcher ── */
+
+.lang-switch {
+  text-align: center;
+  margin-top: 16px;
+  font-size: 0.8rem;
+  color: #94a3b8;
+}
+.lang-switch a {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+  margin: 0 6px;
+}
+.lang-switch a.active { text-decoration: underline; font-weight: 600; }
+
+/* ── Password-change overlay ── */
+
+.pw-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.75);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.pw-card {
+  background: #0f172a;
+  border: 1px solid #475569;
+  border-radius: 14px;
+  padding: 32px;
+  width: min(400px, 92vw);
+}
+.pw-card p { color: #f59e0b; font-size: 0.85rem; margin: 0 0 12px; }

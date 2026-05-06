@@ -4,473 +4,186 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CryptoBot Manager</title>
-    <style>
-      :root {
-        --bg: #0f172a;
-        --panel: #1e293b;
-        --panel-soft: #334155;
-        --text: #e2e8f0;
-        --accent: #22d3ee;
-        --good: #10b981;
-        --bad: #ef4444;
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        margin: 0;
-        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-        color: var(--text);
-        background: radial-gradient(circle at 20% 20%, #1d4ed8 0%, transparent 35%),
-          radial-gradient(circle at 80% 0%, #0ea5e9 0%, transparent 35%), var(--bg);
-        min-height: 100vh;
-      }
-
-      header {
-        padding: 24px;
-        border-bottom: 1px solid #475569;
-      }
-
-      h1 {
-        margin: 0;
-        font-size: 1.8rem;
-        letter-spacing: 0.02em;
-      }
-
-      main {
-        display: grid;
-        grid-template-columns: 360px 1fr;
-        gap: 16px;
-        padding: 16px;
-      }
-
-      .card {
-        background: color-mix(in srgb, var(--panel) 88%, black);
-        border: 1px solid #334155;
-        border-radius: 12px;
-        padding: 14px;
-      }
-
-      label {
-        display: block;
-        font-size: 0.85rem;
-        margin-top: 8px;
-      }
-
-      .info-tip {
-        position: relative;
-        display: inline-block;
-        cursor: help;
-        color: #94a3b8;
-        font-size: 0.85rem;
-        margin-left: 4px;
-      }
-
-      .info-tip::after {
-        display: none;
-      }
-
-      .tip-popup {
-        position: fixed;
-        background: #1e293b;
-        color: #e2e8f0;
-        border: 1px solid #475569;
-        border-radius: 8px;
-        padding: 8px 10px;
-        font-size: 0.78rem;
-        white-space: normal;
-        width: max-content;
-        max-width: min(260px, 90vw);
-        pointer-events: none;
-        z-index: 10000;
-        line-height: 1.35;
-        box-shadow: 0 4px 16px rgba(0,0,0,0.35);
-      }
-
-      .balance-hint {
-        font-size: 0.78rem;
-        color: #94a3b8;
-        margin-top: 2px;
-        margin-bottom: 2px;
-      }
-
-      .balance-hint .bal-val {
-        color: var(--accent);
-        font-weight: 600;
-      }
-
-      input,
-      select,
-      button,
-      textarea {
-        width: 100%;
-        border-radius: 8px;
-        border: 1px solid #475569;
-        background: var(--panel-soft);
-        color: var(--text);
-        padding: 8px;
-        margin-top: 4px;
-      }
-
-      button {
-        cursor: pointer;
-        background: linear-gradient(135deg, #0891b2, #2563eb);
-        border: none;
-        font-weight: 600;
-      }
-
-      button.secondary {
-        background: #475569;
-      }
-
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-
-      th,
-      td {
-        text-align: left;
-        border-bottom: 1px solid #334155;
-        padding: 8px;
-        font-size: 0.9rem;
-      }
-
-      .pnl-positive {
-        color: var(--good);
-      }
-
-      .pnl-negative {
-        color: var(--bad);
-      }
-
-      .bot-actions {
-        display: flex;
-        gap: 8px;
-      }
-
-      .layout-right {
-        display: grid;
-        grid-template-rows: auto auto;
-        gap: 16px;
-      }
-
-      .popup-backdrop {
-        position: fixed;
-        inset: 0;
-        background: rgba(2, 6, 23, 0.65);
-        display: none;
-        align-items: center;
-        justify-content: center;
-        z-index: 1000;
-      }
-
-      .popup {
-        width: min(460px, 92vw);
-        border-radius: 14px;
-        border: 1px solid #475569;
-        background: #0f172a;
-        padding: 16px;
-        box-shadow: 0 20px 40px rgba(15, 23, 42, 0.45);
-      }
-
-      .popup h3 {
-        margin: 0 0 8px;
-      }
-
-      .popup p {
-        margin: 0 0 12px;
-        color: #cbd5e1;
-      }
-
-      .events-list {
-        max-height: 220px;
-        overflow: auto;
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 8px;
-      }
-
-      .event-item {
-        border-bottom: 1px solid #334155;
-        padding: 8px 4px;
-        font-size: 0.9rem;
-      }
-
-      .event-item:last-child {
-        border-bottom: none;
-      }
-
-      .event-time {
-        color: #94a3b8;
-        font-size: 0.8rem;
-      }
-
-      .profit-preview {
-        margin-top: 10px;
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 10px;
-        background: rgba(15, 23, 42, 0.4);
-        font-size: 0.9rem;
-      }
-
-      .profit-ok {
-        color: #10b981;
-      }
-
-      .profit-warn {
-        color: #f59e0b;
-      }
-
-      .market-stats {
-        margin-top: 12px;
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 10px;
-        background: rgba(15, 23, 42, 0.4);
-      }
-
-      .market-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 8px;
-      }
-
-      .market-label {
-        color: #94a3b8;
-        font-size: 0.8rem;
-      }
-
-      .market-value {
-        font-size: 1rem;
-        font-weight: 600;
-      }
-
-      .market-positive {
-        color: #10b981;
-      }
-
-      .market-negative {
-        color: #ef4444;
-      }
-
-      .logs-list {
-        max-height: 260px;
-        overflow: auto;
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 8px;
-      }
-
-      .log-item {
-        border-bottom: 1px solid #334155;
-        padding: 8px 4px;
-        font-size: 0.9rem;
-      }
-
-      .log-item:last-child {
-        border-bottom: none;
-      }
-
-      .log-category {
-        color: #93c5fd;
-      }
-
-      .modal-backdrop {
-        position: fixed;
-        inset: 0;
-        background: rgba(2, 6, 23, 0.72);
-        display: none;
-        align-items: center;
-        justify-content: center;
-        z-index: 1100;
-      }
-
-      .modal {
-        width: min(980px, 95vw);
-        max-height: 86vh;
-        overflow: hidden;
-        border-radius: 14px;
-        border: 1px solid #475569;
-        background: #0b1220;
-        box-shadow: 0 20px 45px rgba(15, 23, 42, 0.45);
-        display: grid;
-        grid-template-rows: auto auto 1fr auto;
-      }
-
-      .modal-header,
-      .modal-controls,
-      .modal-footer {
-        padding: 12px 14px;
-        border-bottom: 1px solid #334155;
-      }
-
-      .modal-footer {
-        border-top: 1px solid #334155;
-        border-bottom: none;
-      }
-
-      .modal-title {
-        margin: 0;
-      }
-
-      .modal-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 10px;
-      }
-
-      .modal-body {
-        padding: 10px 14px;
-        overflow: auto;
-      }
-
-      @media (max-width: 980px) {
-        main {
-          grid-template-columns: 1fr;
-        }
-      }
-    </style>
+    <link rel="stylesheet" href="/static/dashboard.css" />
   </head>
   <body>
     <header>
-      <h1>CryptoBot Manager Dashboard</h1>
+      <h1 data-i18n="app_title">CryptoBot Manager Dashboard</h1>
+      <div class="user-bar">
+        <span class="user-name" id="user_display"></span>
+        <span class="role-badge" id="role_display"></span>
+        <div class="lang-flags">
+          <button class="lang-flag" data-lang="en" title="English">🇬🇧</button>
+          <button class="lang-flag" data-lang="nl" title="Nederlands">🇳🇱</button>
+        </div>
+        <button id="btn_logout" data-i18n="btn_logout">Logout</button>
+      </div>
     </header>
 
     <main>
-      <section class="card">
-        <h2>Create Bot</h2>
-        <label>Name <input id="name" value="GridBot-1" /></label>
-        <label>Market
-          <select id="market">
-            <option value="BTC-EUR">BTC-EUR</option>
-          </select>
-        </label>
-        <label>Mode
-          <select id="mode">
-            <option value="simulation">simulation</option>
-            <option value="live">live (placeholder)</option>
-          </select>
-        </label>
+      <!-- Tab bar -->
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="tab_dashboard" data-i18n="tab_dashboard">Dashboard</button>
+        <button class="tab-btn" data-tab="tab_agents" data-i18n="tab_agents">Agents</button>
+      </div>
 
-        <div class="market-stats">
-          <div class="market-label">Market summary (24h)</div>
-          <div class="market-grid">
-            <div>
-              <div class="market-label">Last price</div>
-              <div id="market_last_price" class="market-value">-</div>
-            </div>
-            <div>
-              <div class="market-label">24h change</div>
-              <div id="market_change" class="market-value">-</div>
-            </div>
-            <div>
-              <div class="market-label">24h volume (base)</div>
-              <div id="market_volume_base" class="market-value">-</div>
-            </div>
-            <div>
-              <div class="market-label">24h volume (quote)</div>
-              <div id="market_volume_quote" class="market-value">-</div>
-            </div>
-          </div>
+      <!-- Dashboard tab -->
+      <div id="tab_dashboard" class="tab-pane active">
+        <div style="margin-bottom:12px" id="new_bot_wrapper">
+          <button id="open_create_bot" style="width:auto;padding:8px 20px;" data-i18n="btn_new_bot">+ New Bot</button>
         </div>
+        <div class="dashboard-grid">
+          <section class="card">
+            <h2 data-i18n="bots_title">Bots</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th data-i18n="th_name">Name</th>
+                  <th data-i18n="th_status">Status</th>
+                  <th data-i18n="th_equity">Equity</th>
+                  <th data-i18n="th_pnl">PnL</th>
+                  <th data-i18n="th_actions">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="bots_body"></tbody>
+            </table>
+          </section>
+          <section class="card">
+            <h2 data-i18n="notifications_title">Agent Notifications</h2>
+            <div id="events_list" class="events-list"></div>
+          </section>
+        </div>
+        <div style="margin-top:12px">
+          <section class="card">
+            <h3 data-i18n="backtest_title">Backtest (quick)</h3>
+            <button id="backtest" class="secondary" data-i18n="btn_run_backtest">Run backtest on current form</button>
+            <pre id="backtest_result"></pre>
+          </section>
+        </div>
+      </div>
 
-        <label>Start price <span class="info-tip" data-tip="De referentieprijs waarmee de grid wordt opgebouwd. In simulatie is dit de startkoers; in live mode wordt het als fallback gebruikt totdat de echte marktprijs binnenkomt.">&#9432;</span> <input id="start_price" type="number" value="100" /></label>
-
-        <h3>Grid</h3>
-        <label>Lower <span class="info-tip" data-tip="De ondergrens van het grid. Orders worden alleen geplaatst boven of op deze prijs.">&#9432;</span> <input id="lower_price" type="number" value="90" /></label>
-        <label>Upper <span class="info-tip" data-tip="De bovengrens van het grid. Orders worden alleen geplaatst onder of op deze prijs.">&#9432;</span> <input id="upper_price" type="number" value="110" /></label>
-        <label>Levels <span class="info-tip" data-tip="Het aantal grid-niveaus (prijslijnen) tussen lower en upper. Meer levels = kleinere stappen, meer orders.">&#9432;</span> <input id="levels" type="number" value="10" /></label>
-        <label>Order size (quote) <span class="info-tip" data-tip="Het bedrag in quote-valuta (bijv. EUR) dat per individuele grid-order wordt ingezet.">&#9432;</span> <input id="order_size_quote" type="number" value="25" /></label>
-        <label>Fee rate (%) <span class="info-tip" data-tip="Het fee-percentage dat de exchange per trade in rekening brengt (bijv. 0.25% bij Bitvavo).">&#9432;</span> <input id="fee_rate_percent" type="number" step="0.01" value="0.25" /></label>
-        <button id="check_grid_profit" class="secondary">Check grid profitability</button>
-        <div id="grid_profit_result" class="profit-preview">Nog geen berekening.</div>
-
-        <h3>Budget</h3>
-        <div class="balance-hint">Beschikbaar: <span class="bal-val" id="avail_quote">-</span> quote &nbsp;|&nbsp; <span class="bal-val" id="avail_base">-</span> base</div>
-        <label>Quote budget <span class="info-tip" data-tip="Het totale bedrag in quote-valuta (bijv. EUR) dat de bot mag gebruiken voor het plaatsen van buy-orders.">&#9432;</span> <input id="quote_budget" type="number" value="1000" /></label>
-        <label>Base budget <span class="info-tip" data-tip="Het totale bedrag in base-valuta (bijv. BTC) dat de bot mag gebruiken voor het plaatsen van sell-orders.">&#9432;</span> <input id="base_budget" type="number" value="0" /></label>
-        <label>Profit mode <span class="info-tip" data-tip="Compound: herinvesteert winst in het grid. Skim: neemt een deel van de winst apart op basis van de skim ratio.">&#9432;</span>
-          <select id="profit_mode">
-            <option value="compound">compound</option>
-            <option value="skim">skim</option>
-          </select>
-        </label>
-        <label>Skim ratio <span class="info-tip" data-tip="Het deel van de winst dat apart wordt gezet (bijv. 0.5 = 50% winst afromen). Alleen actief bij profit mode 'skim'.">&#9432;</span> <input id="skim_ratio" type="number" step="0.05" value="0.5" /></label>
-        <button id="create">Create bot</button>
-
-        <h3>Backtest (quick)</h3>
-        <button id="backtest" class="secondary">Run backtest on current form</button>
-        <pre id="backtest_result"></pre>
-      </section>
-
-      <section class="card">
-        <h2>Bots</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Status</th>
-              <th>Equity</th>
-              <th>PnL</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="bots_body"></tbody>
-        </table>
-      </section>
-
-      <section class="card">
-        <h2>Agents</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Status</th>
-              <th>Approval</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="agents_body"></tbody>
-        </table>
-      </section>
-
-      <section class="card">
-        <h2>Agent Notifications</h2>
-        <div id="events_list" class="events-list"></div>
-      </section>
-
+      <!-- Agents tab -->
+      <div id="tab_agents" class="tab-pane">
+        <section class="card">
+          <h2 data-i18n="agents_title">Agents</h2>
+          <table>
+            <thead>
+              <tr>
+                <th data-i18n="th_name">Name</th>
+                <th data-i18n="th_status">Status</th>
+                <th data-i18n="th_bots">Bots</th>
+                <th data-i18n="th_approval">Approval</th>
+                <th data-i18n="th_actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="agents_body"></tbody>
+          </table>
+        </section>
+      </div>
     </main>
 
-    <div id="popup_backdrop" class="popup-backdrop" role="dialog" aria-modal="true">
-      <div class="popup">
-        <h3>Nieuwe agent ontdekt</h3>
-        <p id="popup_text"></p>
-        <button id="popup_close">Sluiten</button>
+    <!-- Create Bot modal -->
+    <div id="create_bot_modal" class="modal-backdrop" role="dialog" aria-modal="true">
+      <div class="modal" style="width:min(520px,95vw);grid-template-rows:auto 1fr auto;">
+        <div class="modal-header">
+          <h3 class="modal-title" data-i18n="create_bot_title">Create Bot</h3>
+        </div>
+        <div class="modal-body">
+          <label><span data-i18n="lbl_name">Name</span> <input id="name" value="GridBot-1" /></label>
+          <label><span data-i18n="lbl_market">Market</span>
+            <select id="market"><option value="BTC-EUR">BTC-EUR</option></select>
+          </label>
+          <label><span data-i18n="lbl_mode">Mode</span>
+            <select id="mode">
+              <option value="live">live</option>
+              <option value="simulation">simulation</option>
+            </select>
+          </label>
+
+          <div class="market-stats">
+            <div class="market-label" data-i18n="market_summary">Market summary (24h)</div>
+            <div class="market-grid">
+              <div>
+                <div class="market-label" data-i18n="lbl_last_price">Last price</div>
+                <div id="market_last_price" class="market-value">-</div>
+              </div>
+              <div>
+                <div class="market-label" data-i18n="lbl_24h_change">24h change</div>
+                <div id="market_change" class="market-value">-</div>
+              </div>
+              <div>
+                <div class="market-label" data-i18n="lbl_24h_vol_base">24h volume (base)</div>
+                <div id="market_volume_base" class="market-value">-</div>
+              </div>
+              <div>
+                <div class="market-label" data-i18n="lbl_24h_vol_quote">24h volume (quote)</div>
+                <div id="market_volume_quote" class="market-value">-</div>
+              </div>
+            </div>
+          </div>
+
+          <label id="start_price_label" style="display:none"><span data-i18n="lbl_start_price">Start price</span> <span class="info-tip" data-tip-key="tip_start_price">&#9432;</span> <input id="start_price" type="number" value="100" /></label>
+
+          <hr style="border:none;border-top:1px solid #334155;margin:14px 0;">
+          <h3 style="margin-top:0" data-i18n="lbl_grid">Grid</h3>
+          <label><span data-i18n="lbl_lower">Lower</span> <span class="info-tip" data-tip-key="tip_lower">&#9432;</span> <input id="lower_price" type="number" value="90" /></label>
+          <label><span data-i18n="lbl_upper">Upper</span> <span class="info-tip" data-tip-key="tip_upper">&#9432;</span> <input id="upper_price" type="number" value="110" /></label>
+          <label><span data-i18n="lbl_levels">Levels</span> <span class="info-tip" data-tip-key="tip_levels">&#9432;</span> <input id="levels" type="number" value="10" /></label>
+          <label><span data-i18n="lbl_order_size">Order size (quote)</span> <span class="info-tip" data-tip-key="tip_order_size">&#9432;</span> <input id="order_size_quote" type="number" value="25" /></label>
+          <label><span data-i18n="lbl_fee_rate">Fee rate (%)</span> <span class="info-tip" data-tip-key="tip_fee_rate">&#9432;</span> <input id="fee_rate_percent" type="number" step="0.01" value="0.25" /></label>
+          <button id="check_grid_profit" class="secondary" data-i18n="btn_check_profit">Check grid profitability</button>
+          <div id="grid_profit_result" class="profit-preview" data-i18n="no_calculation">No calculation yet.</div>
+
+          <hr style="border:none;border-top:1px solid #334155;margin:14px 0;">
+          <h3 style="margin-top:0" data-i18n="lbl_budget">Budget</h3>
+          <div class="balance-hint"><span data-i18n="lbl_available">Available:</span> <span class="bal-val" id="avail_quote">-</span> <span data-i18n="lbl_quote">quote</span> &nbsp;|&nbsp; <span class="bal-val" id="avail_base">-</span> <span data-i18n="lbl_base">base</span></div>
+          <label><span data-i18n="lbl_quote_budget">Quote budget</span> <span class="info-tip" data-tip-key="tip_quote_budget">&#9432;</span> <input id="quote_budget" type="number" value="0" /></label>
+          <label><span data-i18n="lbl_profit_mode">Profit mode</span> <span class="info-tip" data-tip-key="tip_profit_mode">&#9432;</span>
+            <select id="profit_mode">
+              <option value="withdraw" selected>withdraw</option>
+              <option value="compound">compound</option>
+              <option value="skim">skim</option>
+            </select>
+          </label>
+          <label id="skim_ratio_label" style="display:none"><span data-i18n="lbl_skim_ratio">Skim ratio</span> <span class="info-tip" data-tip-key="tip_skim_ratio">&#9432;</span> <input id="skim_ratio" type="number" step="0.05" value="0.5" /></label>
+        </div>
+        <div class="modal-footer">
+          <div class="bot-actions">
+            <button id="create" data-i18n="btn_create_bot">Create bot</button>
+            <button id="cancel_create_bot" class="secondary" data-i18n="btn_cancel">Cancel</button>
+          </div>
+        </div>
       </div>
     </div>
 
+    <!-- Agent discovery popup -->
+    <div id="popup_backdrop" class="popup-backdrop" role="dialog" aria-modal="true">
+      <div class="popup">
+        <h3 data-i18n="popup_new_agent">New agent discovered</h3>
+        <p id="popup_text"></p>
+        <button id="popup_close" data-i18n="btn_close">Close</button>
+      </div>
+    </div>
+
+    <!-- Agent logs modal -->
     <div id="agent_logs_modal" class="modal-backdrop" role="dialog" aria-modal="true">
       <div class="modal">
         <div class="modal-header">
-          <h3 class="modal-title">Agent Logs Stream</h3>
+          <h3 class="modal-title" data-i18n="logs_title">Agent Logs Stream</h3>
         </div>
         <div class="modal-controls">
           <div class="modal-grid">
-            <label>Agent
+            <label><span data-i18n="lbl_agent">Agent</span>
               <input id="modal_selected_agent_id" readonly />
             </label>
-            <label>Category
+            <label><span data-i18n="lbl_category">Category</span>
               <select id="modal_log_category">
-                <option value="">all</option>
-                <option value="system">system</option>
-                <option value="trading">trading</option>
+                <option value="" data-i18n="lbl_all">all</option>
+                <option value="system" data-i18n="lbl_system">system</option>
+                <option value="trading" data-i18n="lbl_trading">trading</option>
               </select>
             </label>
-            <label>Max logs
+            <label><span data-i18n="lbl_max_logs">Max logs</span>
               <input id="modal_agent_logs_limit" type="number" value="200" min="1" max="1000" />
             </label>
           </div>
@@ -480,663 +193,15 @@
         </div>
         <div class="modal-footer">
           <div class="bot-actions">
-            <button id="modal_refresh_agent_logs" class="secondary">Refresh now</button>
-            <button id="modal_close_agent_logs">Close</button>
+            <button id="modal_refresh_agent_logs" class="secondary" data-i18n="btn_refresh">Refresh now</button>
+            <button id="modal_close_agent_logs" data-i18n="btn_close">Close</button>
           </div>
         </div>
       </div>
     </div>
 
-    <script>
-      const seenEventIds = new Set();
-      let lastGridPreview = null;
-      let selectedAgentId = null;
-      let logsModalOpen = false;
-      let marketSocket = null;
-      let marketSocketMarket = null;
-      let marketReconnectTimer = null;
-      let marketSnapshot = null;
-      const marketMeta = new Map();
-
-      async function api(url, options = {}) {
-        const res = await fetch(url, {
-          headers: { "Content-Type": "application/json" },
-          ...options,
-        });
-        if (!res.ok) {
-          const txt = await res.text();
-          throw new Error(txt || `HTTP ${res.status}`);
-        }
-        return res.headers.get("content-type")?.includes("application/json") ? res.json() : res.text();
-      }
-
-      function currentConfig() {
-        const market = document.getElementById("market").value;
-        const marketInfo = marketMeta.get(market) || {};
-        const split = market.split("-");
-        const baseCurrency = marketInfo.base || split[0] || "";
-        const quoteCurrency = marketInfo.quote || split[1] || "";
-
-        return {
-          market,
-          base_currency: baseCurrency,
-          quote_currency: quoteCurrency,
-          mode: document.getElementById("mode").value,
-          strategy: "static_grid",
-          start_price: Number(document.getElementById("start_price").value),
-          grid: {
-            lower_price: Number(document.getElementById("lower_price").value),
-            upper_price: Number(document.getElementById("upper_price").value),
-            levels: Number(document.getElementById("levels").value),
-            order_size_quote: Number(document.getElementById("order_size_quote").value),
-          },
-          budget: {
-            quote_budget: Number(document.getElementById("quote_budget").value),
-            base_budget: Number(document.getElementById("base_budget").value),
-            profit_mode: document.getElementById("profit_mode").value,
-            skim_ratio: Number(document.getElementById("skim_ratio").value),
-          },
-        };
-      }
-
-      function formatNumber(value, digits = 6) {
-        if (value === null || value === undefined || Number.isNaN(Number(value))) {
-          return "-";
-        }
-        return Number(value).toLocaleString(undefined, {
-          minimumFractionDigits: 0,
-          maximumFractionDigits: digits,
-        });
-      }
-
-      function renderMarketSummary(summary) {
-        const lastEl = document.getElementById("market_last_price");
-        const changeEl = document.getElementById("market_change");
-        const volBaseEl = document.getElementById("market_volume_base");
-        const volQuoteEl = document.getElementById("market_volume_quote");
-
-        const last = Number(summary.last_price ?? summary.last ?? 0);
-        const open = Number(summary.open_24h ?? summary.open ?? 0);
-        const volumeBase = Number(summary.volume_24h_base ?? summary.volume ?? 0);
-        const volumeQuote = Number(summary.volume_24h_quote ?? summary.volumeQuote ?? 0);
-
-        let diffAbs = Number(summary.diff_24h_abs ?? NaN);
-        let diffPct = Number(summary.diff_24h_pct ?? NaN);
-        if (Number.isNaN(diffAbs) || Number.isNaN(diffPct)) {
-          diffAbs = open > 0 ? last - open : 0;
-          diffPct = open > 0 ? (diffAbs / open) * 100 : 0;
-        }
-
-        lastEl.textContent = formatNumber(last, 8);
-        changeEl.textContent = `${diffAbs >= 0 ? "+" : ""}${formatNumber(diffAbs, 8)} (${diffPct >= 0 ? "+" : ""}${formatNumber(diffPct, 4)}%)`;
-        changeEl.classList.remove("market-positive", "market-negative");
-        changeEl.classList.add(diffAbs >= 0 ? "market-positive" : "market-negative");
-
-        lastEl.classList.remove("market-positive", "market-negative");
-        lastEl.classList.add(diffAbs >= 0 ? "market-positive" : "market-negative");
-
-        volBaseEl.textContent = formatNumber(volumeBase, 8);
-        volQuoteEl.textContent = formatNumber(volumeQuote, 2);
-      }
-
-      function resetMarketSummaryToNA() {
-        const lastEl = document.getElementById("market_last_price");
-        const changeEl = document.getElementById("market_change");
-        const volBaseEl = document.getElementById("market_volume_base");
-        const volQuoteEl = document.getElementById("market_volume_quote");
-
-        lastEl.textContent = "N/A";
-        changeEl.textContent = "N/A";
-        volBaseEl.textContent = "N/A";
-        volQuoteEl.textContent = "N/A";
-        changeEl.classList.remove("market-positive", "market-negative");
-        lastEl.classList.remove("market-positive", "market-negative");
-      }
-
-      async function loadMarkets() {
-        const marketSelect = document.getElementById("market");
-        try {
-          const markets = await api("/api/markets?status=trading");
-          const currentValue = marketSelect.value;
-          marketSelect.innerHTML = "";
-          marketMeta.clear();
-
-          for (const item of markets) {
-            marketMeta.set(item.market, item);
-            const option = document.createElement("option");
-            option.value = item.market;
-            option.textContent = item.market;
-            marketSelect.appendChild(option);
-          }
-
-          if (currentValue && marketMeta.has(currentValue)) {
-            marketSelect.value = currentValue;
-          } else if (marketMeta.has("BTC-EUR")) {
-            marketSelect.value = "BTC-EUR";
-          }
-        } catch (err) {
-          // Keep existing select value if API call fails.
-        }
-      }
-
-      async function loadMarketSummary() {
-        const market = document.getElementById("market").value.trim();
-        if (!market) {
-          resetMarketSummaryToNA();
-          return;
-        }
-
-        try {
-          const summary = await api(`/api/market/summary?market=${encodeURIComponent(market)}`);
-          marketSnapshot = {
-            market: summary.market,
-            last: Number(summary.last_price ?? 0),
-            open: Number(summary.open_24h ?? 0),
-            volume: Number(summary.volume_24h_base ?? 0),
-            volumeQuote: Number(summary.volume_24h_quote ?? 0),
-          };
-          renderMarketSummary(summary);
-        } catch (err) {
-          resetMarketSummaryToNA();
-        }
-      }
-
-      async function loadBalances() {
-        const market = document.getElementById("market").value.trim();
-        const quoteEl = document.getElementById("avail_quote");
-        const baseEl = document.getElementById("avail_base");
-        quoteEl.textContent = "-";
-        baseEl.textContent = "-";
-
-        if (!market) return;
-
-        const parts = market.split("-");
-        if (parts.length !== 2) return;
-        const [baseSym, quoteSym] = parts;
-
-        try {
-          const [baseData, quoteData] = await Promise.all([
-            api(`/api/balance?symbol=${encodeURIComponent(baseSym)}`),
-            api(`/api/balance?symbol=${encodeURIComponent(quoteSym)}`),
-          ]);
-          baseEl.textContent = `${Number(baseData.available).toFixed(8)} ${baseSym}`;
-          quoteEl.textContent = `${Number(quoteData.available).toFixed(2)} ${quoteSym}`;
-        } catch (err) {
-          quoteEl.textContent = "n/a";
-          baseEl.textContent = "n/a";
-        }
-      }
-
-      function closeMarketSocket() {
-        if (marketReconnectTimer) {
-          clearTimeout(marketReconnectTimer);
-          marketReconnectTimer = null;
-        }
-        if (marketSocket) {
-          try {
-            marketSocket.onopen = null;
-            marketSocket.onmessage = null;
-            marketSocket.onclose = null;
-            marketSocket.onerror = null;
-            marketSocket.close();
-          } catch (err) {
-            // Ignore close errors.
-          }
-        }
-        marketSocket = null;
-      }
-
-      function handleMarketSocketMessage(rawMessage) {
-        let msg;
-        try {
-          msg = JSON.parse(rawMessage);
-        } catch (err) {
-          return;
-        }
-
-        if (!msg || typeof msg !== "object") {
-          return;
-        }
-
-        if (msg.market && marketSocketMarket && msg.market !== marketSocketMarket) {
-          return;
-        }
-
-        const hasMarketPayload =
-          msg.market ||
-          msg.last ||
-          msg.open ||
-          msg.volume ||
-          msg.volumeQuote ||
-          msg.price ||
-          msg.bestBid ||
-          msg.bestAsk;
-
-        if (!hasMarketPayload) {
-          return;
-        }
-
-        if (!marketSnapshot) {
-          marketSnapshot = {
-            market: marketSocketMarket,
-            last: 0,
-            open: 0,
-            volume: 0,
-            volumeQuote: 0,
-          };
-        }
-
-        if (msg.last !== undefined) {
-          marketSnapshot.last = Number(msg.last);
-        } else if (msg.price !== undefined) {
-          marketSnapshot.last = Number(msg.price);
-        } else if (msg.bestBid !== undefined && msg.bestAsk !== undefined) {
-          marketSnapshot.last = (Number(msg.bestBid) + Number(msg.bestAsk)) / 2;
-        }
-
-        if (msg.open !== undefined) {
-          marketSnapshot.open = Number(msg.open);
-        }
-        if (msg.volume !== undefined) {
-          marketSnapshot.volume = Number(msg.volume);
-        }
-        if (msg.volumeQuote !== undefined) {
-          marketSnapshot.volumeQuote = Number(msg.volumeQuote);
-        }
-
-        renderMarketSummary(marketSnapshot);
-      }
-
-      function startMarketRealtime() {
-        const market = document.getElementById("market").value.trim();
-        closeMarketSocket();
-        marketSocketMarket = market;
-
-        if (!market) {
-          resetMarketSummaryToNA();
-          return;
-        }
-
-        marketSocket = new WebSocket("wss://ws.bitvavo.com/v2/");
-
-        marketSocket.onopen = () => {
-          const subscribePayload = {
-            action: "subscribe",
-            channels: [
-              {
-                name: "ticker24h",
-                markets: [market],
-              },
-            ],
-          };
-          marketSocket.send(JSON.stringify(subscribePayload));
-        };
-
-        marketSocket.onmessage = (event) => {
-          handleMarketSocketMessage(event.data);
-        };
-
-        marketSocket.onerror = () => {
-          // Fallback data refresh for transient websocket issues.
-          loadMarketSummary();
-        };
-
-        marketSocket.onclose = () => {
-          if (marketSocketMarket !== market) {
-            return;
-          }
-          marketReconnectTimer = setTimeout(() => {
-            if (document.getElementById("market").value.trim() === market) {
-              startMarketRealtime();
-            }
-          }, 1500);
-        };
-
-        // Initial sync so UI is filled while waiting for first ws tick.
-        loadMarketSummary();
-      }
-
-      async function checkGridProfitability() {
-        const el = document.getElementById("grid_profit_result");
-        try {
-          const payload = {
-            grid: {
-              lower_price: Number(document.getElementById("lower_price").value),
-              upper_price: Number(document.getElementById("upper_price").value),
-              levels: Number(document.getElementById("levels").value),
-              order_size_quote: Number(document.getElementById("order_size_quote").value),
-            },
-            fee_rate: Number(document.getElementById("fee_rate_percent").value) / 100,
-          };
-
-          const result = await api("/api/strategy/static-grid/preview", {
-            method: "POST",
-            body: JSON.stringify(payload),
-          });
-          lastGridPreview = result;
-
-          const profitableClass = result.is_profitable ? "profit-ok" : "profit-warn";
-          const statusText = result.is_profitable ? "Grid lijkt winstgevend" : "Grid lijkt niet winstgevend";
-          el.innerHTML = `
-            <div class="${profitableClass}"><strong>${statusText}</strong></div>
-            <div>Stapgrootte: ${result.step_size.toFixed(6)} (${result.step_percent.toFixed(3)}%)</div>
-            <div>Winst per trade (quote): min ${result.profit_per_trade_quote_min.toFixed(6)}, avg ${result.profit_per_trade_quote_avg.toFixed(6)}, max ${result.profit_per_trade_quote_max.toFixed(6)}</div>
-            <div>Winstgevende paden: ${result.profitable_trades}/${result.total_trade_paths}</div>
-            <div>Gebruikte fee rate: ${(result.fee_rate * 100).toFixed(3)}%</div>
-          `;
-        } catch (err) {
-          lastGridPreview = null;
-          el.innerHTML = `<div class="profit-warn">Kon profitability preview niet berekenen: ${String(err.message || err)}</div>`;
-        }
-      }
-
-      async function loadBots() {
-        const bots = await api("/api/bots");
-        const body = document.getElementById("bots_body");
-        body.innerHTML = "";
-
-        for (const bot of bots) {
-          const metrics = bot.latest_metrics || {};
-          const pnl = Number(metrics.unrealized_pnl_quote || 0);
-          const tr = document.createElement("tr");
-          tr.innerHTML = `
-            <td>${bot.name}</td>
-            <td>${bot.status}</td>
-            <td>${Number(metrics.total_equity_quote || 0).toFixed(2)}</td>
-            <td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${pnl.toFixed(2)}</td>
-            <td>
-              <div class="bot-actions">
-                <button data-start="${bot.id}">Start</button>
-                <button class="secondary" data-stop="${bot.id}">Stop</button>
-              </div>
-            </td>
-          `;
-          body.appendChild(tr);
-        }
-
-        body.querySelectorAll("button[data-start]").forEach((btn) => {
-          btn.onclick = async () => {
-            await api(`/api/bots/${btn.dataset.start}/start`, { method: "POST", body: JSON.stringify({}) });
-            await loadBots();
-          };
-        });
-
-        body.querySelectorAll("button[data-stop]").forEach((btn) => {
-          btn.onclick = async () => {
-            await api(`/api/bots/${btn.dataset.stop}/stop`, { method: "POST" });
-            await loadBots();
-          };
-        });
-      }
-
-      function showPopup(message) {
-        document.getElementById("popup_text").textContent = message;
-        document.getElementById("popup_backdrop").style.display = "flex";
-      }
-
-      async function loadAgents() {
-        const agents = await api("/api/agents");
-        const body = document.getElementById("agents_body");
-        body.innerHTML = "";
-
-        for (const agent of agents) {
-          const tr = document.createElement("tr");
-          let actionsHtml = `<span>-</span>`;
-          if (agent.approval_status === "pending") {
-            actionsHtml = `<div class="bot-actions"><button data-approve="${agent.id}">Approve</button><button class="secondary" data-reject="${agent.id}">Reject</button></div>`;
-          } else if (agent.approval_status === "approved") {
-            actionsHtml = `<div class="bot-actions"><button data-logs="${agent.id}">Open logs</button><button class="secondary" data-unapprove="${agent.id}">Unapprove</button></div>`;
-          } else if (agent.approval_status === "rejected") {
-            actionsHtml = `<button data-approve="${agent.id}">Approve</button>`;
-          }
-
-          tr.innerHTML = `
-            <td>${agent.name}</td>
-            <td>${agent.status}</td>
-            <td>${agent.approval_status}</td>
-            <td>
-              ${actionsHtml}
-            </td>
-          `;
-          body.appendChild(tr);
-        }
-
-        body.querySelectorAll("button[data-approve]").forEach((btn) => {
-          btn.onclick = async () => {
-            await api(`/api/agents/${btn.dataset.approve}/approve`, { method: "POST" });
-            await loadAgents();
-            await loadEvents();
-          };
-        });
-
-        body.querySelectorAll("button[data-reject]").forEach((btn) => {
-          btn.onclick = async () => {
-            await api(`/api/agents/${btn.dataset.reject}/reject`, { method: "POST" });
-            await loadAgents();
-            await loadEvents();
-          };
-        });
-
-        body.querySelectorAll("button[data-unapprove]").forEach((btn) => {
-          btn.onclick = async () => {
-            await api(`/api/agents/${btn.dataset.unapprove}/unapprove`, { method: "POST" });
-            if (selectedAgentId === btn.dataset.unapprove) {
-              selectedAgentId = null;
-              closeLogsModal();
-            }
-            await loadAgents();
-            await loadEvents();
-          };
-        });
-
-        body.querySelectorAll("button[data-logs]").forEach((btn) => {
-          btn.onclick = async () => {
-            selectedAgentId = btn.dataset.logs;
-            openLogsModal(selectedAgentId);
-            await loadAgentLogs();
-          };
-        });
-      }
-
-      function openLogsModal(agentId) {
-        logsModalOpen = true;
-        document.getElementById("modal_selected_agent_id").value = agentId;
-        document.getElementById("agent_logs_modal").style.display = "flex";
-      }
-
-      function closeLogsModal() {
-        logsModalOpen = false;
-        document.getElementById("agent_logs_modal").style.display = "none";
-      }
-
-      async function loadAgentLogs() {
-        const list = document.getElementById("modal_agent_logs_list");
-        if (!selectedAgentId) {
-          list.innerHTML = "<div class=\"log-item\">Geen agent geselecteerd.</div>";
-          return;
-        }
-
-        const limit = Number(document.getElementById("modal_agent_logs_limit").value || "200");
-        const category = document.getElementById("modal_log_category").value;
-        const qs = new URLSearchParams({
-          limit: String(Math.max(1, Math.min(limit, 1000))),
-        });
-        if (category) {
-          qs.set("category", category);
-        }
-
-        try {
-          const payload = await api(`/api/agents/${selectedAgentId}/logs?${qs.toString()}`);
-          const logs = payload.logs || [];
-          if (!logs.length) {
-            list.innerHTML = "<div class=\"log-item\">Nog geen logs beschikbaar.</div>";
-            return;
-          }
-
-          const ordered = [...logs].reverse();
-          list.innerHTML = "";
-          for (const log of ordered) {
-            const item = document.createElement("div");
-            item.className = "log-item";
-            const timeLabel = new Date(log.timestamp).toLocaleString();
-            const botLabel = log.bot_id ? ` | bot ${log.bot_id}` : "";
-            item.innerHTML = `
-              <div><strong>[${log.event_type}]</strong> <span class="log-category">(${log.category || "system"})</span>${botLabel}</div>
-              <div>${log.message}</div>
-              <div class="event-time">${timeLabel}</div>
-            `;
-            list.appendChild(item);
-          }
-          list.scrollTop = list.scrollHeight;
-        } catch (err) {
-          list.innerHTML = `<div class="log-item">Kon logs niet ophalen: ${String(err.message || err)}</div>`;
-        }
-      }
-
-      async function loadEvents() {
-        const events = await api("/api/agent-events");
-        const list = document.getElementById("events_list");
-        list.innerHTML = "";
-
-        for (const event of events) {
-          if (event.event_type === "discovered" && !seenEventIds.has(event.id)) {
-            seenEventIds.add(event.id);
-            showPopup(event.message);
-          }
-
-          const item = document.createElement("div");
-          item.className = "event-item";
-          const timeLabel = new Date(event.timestamp).toLocaleString();
-          item.innerHTML = `
-            <div><strong>[${event.event_type}]</strong> ${event.message}</div>
-            <div class="event-time">${timeLabel}</div>
-          `;
-          list.appendChild(item);
-        }
-      }
-
-      document.getElementById("create").onclick = async () => {
-        await checkGridProfitability();
-        if (lastGridPreview && !lastGridPreview.is_profitable) {
-          const proceed = window.confirm("Deze grid lijkt niet winstgevend op basis van fee+stapgrootte. Toch bot aanmaken?");
-          if (!proceed) {
-            return;
-          }
-        }
-
-        const payload = {
-          name: document.getElementById("name").value,
-          config: currentConfig(),
-        };
-        await api("/api/bots", { method: "POST", body: JSON.stringify(payload) });
-        await loadBots();
-      };
-
-      document.getElementById("check_grid_profit").onclick = async () => {
-        await checkGridProfitability();
-      };
-
-      document.getElementById("backtest").onclick = async () => {
-        const payload = { config: currentConfig() };
-        const result = await api("/api/backtest", { method: "POST", body: JSON.stringify(payload) });
-        document.getElementById("backtest_result").textContent = JSON.stringify(result, null, 2);
-      };
-
-      document.getElementById("popup_close").onclick = () => {
-        document.getElementById("popup_backdrop").style.display = "none";
-      };
-
-      document.getElementById("market").addEventListener("change", async () => {
-        startMarketRealtime();
-        loadBalances();
-      });
-
-      document.getElementById("modal_refresh_agent_logs").onclick = async () => {
-        await loadAgentLogs();
-      };
-
-      document.getElementById("modal_close_agent_logs").onclick = () => {
-        closeLogsModal();
-      };
-
-      document.getElementById("modal_log_category").onchange = async () => {
-        if (logsModalOpen) {
-          await loadAgentLogs();
-        }
-      };
-
-      (async () => {
-        await loadMarkets();
-        await loadBots();
-        await loadAgents();
-        await loadEvents();
-        await checkGridProfitability();
-        startMarketRealtime();
-        loadBalances();
-      })();
-      setInterval(async () => {
-        await loadBots();
-        await loadAgents();
-        await loadEvents();
-        if (logsModalOpen) {
-          await loadAgentLogs();
-        }
-      }, 5000);
-
-      setInterval(async () => {
-        // Periodic fallback sync in case websocket messages are delayed.
-        await loadMarketSummary();
-      }, 60000);
-
-      setInterval(async () => {
-        if (logsModalOpen) {
-          await loadAgentLogs();
-        }
-      }, 2000);
-
-      // --- Tooltip positioning (stays within viewport) ---
-      (function () {
-        const tipEl = document.createElement("div");
-        tipEl.className = "tip-popup";
-        tipEl.style.display = "none";
-        document.body.appendChild(tipEl);
-
-        document.addEventListener("mouseover", (e) => {
-          const trigger = e.target.closest(".info-tip");
-          if (!trigger) return;
-          const text = trigger.getAttribute("data-tip");
-          if (!text) return;
-
-          tipEl.textContent = text;
-          tipEl.style.display = "block";
-
-          const rect = trigger.getBoundingClientRect();
-          const tipRect = tipEl.getBoundingClientRect();
-
-          let left = rect.left + rect.width / 2 - tipRect.width / 2;
-          let top = rect.top - tipRect.height - 6;
-
-          // Clamp horizontally
-          if (left < 4) left = 4;
-          if (left + tipRect.width > window.innerWidth - 4) {
-            left = window.innerWidth - tipRect.width - 4;
-          }
-
-          // If no room above, show below
-          if (top < 4) {
-            top = rect.bottom + 6;
-          }
-
-          tipEl.style.left = left + "px";
-          tipEl.style.top = top + "px";
-        });
-
-        document.addEventListener("mouseout", (e) => {
-          const trigger = e.target.closest(".info-tip");
-          if (!trigger) return;
-          tipEl.style.display = "none";
-        });
-      })();
-    </script>
+    <!-- Scripts: i18n dictionary must load before dashboard.js -->
+    <script src="/static/i18n.js"></script>
+    <script src="/static/dashboard.js"></script>
   </body>
 </html>
