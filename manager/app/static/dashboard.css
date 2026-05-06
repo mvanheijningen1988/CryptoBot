@@ -169,6 +169,7 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
   position: fixed;
   inset: 0;
   background: transparent;
+  color: var(--text);
   align-items: center;
   justify-content: center;
   z-index: 1000;
@@ -238,6 +239,7 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
   position: fixed;
   inset: 0;
   background: transparent;
+  color: var(--text);
   align-items: center;
   justify-content: center;
   z-index: 1100;
