@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from common.models import BotConfig, BotSnapshot
+from common.models import BotConfig, BotSnapshot, GridConfig
 
 
 class AgentRegisterRequest(BaseModel):
@@ -60,3 +60,20 @@ class BacktestResponse(BaseModel):
 
 class MetricsPushRequest(BaseModel):
     snapshot: BotSnapshot
+
+
+class StaticGridPreviewRequest(BaseModel):
+    grid: GridConfig
+    fee_rate: float = Field(default=0.0025, ge=0, le=0.05)
+
+
+class StaticGridPreviewResponse(BaseModel):
+    is_profitable: bool
+    step_size: float
+    step_percent: float
+    profit_per_trade_quote_min: float
+    profit_per_trade_quote_avg: float
+    profit_per_trade_quote_max: float
+    profitable_trades: int
+    total_trade_paths: int
+    fee_rate: float

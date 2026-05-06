@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
+import time as _time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
+from threading import Thread
+from time import sleep
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+import requests
 from sqlalchemy.orm import Session
 
-from manager.app.database import Base, engine, get_db
+from manager.app.database import Base, SessionLocal, engine, get_db
 from manager.app.models import Agent, Bot
 from manager.app.schemas import (
     AgentHeartbeatRequest,
@@ -23,11 +29,14 @@ from manager.app.schemas import (
     BotCreateRequest,
     BotResponse,
     MetricsPushRequest,
+    StaticGridPreviewRequest,
+    StaticGridPreviewResponse,
     StartBotRequest,
     UpdateBudgetRequest,
 )
 from manager.app.services.agent_client import post_json
 from manager.app.services.backtest import run_backtest
+from manager.app.services.grid_preview import build_static_grid_profit_preview
 
 Base.metadata.create_all(bind=engine)
 
@@ -56,6 +65,8 @@ _ensure_agent_approval_column()
 AGENT_EVENTS: list[dict] = []
 AGENT_EVENTS_LOCK = Lock()
 MAX_AGENT_EVENTS = 300
+HEARTBEAT_TIMEOUT_SECONDS = int(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "30"))
+FAILOVER_INTERVAL_SECONDS = int(os.getenv("FAILOVER_INTERVAL_SECONDS", "10"))
 
 
 def add_agent_event(agent_id: str, agent_name: str, event_type: str, message: str) -> None:
@@ -83,6 +94,12 @@ app.add_middleware(
 
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+@app.on_event("startup")
+def startup_event() -> None:
+    thread = Thread(target=failover_maintenance_loop, daemon=True)
+    thread.start()
 
 
 def bot_to_response(bot: Bot) -> BotResponse:
@@ -119,6 +136,95 @@ def detach_bots_for_agent(agent: Agent, db: Session) -> None:
         bot.updated_at = datetime.utcnow()
 
 
+def try_failover_for_bot(bot: Bot, failed_agent: Agent, db: Session) -> bool:
+    target = (
+        db.query(Agent)
+        .filter(
+            Agent.id != failed_agent.id,
+            Agent.status == "online",
+            Agent.approval_status == "approved",
+        )
+        .first()
+    )
+    if not target:
+        return False
+
+    cfg = json.loads(bot.config_json)
+    ok, message = post_json(
+        f"{target.base_url}/agent/bots/{bot.id}/start",
+        {
+            "bot_id": bot.id,
+            "config": cfg,
+        },
+    )
+    if not ok:
+        add_agent_event(
+            failed_agent.id,
+            failed_agent.name,
+            "failover_failed",
+            f"Failover for bot {bot.name} failed: {message}",
+        )
+        return False
+
+    bot.assigned_agent_id = target.id
+    bot.updated_at = datetime.utcnow()
+    add_agent_event(
+        target.id,
+        target.name,
+        "failover_success",
+        f"Bot {bot.name} moved from {failed_agent.name} to {target.name}.",
+    )
+    return True
+
+
+def failover_maintenance_loop() -> None:
+    while True:
+        db = SessionLocal()
+        try:
+            now = datetime.utcnow()
+            approved_agents = db.query(Agent).filter(Agent.approval_status == "approved").all()
+
+            for agent in approved_agents:
+                age_seconds = (now - agent.last_heartbeat).total_seconds()
+                if age_seconds > HEARTBEAT_TIMEOUT_SECONDS:
+                    if agent.status != "offline":
+                        add_agent_event(
+                            agent.id,
+                            agent.name,
+                            "offline",
+                            f"Agent {agent.name} marked offline after heartbeat timeout.",
+                        )
+                    agent.status = "offline"
+                elif agent.status == "offline":
+                    agent.status = "online"
+                    add_agent_event(
+                        agent.id,
+                        agent.name,
+                        "recovered",
+                        f"Agent {agent.name} recovered and is online again.",
+                    )
+
+            db.commit()
+
+            offline_agents = db.query(Agent).filter(Agent.status == "offline", Agent.approval_status == "approved").all()
+            for offline_agent in offline_agents:
+                running_bots = (
+                    db.query(Bot)
+                    .filter(Bot.assigned_agent_id == offline_agent.id, Bot.status == "running")
+                    .all()
+                )
+                for bot in running_bots:
+                    try_failover_for_bot(bot, offline_agent, db)
+
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+
+        sleep(FAILOVER_INTERVAL_SECONDS)
+
+
 @app.get("/")
 def root():
     return FileResponse(static_dir / "index.html")
@@ -127,6 +233,145 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "manager", "env": os.getenv("ENV", "dev")}
+
+
+@app.get("/api/balance")
+def get_balance(symbol: str):
+    api_key = os.getenv("BITVAVO_API_KEY", "")
+    api_secret = os.getenv("BITVAVO_API_SECRET", "")
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=500, detail="Bitvavo API credentials not configured")
+
+    timestamp = str(int(_time.time() * 1000))
+    method = "GET"
+    url_path = f"/v2/balance?symbol={symbol}"
+    body = ""
+    sig_string = timestamp + method + url_path + body
+    signature = hmac.new(
+        api_secret.encode("utf-8"),
+        sig_string.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    headers = {
+        "BITVAVO-ACCESS-KEY": api_key,
+        "BITVAVO-ACCESS-SIGNATURE": signature,
+        "BITVAVO-ACCESS-TIMESTAMP": timestamp,
+    }
+
+    try:
+        resp = requests.get(f"https://api.bitvavo.com{url_path}", headers=headers, timeout=6)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch balance: {exc}") from exc
+
+    if resp.status_code == 401 or resp.status_code == 403:
+        return {"symbol": symbol, "available": "0", "inOrder": "0"}
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Bitvavo returned {resp.status_code}: {resp.text}")
+
+    payload = resp.json()
+    if isinstance(payload, list):
+        if not payload:
+            return {"symbol": symbol, "available": "0", "inOrder": "0"}
+        entry = payload[0]
+    elif isinstance(payload, dict):
+        if "errorCode" in payload:
+            return {"symbol": symbol, "available": "0", "inOrder": "0"}
+        entry = payload
+    else:
+        return {"symbol": symbol, "available": "0", "inOrder": "0"}
+
+    return {
+        "symbol": entry.get("symbol", symbol),
+        "available": entry.get("available", "0"),
+        "inOrder": entry.get("inOrder", "0"),
+    }
+
+
+@app.get("/api/market/summary")
+def market_summary(market: str):
+    try:
+        response = requests.get(
+            "https://api.bitvavo.com/v2/ticker/24h",
+            params={"market": market},
+            timeout=6,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch market data: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Bitvavo returned {response.status_code}: {response.text}")
+
+    payload = response.json()
+    if isinstance(payload, list):
+        if not payload:
+            raise HTTPException(status_code=404, detail="Market not found")
+        data = payload[0]
+    elif isinstance(payload, dict):
+        data = payload
+    else:
+        raise HTTPException(status_code=502, detail="Unexpected market response format")
+
+    try:
+        open_price = float(data.get("open", 0.0))
+        last_price = float(data.get("last", 0.0))
+        volume_quote = float(data.get("volumeQuote", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Invalid market values: {exc}") from exc
+
+    diff_abs = last_price - open_price
+    diff_pct = (diff_abs / open_price * 100.0) if open_price > 0 else 0.0
+
+    return {
+        "market": data.get("market", market),
+        "last_price": last_price,
+        "open_24h": open_price,
+        "diff_24h_abs": diff_abs,
+        "diff_24h_pct": diff_pct,
+        "volume_24h_base": float(data.get("volume", 0.0) or 0.0),
+        "volume_24h_quote": volume_quote,
+    }
+
+
+@app.get("/api/markets")
+def list_markets(status: str = "trading"):
+    try:
+        response = requests.get("https://api.bitvavo.com/v2/markets", timeout=8)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch markets: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Bitvavo returned {response.status_code}: {response.text}")
+
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=502, detail="Unexpected markets response format")
+
+    normalized = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+
+        market_status = str(item.get("status", "")).lower()
+        if status and market_status != status.lower():
+            continue
+
+        market_symbol = item.get("market")
+        if not market_symbol:
+            continue
+
+        normalized.append(
+            {
+                "market": market_symbol,
+                "base": item.get("base"),
+                "quote": item.get("quote"),
+                "status": item.get("status"),
+            }
+        )
+
+    normalized.sort(key=lambda x: x["market"])
+    return normalized
 
 
 @app.post("/api/agents/register")
@@ -242,6 +487,42 @@ def list_agents(db: Session = Depends(get_db)):
 def list_agent_events():
     with AGENT_EVENTS_LOCK:
         return list(AGENT_EVENTS)
+
+
+@app.get("/api/agents/{agent_id}/logs")
+def get_agent_logs(
+    agent_id: str,
+    limit: int = 200,
+    bot_id: str | None = None,
+    category: str | None = None,
+    db: Session = Depends(get_db),
+):
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.approval_status != "approved":
+        raise HTTPException(status_code=400, detail="Only approved agent logs are available")
+
+    safe_limit = max(1, min(limit, 1000))
+    query_params = {"limit": safe_limit}
+    if bot_id:
+        query_params["bot_id"] = bot_id
+    if category:
+        query_params["category"] = category
+
+    try:
+        response = requests.get(
+            f"{agent.base_url}/agent/logs",
+            params=query_params,
+            timeout=6,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch agent logs: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Agent returned {response.status_code}: {response.text}")
+
+    return response.json()
 
 
 @app.post("/api/bots", response_model=BotResponse)
@@ -372,3 +653,9 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Se
 def backtest(payload: BacktestRequest):
     result = run_backtest(payload.config, payload.prices)
     return BacktestResponse(**result)
+
+
+@app.post("/api/strategy/static-grid/preview", response_model=StaticGridPreviewResponse)
+def static_grid_preview(payload: StaticGridPreviewRequest):
+    result = build_static_grid_profit_preview(payload.grid, payload.fee_rate)
+    return StaticGridPreviewResponse(**result)

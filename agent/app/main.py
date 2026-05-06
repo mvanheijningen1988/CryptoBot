@@ -45,13 +45,23 @@ def register_agent():
     }
     try:
         response = requests.post(f"{MANAGER_URL}/api/agents/register", json=payload, timeout=5)
+        if response.status_code < 400:
+            runner_manager.log_system("register_ok", "Agent registered to manager.", {"manager_url": MANAGER_URL})
+        else:
+            runner_manager.log_system(
+                "register_failed",
+                "Agent registration returned an error.",
+                {"status_code": response.status_code, "body": response.text[:300]},
+            )
         return response.status_code < 400
     except requests.RequestException:
+        runner_manager.log_system("register_failed", "Agent registration request failed.")
         return False
 
 
 def heartbeat_loop():
     registered = False
+    last_state: str | None = None
     while True:
         if not registered:
             registered = register_agent()
@@ -64,13 +74,25 @@ def heartbeat_loop():
             )
             if response.status_code == 404:
                 registered = False
+            state = "online" if response.status_code < 400 else f"heartbeat_error_{response.status_code}"
+            if state != last_state:
+                runner_manager.log_system(
+                    "heartbeat_state",
+                    "Agent heartbeat state changed.",
+                    {"state": state},
+                )
+                last_state = state
         except requests.RequestException:
             registered = False
+            if last_state != "heartbeat_unreachable":
+                runner_manager.log_system("heartbeat_state", "Manager heartbeat endpoint unreachable.")
+                last_state = "heartbeat_unreachable"
         time.sleep(10)
 
 
 @app.on_event("startup")
 def startup_event():
+    runner_manager.log_system("agent_startup", "Agent process started.", {"agent_id": AGENT_ID, "agent_name": AGENT_NAME})
     register_agent()
     thread = threading.Thread(target=heartbeat_loop, daemon=True)
     thread.start()
@@ -102,3 +124,13 @@ def update_budget(bot_id: str, payload: BudgetPayload):
 @app.get("/agent/bots")
 def list_bots():
     return runner_manager.list_bots()
+
+
+@app.get("/agent/logs")
+def list_logs(limit: int = 200, bot_id: str | None = None, category: str | None = None):
+    safe_limit = max(1, min(limit, 1000))
+    return {
+        "agent_id": AGENT_ID,
+        "agent_name": AGENT_NAME,
+        "logs": runner_manager.get_logs(limit=safe_limit, bot_id=bot_id, category=category),
+    }
