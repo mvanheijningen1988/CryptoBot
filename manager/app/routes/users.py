@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
 from fastapi import Depends, HTTPException
 from fastapi.routing import APIRouter
@@ -13,9 +14,14 @@ from manager.app.models import User
 
 router = APIRouter()
 
+DbSession = Annotated[Session, Depends(get_db)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
 
-@router.get("/users")
-def list_users(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
+_ADMIN_ONLY = "Admin only"
+
+
+@router.get("/users", responses={403: {"description": "Admin only"}})
+def list_users(user: CurrentUser, db: DbSession) -> list[dict]:
     """
     List all users (admin only).
 
@@ -25,7 +31,7 @@ def list_users(user: User = Depends(get_current_user), db: Session = Depends(get
     :raises HTTPException: 403 if user is not admin.
     """
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+        raise HTTPException(status_code=403, detail=_ADMIN_ONLY)
     users = db.query(User).all()
     return [
         {"id": u.id, "username": u.username, "role": u.role, "locale": u.locale, "must_change_password": u.must_change_password}
@@ -33,8 +39,8 @@ def list_users(user: User = Depends(get_current_user), db: Session = Depends(get
     ]
 
 
-@router.post("/users")
-def create_user(body: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+@router.post("/users", responses={400: {"description": "Validation error"}, 403: {"description": "Admin only"}, 409: {"description": "Conflict"}})
+def create_user(body: dict, user: CurrentUser, db: DbSession) -> dict:
     """
     Create a new user with the given username, password, and role (admin only).
 
@@ -45,7 +51,7 @@ def create_user(body: dict, user: User = Depends(get_current_user), db: Session 
     :raises HTTPException: 403 if not admin, 400/409 on validation errors.
     """
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+        raise HTTPException(status_code=403, detail=_ADMIN_ONLY)
     username = body.get("username", "").strip()
     password = body.get("password", "")
     role = body.get("role", "viewer")
@@ -71,8 +77,8 @@ def create_user(body: dict, user: User = Depends(get_current_user), db: Session 
     return {"id": new_user.id, "username": new_user.username, "role": new_user.role}
 
 
-@router.delete("/users/{user_id}")
-def delete_user(user_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+@router.delete("/users/{user_id}", responses={400: {"description": "Cannot delete yourself"}, 403: {"description": "Admin only"}, 404: {"description": "Not found"}})
+def delete_user(user_id: str, user: CurrentUser, db: DbSession) -> dict:
     """
     Delete a user by ID (admin only; cannot delete yourself).
 
@@ -83,7 +89,7 @@ def delete_user(user_id: str, user: User = Depends(get_current_user), db: Sessio
     :raises HTTPException: 403 if not admin, 404 if user not found, 400 if self-delete.
     """
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+        raise HTTPException(status_code=403, detail=_ADMIN_ONLY)
     target = db.query(User).filter(User.id == user_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")

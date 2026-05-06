@@ -15,7 +15,7 @@ class TestUserModel:
         user = User(
             id=str(uuid.uuid4()),
             username="test_user",
-            password_hash="fakehash",
+            password_hash="fakehash",  # NOSONAR
         )
         db_session.add(user)
         db_session.commit()
@@ -25,7 +25,7 @@ class TestUserModel:
         user = User(
             id=str(uuid.uuid4()),
             username="locale_test",
-            password_hash="fakehash",
+            password_hash="fakehash",  # NOSONAR
         )
         db_session.add(user)
         db_session.commit()
@@ -35,15 +35,15 @@ class TestUserModel:
         user = User(
             id=str(uuid.uuid4()),
             username="pw_test",
-            password_hash="fakehash",
+            password_hash="fakehash",  # NOSONAR
         )
         db_session.add(user)
         db_session.commit()
         assert user.must_change_password is False
 
     def test_duplicate_username_raises(self, db_session):
-        u1 = User(id="id1", username="dup", password_hash="h1")
-        u2 = User(id="id2", username="dup", password_hash="h2")
+        u1 = User(id="id1", username="dup", password_hash="h1")  # NOSONAR
+        u2 = User(id="id2", username="dup", password_hash="h2")  # NOSONAR
         db_session.add(u1)
         db_session.commit()
         db_session.add(u2)
@@ -55,7 +55,7 @@ class TestUserModel:
         user = User(
             id=uid,
             username="full_user",
-            password_hash="$2b$12$fakehash",
+            password_hash="$2b$12$fakehash",  # NOSONAR
             role="admin",
             locale="nl",
             must_change_password=True,

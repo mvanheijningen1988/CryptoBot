@@ -39,21 +39,21 @@ class TestSimulatedInit:
 
     def test_initial_balances(self):
         ex = SimulatedExchange(_budget(500.0, 2.0))
-        assert ex.quote_balance == 500.0
-        assert ex.base_balance == 2.0
+        assert ex.quote_balance == pytest.approx(500.0)
+        assert ex.base_balance == pytest.approx(2.0)
 
     def test_initial_price(self):
         ex = SimulatedExchange(_budget(), start_price=42.0)
-        assert ex.price == 42.0
+        assert ex.price == pytest.approx(42.0)
 
     def test_default_start_price(self):
         ex = SimulatedExchange(_budget())
-        assert ex.price == 100.0
+        assert ex.price == pytest.approx(100.0)
 
     def test_zero_budgets(self):
         ex = SimulatedExchange(_budget(0.0, 0.0))
-        assert ex.quote_balance == 0.0
-        assert ex.base_balance == 0.0
+        assert ex.quote_balance == pytest.approx(0.0)
+        assert ex.base_balance == pytest.approx(0.0)
 
 
 # ===================================================================
@@ -242,8 +242,8 @@ class TestSimulatedBalances:
     def test_get_balances_returns_tuple(self):
         ex = SimulatedExchange(_budget(100.0, 5.0))
         q, b = ex.get_balances()
-        assert q == 100.0
-        assert b == 5.0
+        assert q == pytest.approx(100.0)
+        assert b == pytest.approx(5.0)
 
     def test_get_balances_after_trade(self):
         ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0)
@@ -473,11 +473,11 @@ class TestBitvavoGetPrice:
     def test_returns_latest_price(self):
         ex = self._make_exchange()
         ex.latest_price = 42000.0
-        assert ex.get_price() == 42000.0
+        assert ex.get_price() == pytest.approx(42000.0)
 
     def test_returns_fallback_when_no_price(self):
         ex = self._make_exchange()
-        assert ex.get_price(fallback_price=99.0) == 99.0
+        assert ex.get_price(fallback_price=99.0) == pytest.approx(99.0)
 
     def test_raises_when_no_price_no_fallback(self):
         ex = self._make_exchange()
@@ -529,8 +529,8 @@ class TestBitvavoRefreshBalances:
         )
         ex.authenticated = False
         ex._refresh_balances()
-        assert ex.quote_balance == 0.0
-        assert ex.base_balance == 0.0
+        assert ex.quote_balance == pytest.approx(0.0)
+        assert ex.base_balance == pytest.approx(0.0)
 
     def test_parses_response_list(self):
         ex = BitvavoExchange(
@@ -580,7 +580,7 @@ class TestBitvavoRefreshBalances:
         }
         with patch.object(ex, "_call_action", return_value=response):
             ex._refresh_balances()
-        assert ex.quote_balance == 0.0  # skipped due to ValueError
+        assert ex.quote_balance == pytest.approx(0.0)  # skipped due to ValueError
         assert ex.base_balance == pytest.approx(1.0)
 
     def test_non_list_response_ignored(self):
@@ -591,8 +591,8 @@ class TestBitvavoRefreshBalances:
         ex.authenticated = True
         with patch.object(ex, "_call_action", return_value={"error": "something"}):
             ex._refresh_balances()
-        assert ex.quote_balance == 0.0
-        assert ex.base_balance == 0.0
+        assert ex.quote_balance == pytest.approx(0.0)
+        assert ex.base_balance == pytest.approx(0.0)
 
 
 # ===================================================================

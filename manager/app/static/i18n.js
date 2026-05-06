@@ -112,7 +112,7 @@ const I18N = {
     // Auth
     login_title: "Login",
     lbl_username: "Username",
-    lbl_password: "Password",
+    lbl_password: "Password", // NOSONAR
     btn_login: "Login",
     login_error: "Invalid username or password",
     change_pw_title: "Change Password",
@@ -231,7 +231,7 @@ const I18N = {
     // Auth
     login_title: "Inloggen",
     lbl_username: "Gebruikersnaam",
-    lbl_password: "Wachtwoord",
+    lbl_password: "Wachtwoord", // NOSONAR
     btn_login: "Inloggen",
     login_error: "Ongeldige gebruikersnaam of wachtwoord",
     change_pw_title: "Wachtwoord Wijzigen",

@@ -6,7 +6,7 @@ failover, approved, etc.) for display in the dashboard.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from threading import Lock
 
 AGENT_EVENTS: list[dict] = []
@@ -25,7 +25,7 @@ def add_agent_event(agent_id: str, agent_name: str, event_type: str, message: st
     """
     event = {
         "id": str(uuid.uuid4()),
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(UTC).isoformat(),
         "agent_id": agent_id,
         "agent_name": agent_name,
         "event_type": event_type,

@@ -10,9 +10,9 @@
     <!-- Login form -->
     <div class="login-card">
       <h1 id="login_title">Login</h1>
-      <label id="lbl_user">Username</label>
+      <label id="lbl_user" for="username">Username</label>
       <input id="username" type="text" autocomplete="username" />
-      <label id="lbl_pass">Password</label>
+      <label id="lbl_pass" for="password">Password</label>
       <input id="password" type="password" autocomplete="current-password" />
       <div id="error_msg" class="error"></div>
       <button id="btn_login">Login</button>
@@ -27,9 +27,9 @@
       <div class="pw-card">
         <h1 id="pw_title">Change Password</h1>
         <p id="pw_msg">You must change your password before continuing.</p>
-        <label id="lbl_new_pw">New password</label>
+        <label id="lbl_new_pw" for="new_password">New password</label>
         <input id="new_password" type="password" autocomplete="new-password" />
-        <label id="lbl_confirm_pw">Confirm password</label>
+        <label id="lbl_confirm_pw" for="confirm_password">Confirm password</label>
         <input id="confirm_password" type="password" autocomplete="new-password" />
         <div id="pw_error" class="error"></div>
         <button id="btn_change_pw">Change password</button>

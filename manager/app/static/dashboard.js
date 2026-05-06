@@ -27,7 +27,7 @@ let lang = localStorage.getItem("cryptobot_lang") || "en";
  * @returns {string} Translated string.
  */
 function t(key) {
-  return (I18N[lang] && I18N[lang][key]) || (I18N.en && I18N.en[key]) || key;
+  return I18N[lang]?.[key] || I18N.en?.[key] || key;
 }
 
 /**
@@ -39,7 +39,7 @@ function applyTranslations() {
     el.textContent = t(el.dataset.i18n);
   });
   document.querySelectorAll("[data-tip-key]").forEach((el) => {
-    el.setAttribute("data-tip", t(el.dataset.tipKey));
+    el.dataset.tip = t(el.dataset.tipKey);
   });
 }
 
@@ -100,7 +100,7 @@ const marketMeta = new Map();
  * @returns {Promise<any>} Parsed JSON body or plain text.
  */
 async function api(url, options = {}) {
-  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  const headers = { "Content-Type": "application/json", ...options.headers };
   if (authToken) headers["Authorization"] = "Bearer " + authToken;
 
   const res = await fetch(url, { ...options, headers });
@@ -108,7 +108,7 @@ async function api(url, options = {}) {
   // Session expired or invalid → redirect to login
   if (res.status === 401) {
     localStorage.removeItem("cryptobot_token");
-    window.location.href = "/login";
+    globalThis.location.href = "/login";
     throw new Error("Unauthorized");
   }
   if (!res.ok) {
@@ -192,8 +192,8 @@ function renderMarketSummary(summary) {
   const volumeQuote = Number(summary.volume_24h_quote ?? summary.volumeQuote ?? 0);
 
   // Calculate 24h change; use pre-computed values if available
-  let diffAbs = Number(summary.diff_24h_abs ?? NaN);
-  let diffPct = Number(summary.diff_24h_pct ?? NaN);
+  let diffAbs = Number(summary.diff_24h_abs ?? Number.NaN);
+  let diffPct = Number(summary.diff_24h_pct ?? Number.NaN);
   if (Number.isNaN(diffAbs) || Number.isNaN(diffPct)) {
     diffAbs = open > 0 ? last - open : 0;
     diffPct = open > 0 ? (diffAbs / open) * 100 : 0;
@@ -245,7 +245,7 @@ async function loadMarkets() {
     if (cur && marketMeta.has(cur)) sel.value = cur;
     else if (marketMeta.has("BTC-EUR")) sel.value = "BTC-EUR";
   } catch (err) {
-    // Keep existing options on failure
+    console.error("Failed to load markets", err);
   }
 }
 
@@ -267,6 +267,7 @@ async function loadMarketSummary() {
     };
     renderMarketSummary(s);
   } catch (err) {
+    console.error("Failed to load market summary", err);
     resetMarketSummaryToNA();
   }
 }
@@ -300,6 +301,7 @@ async function loadBalances() {
     // Pre-fill budget with full available balance
     document.getElementById("quote_budget").value = availQuote.toFixed(2);
   } catch (err) {
+    console.error("Failed to load balances", err);
     quoteEl.textContent = "n/a";
     baseEl.textContent = "n/a";
   }
@@ -316,7 +318,7 @@ async function loadBalances() {
 function closeMarketSocket() {
   if (marketReconnectTimer) { clearTimeout(marketReconnectTimer); marketReconnectTimer = null; }
   if (marketSocket) {
-    try { marketSocket.onopen = null; marketSocket.onmessage = null; marketSocket.onclose = null; marketSocket.onerror = null; marketSocket.close(); } catch (e) {}
+    try { marketSocket.onopen = null; marketSocket.onmessage = null; marketSocket.onclose = null; marketSocket.onerror = null; marketSocket.close(); } catch { /* socket already closed */ }
   }
   marketSocket = null;
 }
@@ -329,7 +331,7 @@ function closeMarketSocket() {
  */
 function handleMarketSocketMessage(raw) {
   let msg;
-  try { msg = JSON.parse(raw); } catch (e) { return; }
+  try { msg = JSON.parse(raw); } catch { return; }
   if (!msg || typeof msg !== "object") return;
 
   // Ignore updates for a different market (can happen during switching)
@@ -430,10 +432,9 @@ async function loadBots() {
   const bots = await api("/api/v1/bots");
   const body = document.getElementById("bots_body");
   body.innerHTML = "";
-  const isViewer = currentUser && currentUser.role === "viewer";
+  const isViewer = currentUser?.role === "viewer";
 
   for (const bot of bots) {
-    const m = bot.latest_metrics || {};
     const pnl = Number(m.unrealized_pnl_quote || 0);
     const tr = document.createElement("tr");
 
@@ -468,7 +469,7 @@ async function loadBots() {
  */
 function showPopup(message) {
   document.getElementById("popup_text").textContent = message;
-  document.getElementById("popup_backdrop").style.display = "flex";
+  document.getElementById("popup_backdrop").showModal();
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -484,24 +485,22 @@ async function loadAgents() {
   const agents = await api("/api/v1/agents");
   const body = document.getElementById("agents_body");
   body.innerHTML = "";
-  const isViewer = currentUser && currentUser.role === "viewer";
+  const isViewer = currentUser?.role === "viewer";
 
   for (const agent of agents) {
     const tr = document.createElement("tr");
     let ah = "<span>-</span>";
 
-    if (!isViewer) {
-      // Full action set for admins / moderators
-      if (agent.approval_status === "pending")
-        ah = `<div class="bot-actions"><button data-approve="${agent.id}">${t("btn_approve")}</button><button class="secondary" data-reject="${agent.id}">${t("btn_reject")}</button></div>`;
-      else if (agent.approval_status === "approved")
-        ah = `<div class="bot-actions"><button data-logs="${agent.id}">${t("btn_open_logs")}</button><button class="secondary" data-unapprove="${agent.id}">${t("btn_unapprove")}</button></div>`;
-      else if (agent.approval_status === "rejected")
-        ah = `<button data-approve="${agent.id}">${t("btn_approve")}</button>`;
-    } else {
+    if (isViewer) {
       // Viewers can only open logs for approved agents
       if (agent.approval_status === "approved")
         ah = `<button data-logs="${agent.id}">${t("btn_open_logs")}</button>`;
+    } else if (agent.approval_status === "pending") {
+      ah = `<div class="bot-actions"><button data-approve="${agent.id}">${t("btn_approve")}</button><button class="secondary" data-reject="${agent.id}">${t("btn_reject")}</button></div>`;
+    } else if (agent.approval_status === "approved") {
+      ah = `<div class="bot-actions"><button data-logs="${agent.id}">${t("btn_open_logs")}</button><button class="secondary" data-unapprove="${agent.id}">${t("btn_unapprove")}</button></div>`;
+    } else if (agent.approval_status === "rejected") {
+      ah = `<button data-approve="${agent.id}">${t("btn_approve")}</button>`;
     }
 
     const displayStatus = agent.status === "offline" ? "dead" : agent.status;
@@ -543,13 +542,13 @@ async function loadAgents() {
 function openLogsModal(agentId) {
   logsModalOpen = true;
   document.getElementById("modal_selected_agent_id").value = agentId;
-  document.getElementById("agent_logs_modal").style.display = "flex";
+  document.getElementById("agent_logs_modal").showModal();
 }
 
 /** Close the agent-logs modal and stop polling. */
 function closeLogsModal() {
   logsModalOpen = false;
-  document.getElementById("agent_logs_modal").style.display = "none";
+  document.getElementById("agent_logs_modal").close();
 }
 
 /**
@@ -621,11 +620,11 @@ async function loadEvents() {
 document.getElementById("create").onclick = async () => {
   await checkGridProfitability();
   if (lastGridPreview && !lastGridPreview.is_profitable) {
-    if (!window.confirm(t("grid_confirm_unprofitable"))) return;
+    if (!globalThis.confirm(t("grid_confirm_unprofitable"))) return;
   }
   await api("/api/v1/bots", { method: "POST", body: JSON.stringify({ name: document.getElementById("name").value, config: currentConfig() }) });
   await loadBots();
-  document.getElementById("create_bot_modal").style.display = "none";
+  document.getElementById("create_bot_modal").close();
 };
 
 /** Tab switching: toggle active class on both buttons and panes. */
@@ -640,11 +639,11 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
 
 /** Open the "Create Bot" modal and load market data + balances. */
 document.getElementById("open_create_bot").onclick = () => {
-  document.getElementById("create_bot_modal").style.display = "flex";
+  document.getElementById("create_bot_modal").showModal();
   loadMarkets().then(() => { startMarketRealtime(); loadBalances(); toggleStartPrice(); });
 };
 
-document.getElementById("cancel_create_bot").onclick = () => { document.getElementById("create_bot_modal").style.display = "none"; };
+document.getElementById("cancel_create_bot").onclick = () => { document.getElementById("create_bot_modal").close(); };
 document.getElementById("check_grid_profit").onclick = async () => { await checkGridProfitability(); };
 
 /** Run a quick backtest using the current form parameters. */
@@ -653,7 +652,7 @@ document.getElementById("backtest").onclick = async () => {
   document.getElementById("backtest_result").textContent = JSON.stringify(result, null, 2);
 };
 
-document.getElementById("popup_close").onclick = () => { document.getElementById("popup_backdrop").style.display = "none"; };
+document.getElementById("popup_close").onclick = () => { document.getElementById("popup_backdrop").close(); };
 
 /** When the market dropdown changes, reconnect WebSocket + refresh balances. */
 document.getElementById("market").addEventListener("change", () => { startMarketRealtime(); loadBalances(); });
@@ -702,7 +701,7 @@ document.querySelectorAll(".lang-flag").forEach((btn) => {
     localStorage.setItem("cryptobot_lang", lang);
     updateLangFlags();
     applyTranslations();
-    try { await api("/api/v1/auth/locale", { method: "POST", body: JSON.stringify({ locale: lang }) }); } catch (e) {}
+    try { await api("/api/v1/auth/locale", { method: "POST", body: JSON.stringify({ locale: lang }) }); } catch { /* best-effort locale sync */ }
   };
 });
 
@@ -712,7 +711,7 @@ document.querySelectorAll(".lang-flag").forEach((btn) => {
 
 document.getElementById("btn_logout").onclick = () => {
   localStorage.removeItem("cryptobot_token");
-  window.location.href = "/login";
+  globalThis.location.href = "/login";
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -721,15 +720,15 @@ document.getElementById("btn_logout").onclick = () => {
 
 (async () => {
   // Redirect to login if there is no stored token
-  if (!authToken) { window.location.href = "/login"; return; }
+  if (!authToken) { globalThis.location.href = "/login"; return; }
 
   // Validate the token and fetch the current user profile
   try {
     currentUser = await api("/api/v1/auth/me");
     // If the user still needs to change their password, send them back
-    if (currentUser.must_change_password) { window.location.href = "/login"; return; }
-  } catch (e) {
-    window.location.href = "/login";
+    if (currentUser.must_change_password) { globalThis.location.href = "/login"; return; }
+  } catch {
+    globalThis.location.href = "/login";
     return;
   }
 
@@ -781,7 +780,7 @@ setInterval(async () => { if (logsModalOpen) await loadAgentLogs(); }, 2000);
   document.addEventListener("mouseover", (e) => {
     const trigger = e.target.closest(".info-tip");
     if (!trigger) return;
-    const text = trigger.getAttribute("data-tip");
+    const text = trigger.dataset.tip;
     if (!text) return;
 
     tipEl.textContent = text;
@@ -795,7 +794,7 @@ setInterval(async () => { if (logsModalOpen) await loadAgentLogs(); }, 2000);
 
     // Clamp horizontally to viewport
     if (left < 4) left = 4;
-    if (left + tipRect.width > window.innerWidth - 4) left = window.innerWidth - tipRect.width - 4;
+    if (left + tipRect.width > globalThis.innerWidth - 4) left = globalThis.innerWidth - tipRect.width - 4;
 
     // If it overflows the top, show below instead
     if (top < 4) top = rect.bottom + 6;

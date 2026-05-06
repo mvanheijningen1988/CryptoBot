@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from time import sleep
 from typing import TYPE_CHECKING
 
@@ -35,7 +35,7 @@ def detach_bots_for_agent(agent: Agent, db: Session) -> None:
             post_json(f"{agent.base_url}/agent/bots/{bot.id}/stop", {"bot_id": bot.id})
         bot.status = "stopped"
         bot.assigned_agent_id = None
-        bot.updated_at = datetime.utcnow()
+        bot.updated_at = datetime.now(UTC)
 
 
 def try_failover_for_bot(bot: Bot, failed_agent: Agent, db: Session) -> bool:
@@ -77,7 +77,7 @@ def try_failover_for_bot(bot: Bot, failed_agent: Agent, db: Session) -> bool:
         return False
 
     bot.assigned_agent_id = target.id
-    bot.updated_at = datetime.utcnow()
+    bot.updated_at = datetime.now(UTC)
     add_agent_event(
         target.id,
         target.name,
@@ -101,7 +101,7 @@ def failover_maintenance_loop(session_factory: sessionmaker) -> None:
     while True:
         db = session_factory()
         try:
-            now = datetime.utcnow()
+            now = datetime.now(UTC)
             approved_agents = db.query(Agent).filter(Agent.approval_status == "approved").all()
 
             for agent in approved_agents:

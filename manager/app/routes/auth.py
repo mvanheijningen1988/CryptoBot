@@ -1,6 +1,8 @@
 """Authentication endpoints: login, profile, password change, locale."""
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import Depends, HTTPException
 from fastapi.routing import APIRouter
 from sqlalchemy.orm import Session
@@ -16,9 +18,12 @@ from manager.app.models import User
 
 router = APIRouter()
 
+DbSession = Annotated[Session, Depends(get_db)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
 
-@router.post("/auth/login")
-def auth_login(body: dict, db: Session = Depends(get_db)) -> dict:
+
+@router.post("/auth/login", responses={401: {"description": "Invalid credentials"}})
+def auth_login(body: dict, db: DbSession) -> dict:
     """
     Authenticate a user by username/password and return a JWT.
 
@@ -46,7 +51,7 @@ def auth_login(body: dict, db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/auth/me")
-def auth_me(user: User = Depends(get_current_user)) -> dict:
+def auth_me(user: CurrentUser) -> dict:
     """
     Return the profile of the currently authenticated user.
 
@@ -62,8 +67,8 @@ def auth_me(user: User = Depends(get_current_user)) -> dict:
     }
 
 
-@router.post("/auth/change-password")
-def change_password(body: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+@router.post("/auth/change-password", responses={400: {"description": "Invalid password"}})
+def change_password(body: dict, user: CurrentUser, db: DbSession) -> dict:
     """
     Update the authenticated user's password and clear the forced-change flag.
 
@@ -82,8 +87,8 @@ def change_password(body: dict, user: User = Depends(get_current_user), db: Sess
     return {"ok": True}
 
 
-@router.post("/auth/locale")
-def update_locale(body: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+@router.post("/auth/locale", responses={400: {"description": "Unsupported locale"}})
+def update_locale(body: dict, user: CurrentUser, db: DbSession) -> dict:
     """
     Persist the user's preferred locale (en or nl).
 

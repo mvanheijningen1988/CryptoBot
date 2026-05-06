@@ -76,7 +76,7 @@ def _seed_viewer(client):
 
 def _seed_agent(client, agent_id="agent-1", approval="approved", status="online"):
     """Insert an agent directly and return it."""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     db = _get_db(client)
 
@@ -87,7 +87,7 @@ def _seed_agent(client, agent_id="agent-1", approval="approved", status="online"
         status=status,
         approval_status=approval,
         capacity=5,
-        last_heartbeat=datetime.utcnow(),
+        last_heartbeat=datetime.now(UTC),
     )
     db.add(agent)
     db.commit()
@@ -96,7 +96,7 @@ def _seed_agent(client, agent_id="agent-1", approval="approved", status="online"
 
 def _seed_bot(client, bot_id="bot-1", agent_id=None, status="stopped"):
     """Insert a bot directly and return it."""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     db = _get_db(client)
 
@@ -128,8 +128,8 @@ def _seed_bot(client, bot_id="bot-1", agent_id=None, status="stopped"):
             },
         }),
         latest_metrics_json="{}",
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
     )
     db.add(bot)
     db.commit()
@@ -167,7 +167,7 @@ class TestStaticPages:
 class TestAuthLogin:
     def test_valid_login(self, client):
         _seed_admin(client)
-        r = client.post("/api/v1/auth/login", json={"username": "admin", "password": "changeme123"})
+        r = client.post("/api/v1/auth/login", json={"username": "admin", "password": "changeme123"})  # NOSONAR
         assert r.status_code == 200
         body = r.json()
         assert "token" in body
@@ -176,11 +176,11 @@ class TestAuthLogin:
 
     def test_wrong_password(self, client):
         _seed_admin(client)
-        r = client.post("/api/v1/auth/login", json={"username": "admin", "password": "wrong"})
+        r = client.post("/api/v1/auth/login", json={"username": "admin", "password": "wrong"})  # NOSONAR
         assert r.status_code == 401
 
     def test_nonexistent_user(self, client):
-        r = client.post("/api/v1/auth/login", json={"username": "ghost", "password": "x"})
+        r = client.post("/api/v1/auth/login", json={"username": "ghost", "password": "x"})  # NOSONAR
         assert r.status_code == 401
 
     def test_empty_credentials(self, client):
@@ -194,7 +194,7 @@ class TestAuthLogin:
 
 class TestAuthMe:
     def test_returns_current_user(self, client):
-        user, _, header = _seed_admin(client)
+        _, _, header = _seed_admin(client)
         r = client.get("/api/v1/auth/me", headers=header)
         assert r.status_code == 200
         assert r.json()["username"] == "admin"
@@ -210,22 +210,22 @@ class TestAuthMe:
 
 class TestChangePassword:
     def test_change_password(self, client):
-        user, _, header = _seed_admin(client)
+        _, _, header = _seed_admin(client)
         r = client.post(
             "/api/v1/auth/change-password",
-            json={"new_password": "newpass123"},
+            json={"new_password": "newpass123"},  # NOSONAR
             headers=header,
         )
         assert r.status_code == 200
         # Verify new password works
-        r2 = client.post("/api/v1/auth/login", json={"username": "admin", "password": "newpass123"})
+        r2 = client.post("/api/v1/auth/login", json={"username": "admin", "password": "newpass123"})  # NOSONAR
         assert r2.status_code == 200
 
     def test_short_password_rejected(self, client):
         _, _, header = _seed_admin(client)
         r = client.post(
             "/api/v1/auth/change-password",
-            json={"new_password": "ab"},
+            json={"new_password": "ab"},  # NOSONAR
             headers=header,
         )
         assert r.status_code == 400
@@ -240,7 +240,7 @@ class TestChangePassword:
         assert r.status_code == 400
 
     def test_unauthenticated_rejected(self, client):
-        r = client.post("/api/v1/auth/change-password", json={"new_password": "newpass123"})
+        r = client.post("/api/v1/auth/change-password", json={"new_password": "newpass123"})  # NOSONAR
         assert r.status_code == 401
 
 
@@ -316,7 +316,7 @@ class TestCreateUser:
         _, _, header = _seed_admin(client)
         r = client.post(
             "/api/v1/users",
-            json={"username": "x", "password": "ab", "role": "viewer"},
+            json={"username": "x", "password": "ab", "role": "viewer"},  # NOSONAR
             headers=header,
         )
         assert r.status_code == 400
@@ -757,7 +757,7 @@ class TestMarketSummary:
         assert r.status_code == 200
         body = r.json()
         assert body["market"] == "BTC-EUR"
-        assert body["last_price"] == 51000.0
+        assert body["last_price"] == pytest.approx(51000.0)
 
     @patch("manager.app.routes.market.requests.get")
     def test_market_summary_empty(self, mock_get, client):

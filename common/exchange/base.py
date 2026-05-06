@@ -20,11 +20,9 @@ class Exchange(ABC):
 
     def start(self) -> None:
         """Open any connections or resources (no-op by default)."""
-        return
 
     def stop(self) -> None:
         """Release connections or resources (no-op by default)."""
-        return
 
     def get_price(self, fallback_price: float | None = None) -> float:
         """

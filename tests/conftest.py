@@ -147,7 +147,7 @@ def viewer_header(viewer_token):
 @pytest.fixture()
 def sample_agent(db_session):
     """Insert an approved online agent and return the ORM instance."""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     agent = Agent(
         id="agent-test-id",
@@ -156,7 +156,7 @@ def sample_agent(db_session):
         status="online",
         approval_status="approved",
         capacity=5,
-        last_heartbeat=datetime.utcnow(),
+        last_heartbeat=datetime.now(UTC),
     )
     db_session.add(agent)
     db_session.commit()
@@ -166,7 +166,7 @@ def sample_agent(db_session):
 @pytest.fixture()
 def pending_agent(db_session):
     """Insert a pending agent and return the ORM instance."""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     agent = Agent(
         id="pending-agent-id",
@@ -175,7 +175,7 @@ def pending_agent(db_session):
         status="pending",
         approval_status="pending",
         capacity=3,
-        last_heartbeat=datetime.utcnow(),
+        last_heartbeat=datetime.now(UTC),
     )
     db_session.add(agent)
     db_session.commit()
@@ -186,7 +186,7 @@ def pending_agent(db_session):
 def sample_bot(db_session, sample_agent):
     """Insert a stopped bot assigned to the sample agent."""
     import json
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     bot = Bot(
         id="bot-test-id",
@@ -216,8 +216,8 @@ def sample_bot(db_session, sample_agent):
             },
         }),
         latest_metrics_json="{}",
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
     )
     db_session.add(bot)
     db_session.commit()

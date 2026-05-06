@@ -1,7 +1,8 @@
 """Agent registration, heartbeat, approval, and log-proxy endpoints."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Annotated
 
 import requests
 from fastapi import Depends, HTTPException
@@ -17,9 +18,13 @@ from manager.app.schemas import AgentHeartbeatRequest, AgentRegisterRequest
 
 router = APIRouter()
 
+DbSession = Annotated[Session, Depends(get_db)]
+
+_AGENT_NOT_FOUND = "Agent not found"
+
 
 @router.post("/agents/register")
-def register_agent(payload: AgentRegisterRequest, db: Session = Depends(get_db)) -> dict:
+def register_agent(payload: AgentRegisterRequest, db: DbSession) -> dict:
     """
     Register a new agent or update an existing one's connection details.
 
@@ -37,7 +42,7 @@ def register_agent(payload: AgentRegisterRequest, db: Session = Depends(get_db))
             version=payload.version,
             status="pending",
             approval_status="pending",
-            last_heartbeat=datetime.utcnow(),
+            last_heartbeat=datetime.now(UTC),
         )
         db.add(agent)
         add_agent_event(
@@ -57,13 +62,13 @@ def register_agent(payload: AgentRegisterRequest, db: Session = Depends(get_db))
             agent.status = "rejected"
         else:
             agent.status = "pending"
-        agent.last_heartbeat = datetime.utcnow()
+        agent.last_heartbeat = datetime.now(UTC)
     db.commit()
     return {"ok": True, "approval_status": agent.approval_status}
 
 
-@router.post("/agents/{agent_id}/heartbeat")
-def heartbeat(agent_id: str, payload: AgentHeartbeatRequest, db: Session = Depends(get_db)) -> dict:
+@router.post("/agents/{agent_id}/heartbeat", responses={404: {"description": "Agent not found"}})
+def heartbeat(agent_id: str, payload: AgentHeartbeatRequest, db: DbSession) -> dict:
     """
     Process a heartbeat from an agent and update its status.
 
@@ -75,8 +80,8 @@ def heartbeat(agent_id: str, payload: AgentHeartbeatRequest, db: Session = Depen
     """
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    agent.last_heartbeat = datetime.utcnow()
+        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
+    agent.last_heartbeat = datetime.now(UTC)
     if payload.version:
         agent.version = payload.version
     if agent.approval_status == "approved":
@@ -89,8 +94,8 @@ def heartbeat(agent_id: str, payload: AgentHeartbeatRequest, db: Session = Depen
     return {"ok": True}
 
 
-@router.post("/agents/{agent_id}/approve")
-def approve_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
+@router.post("/agents/{agent_id}/approve", responses={404: {"description": "Agent not found"}})
+def approve_agent(agent_id: str, db: DbSession) -> dict:
     """
     Mark an agent as approved so it can receive bot assignments.
 
@@ -101,17 +106,17 @@ def approve_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
     """
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
     agent.approval_status = "approved"
     agent.status = "online"
-    agent.last_heartbeat = datetime.utcnow()
+    agent.last_heartbeat = datetime.now(UTC)
     add_agent_event(agent.id, agent.name, "approved", f"Agent {agent.name} was approved.")
     db.commit()
     return {"ok": True}
 
 
-@router.post("/agents/{agent_id}/reject")
-def reject_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
+@router.post("/agents/{agent_id}/reject", responses={404: {"description": "Agent not found"}})
+def reject_agent(agent_id: str, db: DbSession) -> dict:
     """
     Reject an agent and detach all its bots.
 
@@ -122,18 +127,18 @@ def reject_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
     """
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
     detach_bots_for_agent(agent, db)
     agent.approval_status = "rejected"
     agent.status = "rejected"
-    agent.last_heartbeat = datetime.utcnow()
+    agent.last_heartbeat = datetime.now(UTC)
     add_agent_event(agent.id, agent.name, "rejected", f"Agent {agent.name} was rejected.")
     db.commit()
     return {"ok": True}
 
 
-@router.post("/agents/{agent_id}/unapprove")
-def unapprove_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
+@router.post("/agents/{agent_id}/unapprove", responses={404: {"description": "Agent not found"}})
+def unapprove_agent(agent_id: str, db: DbSession) -> dict:
     """
     Revoke approval for an agent and detach all its bots.
 
@@ -144,18 +149,18 @@ def unapprove_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
     """
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
     detach_bots_for_agent(agent, db)
     agent.approval_status = "pending"
     agent.status = "pending"
-    agent.last_heartbeat = datetime.utcnow()
+    agent.last_heartbeat = datetime.now(UTC)
     add_agent_event(agent.id, agent.name, "unapproved", f"Agent {agent.name} was set back to pending.")
     db.commit()
     return {"ok": True}
 
 
 @router.get("/agents")
-def list_agents(db: Session = Depends(get_db)) -> list[dict]:
+def list_agents(db: DbSession) -> list[dict]:
     """
     Return all registered agents with their status, approval info, and bot count.
 
@@ -199,13 +204,13 @@ def list_agent_events() -> list[dict]:
         return list(AGENT_EVENTS)
 
 
-@router.get("/agents/{agent_id}/logs")
+@router.get("/agents/{agent_id}/logs", responses={400: {"description": "Agent not approved"}, 404: {"description": "Agent not found"}, 502: {"description": "Proxy failure"}})
 def get_agent_logs(
     agent_id: str,
+    db: DbSession,
     limit: int = 200,
     bot_id: str | None = None,
     category: str | None = None,
-    db: Session = Depends(get_db),
 ) -> dict:
     """
     Proxy log retrieval from an approved agent, forwarding filters.
@@ -220,7 +225,7 @@ def get_agent_logs(
     """
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
     if agent.approval_status != "approved":
         raise HTTPException(status_code=400, detail="Only approved agent logs are available")
 

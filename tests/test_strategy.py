@@ -214,7 +214,7 @@ class TestSingleLevelMovement:
         s.on_price(150.0, state)  # init at idx 5
         signals = s.on_price(140.0, state)  # idx 4 → 1 buy
         assert _sides(signals) == ["buy"]
-        assert signals[0].quote_amount == 10.0
+        assert signals[0].quote_amount == pytest.approx(10.0)
 
     def test_one_level_up_emits_sell(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
@@ -222,7 +222,7 @@ class TestSingleLevelMovement:
         s.on_price(150.0, state)  # init at idx 5
         signals = s.on_price(160.0, state)  # idx 6 → 1 sell
         assert _sides(signals) == ["sell"]
-        assert signals[0].quote_amount == 10.0
+        assert signals[0].quote_amount == pytest.approx(10.0)
 
     def test_state_updated_after_buy(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
@@ -471,14 +471,14 @@ class TestOrderSize:
         state = StrategyState()
         s.on_price(150.0, state)
         signals = s.on_price(140.0, state)
-        assert all(sig.quote_amount == 25.0 for sig in signals)
+        assert all(sig.quote_amount == pytest.approx(25.0) for sig in signals)
 
     def test_sell_signal_amount(self):
         s = StaticGridStrategy(_grid(order_size=25.0))
         state = StrategyState()
         s.on_price(150.0, state)
         signals = s.on_price(160.0, state)
-        assert all(sig.quote_amount == 25.0 for sig in signals)
+        assert all(sig.quote_amount == pytest.approx(25.0) for sig in signals)
 
     def test_multi_level_all_same_amount(self):
         s = StaticGridStrategy(_grid(order_size=7.5))
@@ -486,21 +486,21 @@ class TestOrderSize:
         s.on_price(200.0, state)
         signals = s.on_price(100.0, state)  # 10 buys
         assert len(signals) == 10
-        assert all(sig.quote_amount == 7.5 for sig in signals)
+        assert all(sig.quote_amount == pytest.approx(7.5) for sig in signals)
 
     def test_very_small_order_size(self):
         s = StaticGridStrategy(_grid(order_size=0.01))
         state = StrategyState()
         s.on_price(150.0, state)
         signals = s.on_price(140.0, state)
-        assert signals[0].quote_amount == 0.01
+        assert signals[0].quote_amount == pytest.approx(0.01)
 
     def test_very_large_order_size(self):
         s = StaticGridStrategy(_grid(order_size=1_000_000.0))
         state = StrategyState()
         s.on_price(150.0, state)
         signals = s.on_price(140.0, state)
-        assert signals[0].quote_amount == 1_000_000.0
+        assert signals[0].quote_amount == pytest.approx(1_000_000.0)
 
 
 # ===================================================================

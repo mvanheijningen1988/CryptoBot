@@ -14,16 +14,16 @@ from common import BotConfig, GridConfig, BudgetConfig
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _bot_config(**overrides) -> BotConfig:
-    defaults = dict(
-        market="BTC-EUR",
-        base_currency="BTC",
-        quote_currency="EUR",
-        mode="simulation",
-        strategy="static_grid",
-        start_price=100.0,
-        grid=GridConfig(lower_price=90.0, upper_price=110.0, levels=5, order_size_quote=10.0),
-        budget=BudgetConfig(quote_budget=100.0, base_budget=0.0),
-    )
+    defaults = {
+        "market": "BTC-EUR",
+        "base_currency": "BTC",
+        "quote_currency": "EUR",
+        "mode": "simulation",
+        "strategy": "static_grid",
+        "start_price": 100.0,
+        "grid": GridConfig(lower_price=90.0, upper_price=110.0, levels=5, order_size_quote=10.0),
+        "budget": BudgetConfig(quote_budget=100.0, base_budget=0.0),
+    }
     defaults.update(overrides)
     return BotConfig(**defaults)
 
@@ -95,7 +95,7 @@ class TestRunBacktest:
         cfg = _bot_config()
         result = run_backtest(cfg, [100.0])
         assert result["initial_equity_quote"] == result["final_equity_quote"]
-        assert result["total_pnl_quote"] == 0.0
+        assert result["total_pnl_quote"] == pytest.approx(0.0)
 
     def test_flat_prices_no_trades(self):
         # Price stays exactly at start – may or may not trigger grid depending on levels
@@ -120,7 +120,7 @@ class TestGridPreview:
         assert result["is_profitable"] is True
         assert result["total_trade_paths"] == 4
         assert result["step_size"] == pytest.approx(5.0)
-        assert result["fee_rate"] == 0.001
+        assert result["fee_rate"] == pytest.approx(0.001)
 
     def test_narrow_grid_high_fees_unprofitable(self):
         grid = GridConfig(lower_price=99.0, upper_price=101.0, levels=2, order_size_quote=100.0)

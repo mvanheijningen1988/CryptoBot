@@ -84,7 +84,7 @@
     </main>
 
     <!-- Create Bot modal -->
-    <div id="create_bot_modal" class="modal-backdrop" role="dialog" aria-modal="true">
+    <dialog id="create_bot_modal" class="modal-backdrop">
       <div class="modal" style="width:min(520px,95vw);grid-template-rows:auto 1fr auto;">
         <div class="modal-header">
           <h3 class="modal-title" data-i18n="create_bot_title">Create Bot</h3>
@@ -155,19 +155,19 @@
           </div>
         </div>
       </div>
-    </div>
+    </dialog>
 
     <!-- Agent discovery popup -->
-    <div id="popup_backdrop" class="popup-backdrop" role="dialog" aria-modal="true">
+    <dialog id="popup_backdrop" class="popup-backdrop">
       <div class="popup">
         <h3 data-i18n="popup_new_agent">New agent discovered</h3>
         <p id="popup_text"></p>
         <button id="popup_close" data-i18n="btn_close">Close</button>
       </div>
-    </div>
+    </dialog>
 
     <!-- Agent logs modal -->
-    <div id="agent_logs_modal" class="modal-backdrop" role="dialog" aria-modal="true">
+    <dialog id="agent_logs_modal" class="modal-backdrop">
       <div class="modal">
         <div class="modal-header">
           <h3 class="modal-title" data-i18n="logs_title">Agent Logs Stream</h3>
@@ -199,7 +199,7 @@
           </div>
         </div>
       </div>
-    </div>
+    </dialog>
 
     <!-- Scripts: i18n dictionary must load before dashboard.js -->
     <script src="/static/i18n.js"></script>

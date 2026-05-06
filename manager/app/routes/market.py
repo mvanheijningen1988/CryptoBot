@@ -13,7 +13,7 @@ from fastapi.routing import APIRouter
 router = APIRouter()
 
 
-@router.get("/balance")
+@router.get("/balance", responses={500: {"description": "Credentials missing"}, 502: {"description": "API failure"}})
 def get_balance(symbol: str) -> dict:
     """
     Proxy a balance query to the Bitvavo REST API using HMAC authentication.
@@ -74,7 +74,7 @@ def get_balance(symbol: str) -> dict:
     }
 
 
-@router.get("/market/summary")
+@router.get("/market/summary", responses={404: {"description": "Market not found"}, 502: {"description": "API failure"}})
 def market_summary(market: str) -> dict:
     """
     Return 24h summary stats for a market from the Bitvavo REST API.
@@ -126,7 +126,7 @@ def market_summary(market: str) -> dict:
     }
 
 
-@router.get("/markets")
+@router.get("/markets", responses={502: {"description": "API failure"}})
 def list_markets(status: str = "trading") -> list[dict]:
     """
     Return all Bitvavo markets filtered by status.

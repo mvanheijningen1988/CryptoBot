@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Annotated
 
 from fastapi import Depends, HTTPException
 from fastapi.routing import APIRouter
@@ -21,6 +22,12 @@ from manager.app.schemas import (
 from manager.app.services.agent_client import post_json
 
 router = APIRouter()
+
+DbSession = Annotated[Session, Depends(get_db)]
+
+_BOT_NOT_FOUND = "Bot not found"
+_AGENT_NOT_FOUND = "Agent not found"
+_AGENT_NOT_APPROVED = "Agent is not approved"
 
 
 def bot_to_response(bot: Bot) -> BotResponse:
@@ -55,14 +62,14 @@ def resolve_agent_url(agent_id: str, db: Session) -> str:
     """
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
     if agent.approval_status != "approved":
-        raise HTTPException(status_code=400, detail="Agent is not approved")
+        raise HTTPException(status_code=400, detail=_AGENT_NOT_APPROVED)  # NOSONAR - documented on calling routes
     return agent.base_url
 
 
-@router.post("/bots", response_model=BotResponse)
-def create_bot(payload: BotCreateRequest, db: Session = Depends(get_db)) -> BotResponse:
+@router.post("/bots", responses={400: {"description": "Agent not approved"}, 404: {"description": "Agent not found"}})
+def create_bot(payload: BotCreateRequest, db: DbSession) -> BotResponse:
     """
     Create a new bot with the given configuration (initially stopped).
 
@@ -80,8 +87,8 @@ def create_bot(payload: BotCreateRequest, db: Session = Depends(get_db)) -> BotR
         assigned_agent_id=None,
         config_json=payload.config.model_dump_json(),
         latest_metrics_json="{}",
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
     )
     db.add(bot)
     db.commit()
@@ -89,8 +96,8 @@ def create_bot(payload: BotCreateRequest, db: Session = Depends(get_db)) -> BotR
     return bot_to_response(bot)
 
 
-@router.get("/bots", response_model=list[BotResponse])
-def list_bots(db: Session = Depends(get_db)) -> list[BotResponse]:
+@router.get("/bots")
+def list_bots(db: DbSession) -> list[BotResponse]:
     """
     Return all bots with their current metrics.
 
@@ -101,8 +108,8 @@ def list_bots(db: Session = Depends(get_db)) -> list[BotResponse]:
     return [bot_to_response(bot) for bot in bots]
 
 
-@router.post("/bots/{bot_id}/start")
-def start_bot(bot_id: str, payload: StartBotRequest, db: Session = Depends(get_db)) -> dict:
+@router.post("/bots/{bot_id}/start", responses={400: {"description": "No agent available"}, 404: {"description": "Not found"}, 502: {"description": "Agent failure"}})
+def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
     """
     Start a bot on a specific or auto-selected approved agent.
 
@@ -114,7 +121,7 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: Session = Depends(get_d
     """
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
-        raise HTTPException(status_code=404, detail="Bot not found")
+        raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
 
     agent_id = payload.agent_id or bot.assigned_agent_id
     if not agent_id:
@@ -136,13 +143,13 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: Session = Depends(get_d
 
     bot.assigned_agent_id = agent_id
     bot.status = "running"
-    bot.updated_at = datetime.utcnow()
+    bot.updated_at = datetime.now(UTC)
     db.commit()
     return {"ok": True}
 
 
-@router.post("/bots/{bot_id}/stop")
-def stop_bot(bot_id: str, db: Session = Depends(get_db)) -> dict:
+@router.post("/bots/{bot_id}/stop", responses={404: {"description": "Not found"}, 502: {"description": "Agent failure"}})
+def stop_bot(bot_id: str, db: DbSession) -> dict:
     """
     Stop a running bot and notify its assigned agent.
 
@@ -153,7 +160,7 @@ def stop_bot(bot_id: str, db: Session = Depends(get_db)) -> dict:
     """
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
-        raise HTTPException(status_code=404, detail="Bot not found")
+        raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
     if not bot.assigned_agent_id:
         bot.status = "stopped"
         db.commit()
@@ -165,13 +172,13 @@ def stop_bot(bot_id: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=502, detail=f"Agent stop failed: {message}")
 
     bot.status = "stopped"
-    bot.updated_at = datetime.utcnow()
+    bot.updated_at = datetime.now(UTC)
     db.commit()
     return {"ok": True}
 
 
-@router.post("/bots/{bot_id}/budget")
-def update_budget(bot_id: str, payload: UpdateBudgetRequest, db: Session = Depends(get_db)) -> dict:
+@router.post("/bots/{bot_id}/budget", responses={404: {"description": "Not found"}, 502: {"description": "Agent failure"}})
+def update_budget(bot_id: str, payload: UpdateBudgetRequest, db: DbSession) -> dict:
     """
     Update the budget of a bot and forward the change to its agent if running.
 
@@ -183,7 +190,7 @@ def update_budget(bot_id: str, payload: UpdateBudgetRequest, db: Session = Depen
     """
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
-        raise HTTPException(status_code=404, detail="Bot not found")
+        raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
 
     cfg = json.loads(bot.config_json)
     cfg_budget = cfg.get("budget", {})
@@ -191,7 +198,7 @@ def update_budget(bot_id: str, payload: UpdateBudgetRequest, db: Session = Depen
     cfg_budget["base_budget"] = payload.base_budget
     cfg["budget"] = cfg_budget
     bot.config_json = json.dumps(cfg)
-    bot.updated_at = datetime.utcnow()
+    bot.updated_at = datetime.now(UTC)
 
     if bot.assigned_agent_id and bot.status == "running":
         agent_url = resolve_agent_url(bot.assigned_agent_id, db)
@@ -212,8 +219,8 @@ def update_budget(bot_id: str, payload: UpdateBudgetRequest, db: Session = Depen
     return {"ok": True}
 
 
-@router.post("/agents/{agent_id}/bots/{bot_id}/metrics")
-def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Session = Depends(get_db)) -> dict:
+@router.post("/agents/{agent_id}/bots/{bot_id}/metrics", responses={404: {"description": "Bot not found"}})
+def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: DbSession) -> dict:
     """
     Accept a metrics snapshot from an agent for a specific bot.
 
@@ -226,9 +233,9 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Se
     """
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
-        raise HTTPException(status_code=404, detail="Bot not found")
+        raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
 
     bot.latest_metrics_json = payload.snapshot.model_dump_json()
-    bot.updated_at = datetime.utcnow()
+    bot.updated_at = datetime.now(UTC)
     db.commit()
     return {"ok": True}

@@ -5,7 +5,7 @@ manager API for authentication, agent discovery, and bot lifecycle.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -36,7 +36,7 @@ class Agent(Base):
     approval_status: Mapped[str] = mapped_column(String(32), default="pending")
     capacity: Mapped[int] = mapped_column(Integer, default=5)
     version: Mapped[str] = mapped_column(String(32), default="")
-    last_heartbeat: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_heartbeat: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 class Bot(Base):
@@ -51,5 +51,5 @@ class Bot(Base):
     assigned_agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     config_json: Mapped[str] = mapped_column(Text, nullable=False)
     latest_metrics_json: Mapped[str] = mapped_column(Text, default="{}")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))

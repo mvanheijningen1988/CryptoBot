@@ -15,7 +15,7 @@ from manager.app.services.grid_preview import build_static_grid_profit_preview
 router = APIRouter()
 
 
-@router.post("/backtest", response_model=BacktestResponse)
+@router.post("/backtest")
 def backtest(payload: BacktestRequest) -> BacktestResponse:
     """
     Run a quick backtest with the supplied configuration and price data.
@@ -27,7 +27,7 @@ def backtest(payload: BacktestRequest) -> BacktestResponse:
     return BacktestResponse(**result)
 
 
-@router.post("/strategy/static-grid/preview", response_model=StaticGridPreviewResponse)
+@router.post("/strategy/static-grid/preview")
 def static_grid_preview(payload: StaticGridPreviewRequest) -> StaticGridPreviewResponse:
     """
     Return a profitability preview for the given static grid parameters.
