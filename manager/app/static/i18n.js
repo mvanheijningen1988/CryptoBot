@@ -85,6 +85,7 @@ const I18N = {
     // Agents tab
     agents_title: "Agents",
     th_bots: "Bots",
+    th_version: "Version",
     th_approval: "Approval",
     btn_approve: "Approve",
     btn_reject: "Reject",
@@ -203,6 +204,7 @@ const I18N = {
     // Agents tab
     agents_title: "Agents",
     th_bots: "Bots",
+    th_version: "Versie",
     th_approval: "Goedkeuring",
     btn_approve: "Goedkeuren",
     btn_reject: "Afwijzen",

@@ -1,7 +1,7 @@
 """Pre-trade profitability analysis for static grid configurations."""
 from __future__ import annotations
 
-from common.models import GridConfig
+from common import GridConfig
 
 
 def build_static_grid_profit_preview(grid: GridConfig, fee_rate: float) -> dict:

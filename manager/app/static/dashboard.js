@@ -95,7 +95,7 @@ const marketMeta = new Map();
  * Fetch wrapper that injects the JWT Bearer token and handles 401
  * by redirecting to the login page.
  *
- * @param {string} url - API endpoint path (e.g. "/api/bots").
+ * @param {string} url - API endpoint path (e.g. "/api/v1/bots").
  * @param {RequestInit} [options] - Standard fetch options.
  * @returns {Promise<any>} Parsed JSON body or plain text.
  */
@@ -230,7 +230,7 @@ function resetMarketSummaryToNA() {
 async function loadMarkets() {
   const sel = document.getElementById("market");
   try {
-    const markets = await api("/api/markets?status=trading");
+    const markets = await api("/api/v1/markets?status=trading");
     const cur = sel.value;
     sel.innerHTML = "";
     marketMeta.clear();
@@ -257,7 +257,7 @@ async function loadMarketSummary() {
   const market = document.getElementById("market").value.trim();
   if (!market) { resetMarketSummaryToNA(); return; }
   try {
-    const s = await api(`/api/market/summary?market=${encodeURIComponent(market)}`);
+    const s = await api(`/api/v1/market/summary?market=${encodeURIComponent(market)}`);
     marketSnapshot = {
       market: s.market,
       last: Number(s.last_price ?? 0),
@@ -290,8 +290,8 @@ async function loadBalances() {
 
   try {
     const [baseData, quoteData] = await Promise.all([
-      api(`/api/balance?symbol=${encodeURIComponent(baseSym)}`),
-      api(`/api/balance?symbol=${encodeURIComponent(quoteSym)}`),
+      api(`/api/v1/balance?symbol=${encodeURIComponent(baseSym)}`),
+      api(`/api/v1/balance?symbol=${encodeURIComponent(quoteSym)}`),
     ]);
     const availQuote = Number(quoteData.available);
     baseEl.textContent = `${Number(baseData.available).toFixed(8)} ${baseSym}`;
@@ -400,7 +400,7 @@ async function checkGridProfitability() {
       },
       fee_rate: Number(document.getElementById("fee_rate_percent").value) / 100,
     };
-    const r = await api("/api/strategy/static-grid/preview", { method: "POST", body: JSON.stringify(payload) });
+    const r = await api("/api/v1/strategy/static-grid/preview", { method: "POST", body: JSON.stringify(payload) });
     lastGridPreview = r;
 
     const cls = r.is_profitable ? "profit-ok" : "profit-warn";
@@ -427,7 +427,7 @@ async function checkGridProfitability() {
  * Start/Stop buttons are hidden for viewer-role users.
  */
 async function loadBots() {
-  const bots = await api("/api/bots");
+  const bots = await api("/api/v1/bots");
   const body = document.getElementById("bots_body");
   body.innerHTML = "";
   const isViewer = currentUser && currentUser.role === "viewer";
@@ -449,10 +449,10 @@ async function loadBots() {
   // Wire up action buttons (only present for non-viewers)
   if (!isViewer) {
     body.querySelectorAll("button[data-start]").forEach((b) => {
-      b.onclick = async () => { await api(`/api/bots/${b.dataset.start}/start`, { method: "POST", body: JSON.stringify({}) }); await loadBots(); };
+      b.onclick = async () => { await api(`/api/v1/bots/${b.dataset.start}/start`, { method: "POST", body: JSON.stringify({}) }); await loadBots(); };
     });
     body.querySelectorAll("button[data-stop]").forEach((b) => {
-      b.onclick = async () => { await api(`/api/bots/${b.dataset.stop}/stop`, { method: "POST" }); await loadBots(); };
+      b.onclick = async () => { await api(`/api/v1/bots/${b.dataset.stop}/stop`, { method: "POST" }); await loadBots(); };
     });
   }
 }
@@ -481,7 +481,7 @@ function showPopup(message) {
  * except "Open logs" which is always visible for approved agents.
  */
 async function loadAgents() {
-  const agents = await api("/api/agents");
+  const agents = await api("/api/v1/agents");
   const body = document.getElementById("agents_body");
   body.innerHTML = "";
   const isViewer = currentUser && currentUser.role === "viewer";
@@ -506,20 +506,21 @@ async function loadAgents() {
 
     const displayStatus = agent.status === "offline" ? "dead" : agent.status;
     const botCount = agent.bot_count ?? 0;
-    tr.innerHTML = `<td>${agent.name}</td><td>${displayStatus}</td><td>${botCount}</td><td>${agent.approval_status}</td><td>${ah}</td>`;
+    const version = agent.version || "-";
+    tr.innerHTML = `<td>${agent.name}</td><td>${displayStatus}</td><td>${botCount}</td><td>${version}</td><td>${agent.approval_status}</td><td>${ah}</td>`;
     body.appendChild(tr);
   }
 
   // Wire up all action buttons
   body.querySelectorAll("button[data-approve]").forEach((b) => {
-    b.onclick = async () => { await api(`/api/agents/${b.dataset.approve}/approve`, { method: "POST" }); await loadAgents(); await loadEvents(); };
+    b.onclick = async () => { await api(`/api/v1/agents/${b.dataset.approve}/approve`, { method: "POST" }); await loadAgents(); await loadEvents(); };
   });
   body.querySelectorAll("button[data-reject]").forEach((b) => {
-    b.onclick = async () => { await api(`/api/agents/${b.dataset.reject}/reject`, { method: "POST" }); await loadAgents(); await loadEvents(); };
+    b.onclick = async () => { await api(`/api/v1/agents/${b.dataset.reject}/reject`, { method: "POST" }); await loadAgents(); await loadEvents(); };
   });
   body.querySelectorAll("button[data-unapprove]").forEach((b) => {
     b.onclick = async () => {
-      await api(`/api/agents/${b.dataset.unapprove}/unapprove`, { method: "POST" });
+      await api(`/api/v1/agents/${b.dataset.unapprove}/unapprove`, { method: "POST" });
       // If the unapproved agent was selected in the logs modal, close it
       if (selectedAgentId === b.dataset.unapprove) { selectedAgentId = null; closeLogsModal(); }
       await loadAgents(); await loadEvents();
@@ -565,7 +566,7 @@ async function loadAgentLogs() {
   if (category) qs.set("category", category);
 
   try {
-    const payload = await api(`/api/agents/${selectedAgentId}/logs?${qs.toString()}`);
+    const payload = await api(`/api/v1/agents/${selectedAgentId}/logs?${qs.toString()}`);
     const logs = payload.logs || [];
     if (!logs.length) { list.innerHTML = `<div class="log-item">${t("logs_none")}</div>`; return; }
 
@@ -594,7 +595,7 @@ async function loadAgentLogs() {
  * panel. Newly discovered agents trigger a popup notification once.
  */
 async function loadEvents() {
-  const events = await api("/api/agent-events");
+  const events = await api("/api/v1/agent-events");
   const list = document.getElementById("events_list");
   list.innerHTML = "";
 
@@ -622,7 +623,7 @@ document.getElementById("create").onclick = async () => {
   if (lastGridPreview && !lastGridPreview.is_profitable) {
     if (!window.confirm(t("grid_confirm_unprofitable"))) return;
   }
-  await api("/api/bots", { method: "POST", body: JSON.stringify({ name: document.getElementById("name").value, config: currentConfig() }) });
+  await api("/api/v1/bots", { method: "POST", body: JSON.stringify({ name: document.getElementById("name").value, config: currentConfig() }) });
   await loadBots();
   document.getElementById("create_bot_modal").style.display = "none";
 };
@@ -648,7 +649,7 @@ document.getElementById("check_grid_profit").onclick = async () => { await check
 
 /** Run a quick backtest using the current form parameters. */
 document.getElementById("backtest").onclick = async () => {
-  const result = await api("/api/backtest", { method: "POST", body: JSON.stringify({ config: currentConfig() }) });
+  const result = await api("/api/v1/backtest", { method: "POST", body: JSON.stringify({ config: currentConfig() }) });
   document.getElementById("backtest_result").textContent = JSON.stringify(result, null, 2);
 };
 
@@ -701,7 +702,7 @@ document.querySelectorAll(".lang-flag").forEach((btn) => {
     localStorage.setItem("cryptobot_lang", lang);
     updateLangFlags();
     applyTranslations();
-    try { await api("/api/auth/locale", { method: "POST", body: JSON.stringify({ locale: lang }) }); } catch (e) {}
+    try { await api("/api/v1/auth/locale", { method: "POST", body: JSON.stringify({ locale: lang }) }); } catch (e) {}
   };
 });
 
@@ -724,7 +725,7 @@ document.getElementById("btn_logout").onclick = () => {
 
   // Validate the token and fetch the current user profile
   try {
-    currentUser = await api("/api/auth/me");
+    currentUser = await api("/api/v1/auth/me");
     // If the user still needs to change their password, send them back
     if (currentUser.must_change_password) { window.location.href = "/login"; return; }
   } catch (e) {

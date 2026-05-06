@@ -54,9 +54,9 @@ def db_session(db_engine):
 def client(db_engine):
     """Return a ``TestClient`` wired to an in-memory database.
 
-    Patches both the ``get_db`` dependency *and* the module-level
-    ``SessionLocal`` / ``engine`` used by the startup event and
-    migration helpers so everything targets the in-memory engine.
+    Patches the ``get_db`` dependency and the module-level
+    ``SessionLocal`` used by the startup event and failover thread
+    so everything targets the in-memory engine.
     """
     from unittest.mock import patch
     from fastapi.testclient import TestClient
@@ -73,10 +73,7 @@ def client(db_engine):
 
     app.dependency_overrides[get_db] = _override_get_db
 
-    with (
-        patch("manager.app.main.SessionLocal", TestSession),
-        patch("manager.app.main.engine", db_engine),
-    ):
+    with patch("manager.app.main.SessionLocal", TestSession):
         with TestClient(app) as c:
             yield c
 

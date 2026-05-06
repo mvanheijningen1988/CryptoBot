@@ -8,7 +8,7 @@ import pytest
 from manager.app.services.agent_client import post_json
 from manager.app.services.backtest import run_backtest
 from manager.app.services.grid_preview import build_static_grid_profit_preview
-from common.models import BotConfig, GridConfig, BudgetConfig
+from common import BotConfig, GridConfig, BudgetConfig
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

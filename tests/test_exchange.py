@@ -12,10 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from common.exchange.base import Exchange
-from common.exchange.simulated import SimulatedExchange
-from common.exchange.bitvavo import BitvavoExchange
-from common.models import BudgetConfig, TradeSignal
+from common import Exchange, SimulatedExchange, BitvavoExchange, BudgetConfig, TradeSignal
 
 
 # ---------------------------------------------------------------------------

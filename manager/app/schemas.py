@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from common.models import BotConfig, BotSnapshot, GridConfig
+from common import BotConfig, BotSnapshot, GridConfig
 
 
 class AgentRegisterRequest(BaseModel):
@@ -16,12 +16,14 @@ class AgentRegisterRequest(BaseModel):
     name: str
     base_url: str
     capacity: int = Field(default=5, ge=1)
+    version: str = ""
 
 
 class AgentHeartbeatRequest(BaseModel):
     """Periodic keepalive sent by agents."""
 
     status: str = "online"
+    version: str = ""
 
 
 class BotCreateRequest(BaseModel):

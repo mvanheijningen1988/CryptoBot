@@ -1,0 +1,75 @@
+"""Lightweight SQLite migrations for the manager database.
+
+Each migration function is idempotent and safe to re-run.  They are
+called once during application startup.
+"""
+from __future__ import annotations
+
+from sqlalchemy import Engine
+
+
+def run_migrations(engine: Engine) -> None:
+    """
+    Execute all pending schema migrations against *engine*.
+
+    :param engine: The SQLAlchemy engine to run migrations on.
+    """
+    _ensure_agent_approval_column(engine)
+    _ensure_agent_version_column(engine)
+    _ensure_users_table(engine)
+
+
+def _ensure_agent_approval_column(engine: Engine) -> None:
+    """Add ``approval_status`` column to agents if missing."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(agents)").fetchall()
+            columns = {row[1] for row in rows}
+            if "approval_status" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE agents ADD COLUMN approval_status VARCHAR(32) DEFAULT 'pending'"
+                )
+                conn.exec_driver_sql(
+                    "UPDATE agents SET approval_status='approved' WHERE approval_status IS NULL"
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+
+def _ensure_agent_version_column(engine: Engine) -> None:
+    """Add ``version`` column to agents if missing."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(agents)").fetchall()
+            columns = {row[1] for row in rows}
+            if "version" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE agents ADD COLUMN version VARCHAR(32) DEFAULT ''"
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+
+def _ensure_users_table(engine: Engine) -> None:
+    """Create the ``users`` table if it does not yet exist (SQLite only)."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
+            ).fetchall()
+            if not rows:
+                conn.exec_driver_sql(
+                    """CREATE TABLE users (
+                        id VARCHAR(64) PRIMARY KEY,
+                        username VARCHAR(128) UNIQUE NOT NULL,
+                        password_hash VARCHAR(255) NOT NULL,
+                        role VARCHAR(32) DEFAULT 'viewer',
+                        locale VARCHAR(8) DEFAULT 'en',
+                        must_change_password BOOLEAN DEFAULT 0
+                    )"""
+                )
+                conn.commit()
+        except Exception:
+            pass

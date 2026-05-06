@@ -70,7 +70,7 @@ document.getElementById("btn_login").onclick = async () => {
   errEl.style.display = "none";
 
   try {
-    const res = await fetch("/api/auth/login", {
+    const res = await fetch("/api/v1/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
@@ -133,7 +133,7 @@ document.getElementById("btn_change_pw").onclick = async () => {
   }
 
   try {
-    const res = await fetch("/api/auth/change-password", {
+    const res = await fetch("/api/v1/auth/change-password", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -175,7 +175,7 @@ document.getElementById("confirm_password").addEventListener("keydown", (e) => {
   const token = localStorage.getItem("cryptobot_token");
   if (token) {
     try {
-      const res = await fetch("/api/auth/me", {
+      const res = await fetch("/api/v1/auth/me", {
         headers: { Authorization: "Bearer " + token },
       });
       if (res.ok) {

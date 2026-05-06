@@ -1,0 +1,16 @@
+[project]
+name = "cryptobot-manager"
+version = "1.0.0"
+description = "CryptoBot Manager – Central API and dashboard"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "SQLAlchemy>=2.0,<3",
+    "pydantic>=2.9,<3",
+    "requests>=2.32,<3",
+    "python-dotenv>=1.0,<2",
+    "passlib[bcrypt]>=1.7,<2",
+    "PyJWT>=2.9,<3",
+    "bcrypt>=4.0,<5",
+]

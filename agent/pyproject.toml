@@ -1,0 +1,13 @@
+[project]
+name = "cryptobot-agent"
+version = "1.0.0"
+description = "CryptoBot Agent – Remote bot runner"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "requests>=2.32,<3",
+    "pydantic>=2.9,<3",
+    "python-dotenv>=1.0,<2",
+    "websocket-client>=1.8,<2",
+]

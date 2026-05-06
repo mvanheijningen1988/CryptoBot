@@ -11,6 +11,8 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from typing import Any
+
 import jwt
 from fastapi import Depends, HTTPException, Request
 from passlib.context import CryptContext
@@ -120,7 +122,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
-def require_role(*allowed_roles: str):
+def require_role(*allowed_roles: str) -> Any:
     """
     Return a FastAPI dependency that restricts access to the given roles.
 

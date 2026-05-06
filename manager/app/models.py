@@ -35,6 +35,7 @@ class Agent(Base):
     status: Mapped[str] = mapped_column(String(32), default="online")
     approval_status: Mapped[str] = mapped_column(String(32), default="pending")
     capacity: Mapped[int] = mapped_column(Integer, default=5)
+    version: Mapped[str] = mapped_column(String(32), default="")
     last_heartbeat: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from common.models import GridConfig, TradeSignal
-from common.strategy.base import StrategyState
-from common.strategy.static_grid import StaticGridStrategy
+from common import GridConfig, TradeSignal, StrategyState, StaticGridStrategy
 
 
 # ---------------------------------------------------------------------------

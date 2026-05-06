@@ -3,10 +3,7 @@ from __future__ import annotations
 
 import random
 
-from common.exchange.simulated import SimulatedExchange
-from common.models import BotConfig
-from common.strategy.base import StrategyState
-from common.strategy.static_grid import StaticGridStrategy
+from common import BotConfig, SimulatedExchange, StrategyState, StaticGridStrategy
 
 
 def run_backtest(config: BotConfig, prices: list[float] | None = None) -> dict:

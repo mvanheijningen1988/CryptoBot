@@ -167,7 +167,7 @@ class TestStaticPages:
 class TestAuthLogin:
     def test_valid_login(self, client):
         _seed_admin(client)
-        r = client.post("/api/auth/login", json={"username": "admin", "password": "changeme123"})
+        r = client.post("/api/v1/auth/login", json={"username": "admin", "password": "changeme123"})
         assert r.status_code == 200
         body = r.json()
         assert "token" in body
@@ -176,35 +176,35 @@ class TestAuthLogin:
 
     def test_wrong_password(self, client):
         _seed_admin(client)
-        r = client.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
+        r = client.post("/api/v1/auth/login", json={"username": "admin", "password": "wrong"})
         assert r.status_code == 401
 
     def test_nonexistent_user(self, client):
-        r = client.post("/api/auth/login", json={"username": "ghost", "password": "x"})
+        r = client.post("/api/v1/auth/login", json={"username": "ghost", "password": "x"})
         assert r.status_code == 401
 
     def test_empty_credentials(self, client):
-        r = client.post("/api/auth/login", json={"username": "", "password": ""})
+        r = client.post("/api/v1/auth/login", json={"username": "", "password": ""})
         assert r.status_code == 401
 
     def test_missing_fields(self, client):
-        r = client.post("/api/auth/login", json={})
+        r = client.post("/api/v1/auth/login", json={})
         assert r.status_code == 401
 
 
 class TestAuthMe:
     def test_returns_current_user(self, client):
         user, _, header = _seed_admin(client)
-        r = client.get("/api/auth/me", headers=header)
+        r = client.get("/api/v1/auth/me", headers=header)
         assert r.status_code == 200
         assert r.json()["username"] == "admin"
 
     def test_no_token_returns_401(self, client):
-        r = client.get("/api/auth/me")
+        r = client.get("/api/v1/auth/me")
         assert r.status_code == 401
 
     def test_invalid_token_returns_401(self, client):
-        r = client.get("/api/auth/me", headers={"Authorization": "Bearer garbage"})
+        r = client.get("/api/v1/auth/me", headers={"Authorization": "Bearer garbage"})
         assert r.status_code == 401
 
 
@@ -212,19 +212,19 @@ class TestChangePassword:
     def test_change_password(self, client):
         user, _, header = _seed_admin(client)
         r = client.post(
-            "/api/auth/change-password",
+            "/api/v1/auth/change-password",
             json={"new_password": "newpass123"},
             headers=header,
         )
         assert r.status_code == 200
         # Verify new password works
-        r2 = client.post("/api/auth/login", json={"username": "admin", "password": "newpass123"})
+        r2 = client.post("/api/v1/auth/login", json={"username": "admin", "password": "newpass123"})
         assert r2.status_code == 200
 
     def test_short_password_rejected(self, client):
         _, _, header = _seed_admin(client)
         r = client.post(
-            "/api/auth/change-password",
+            "/api/v1/auth/change-password",
             json={"new_password": "ab"},
             headers=header,
         )
@@ -233,31 +233,31 @@ class TestChangePassword:
     def test_empty_password_rejected(self, client):
         _, _, header = _seed_admin(client)
         r = client.post(
-            "/api/auth/change-password",
+            "/api/v1/auth/change-password",
             json={"new_password": ""},
             headers=header,
         )
         assert r.status_code == 400
 
     def test_unauthenticated_rejected(self, client):
-        r = client.post("/api/auth/change-password", json={"new_password": "newpass123"})
+        r = client.post("/api/v1/auth/change-password", json={"new_password": "newpass123"})
         assert r.status_code == 401
 
 
 class TestUpdateLocale:
     def test_set_nl(self, client):
         _, _, header = _seed_admin(client)
-        r = client.post("/api/auth/locale", json={"locale": "nl"}, headers=header)
+        r = client.post("/api/v1/auth/locale", json={"locale": "nl"}, headers=header)
         assert r.status_code == 200
         assert r.json()["locale"] == "nl"
 
     def test_unsupported_locale(self, client):
         _, _, header = _seed_admin(client)
-        r = client.post("/api/auth/locale", json={"locale": "fr"}, headers=header)
+        r = client.post("/api/v1/auth/locale", json={"locale": "fr"}, headers=header)
         assert r.status_code == 400
 
     def test_unauthenticated(self, client):
-        r = client.post("/api/auth/locale", json={"locale": "en"})
+        r = client.post("/api/v1/auth/locale", json={"locale": "en"})
         assert r.status_code == 401
 
 
@@ -267,13 +267,13 @@ class TestUpdateLocale:
 class TestListUsers:
     def test_admin_can_list(self, client):
         _, _, header = _seed_admin(client)
-        r = client.get("/api/users", headers=header)
+        r = client.get("/api/v1/users", headers=header)
         assert r.status_code == 200
         assert isinstance(r.json(), list)
 
     def test_viewer_forbidden(self, client):
         _, _, header = _seed_viewer(client)
-        r = client.get("/api/users", headers=header)
+        r = client.get("/api/v1/users", headers=header)
         assert r.status_code == 403
 
 
@@ -281,7 +281,7 @@ class TestCreateUser:
     def test_admin_creates_user(self, client):
         _, _, header = _seed_admin(client)
         r = client.post(
-            "/api/users",
+            "/api/v1/users",
             json={"username": "newguy", "password": "password1", "role": "viewer"},
             headers=header,
         )
@@ -292,12 +292,12 @@ class TestCreateUser:
     def test_duplicate_username(self, client):
         _, _, header = _seed_admin(client)
         client.post(
-            "/api/users",
+            "/api/v1/users",
             json={"username": "dup", "password": "password1", "role": "viewer"},
             headers=header,
         )
         r = client.post(
-            "/api/users",
+            "/api/v1/users",
             json={"username": "dup", "password": "password2", "role": "viewer"},
             headers=header,
         )
@@ -306,7 +306,7 @@ class TestCreateUser:
     def test_invalid_role(self, client):
         _, _, header = _seed_admin(client)
         r = client.post(
-            "/api/users",
+            "/api/v1/users",
             json={"username": "x", "password": "password1", "role": "superadmin"},
             headers=header,
         )
@@ -315,7 +315,7 @@ class TestCreateUser:
     def test_short_password(self, client):
         _, _, header = _seed_admin(client)
         r = client.post(
-            "/api/users",
+            "/api/v1/users",
             json={"username": "x", "password": "ab", "role": "viewer"},
             headers=header,
         )
@@ -324,7 +324,7 @@ class TestCreateUser:
     def test_empty_username(self, client):
         _, _, header = _seed_admin(client)
         r = client.post(
-            "/api/users",
+            "/api/v1/users",
             json={"username": "", "password": "password1", "role": "viewer"},
             headers=header,
         )
@@ -333,7 +333,7 @@ class TestCreateUser:
     def test_viewer_cannot_create(self, client):
         _, _, header = _seed_viewer(client)
         r = client.post(
-            "/api/users",
+            "/api/v1/users",
             json={"username": "x", "password": "password1", "role": "viewer"},
             headers=header,
         )
@@ -345,27 +345,27 @@ class TestDeleteUser:
         _, _, header = _seed_admin(client)
         # Create a user to delete
         r = client.post(
-            "/api/users",
+            "/api/v1/users",
             json={"username": "todelete", "password": "password1", "role": "viewer"},
             headers=header,
         )
         uid = r.json()["id"]
-        r2 = client.delete(f"/api/users/{uid}", headers=header)
+        r2 = client.delete(f"/api/v1/users/{uid}", headers=header)
         assert r2.status_code == 200
 
     def test_cannot_delete_self(self, client):
         user, _, header = _seed_admin(client)
-        r = client.delete(f"/api/users/{user.id}", headers=header)
+        r = client.delete(f"/api/v1/users/{user.id}", headers=header)
         assert r.status_code == 400
 
     def test_delete_nonexistent(self, client):
         _, _, header = _seed_admin(client)
-        r = client.delete("/api/users/does-not-exist", headers=header)
+        r = client.delete("/api/v1/users/does-not-exist", headers=header)
         assert r.status_code == 404
 
     def test_viewer_cannot_delete(self, client):
         _, _, header = _seed_viewer(client)
-        r = client.delete("/api/users/some-id", headers=header)
+        r = client.delete("/api/v1/users/some-id", headers=header)
         assert r.status_code == 403
 
 
@@ -374,7 +374,7 @@ class TestDeleteUser:
 
 class TestRegisterAgent:
     def test_register_new_agent(self, client):
-        r = client.post("/api/agents/register", json={
+        r = client.post("/api/v1/agents/register", json={
             "agent_id": "new-agent",
             "name": "New Agent",
             "base_url": "http://new:8100",
@@ -384,13 +384,13 @@ class TestRegisterAgent:
         assert r.json()["approval_status"] == "pending"
 
     def test_register_existing_agent_updates(self, client):
-        client.post("/api/agents/register", json={
+        client.post("/api/v1/agents/register", json={
             "agent_id": "same-agent",
             "name": "Original",
             "base_url": "http://original:8100",
             "capacity": 5,
         })
-        r = client.post("/api/agents/register", json={
+        r = client.post("/api/v1/agents/register", json={
             "agent_id": "same-agent",
             "name": "Updated",
             "base_url": "http://updated:8100",
@@ -402,56 +402,56 @@ class TestRegisterAgent:
 class TestHeartbeat:
     def test_heartbeat_approved_agent(self, client):
         _seed_agent(client, "hb-agent")
-        r = client.post("/api/agents/hb-agent/heartbeat", json={"status": "online"})
+        r = client.post("/api/v1/agents/hb-agent/heartbeat", json={"status": "online"})
         assert r.status_code == 200
 
     def test_heartbeat_nonexistent(self, client):
-        r = client.post("/api/agents/ghost/heartbeat", json={"status": "online"})
+        r = client.post("/api/v1/agents/ghost/heartbeat", json={"status": "online"})
         assert r.status_code == 404
 
 
 class TestApproveAgent:
     def test_approve_pending(self, client):
         _seed_agent(client, "ap-agent", approval="pending", status="pending")
-        r = client.post("/api/agents/ap-agent/approve")
+        r = client.post("/api/v1/agents/ap-agent/approve")
         assert r.status_code == 200
 
     def test_approve_nonexistent(self, client):
-        r = client.post("/api/agents/ghost/approve")
+        r = client.post("/api/v1/agents/ghost/approve")
         assert r.status_code == 404
 
 
 class TestRejectAgent:
     def test_reject_agent(self, client):
         _seed_agent(client, "rj-agent", approval="pending", status="pending")
-        r = client.post("/api/agents/rj-agent/reject")
+        r = client.post("/api/v1/agents/rj-agent/reject")
         assert r.status_code == 200
 
     def test_reject_nonexistent(self, client):
-        r = client.post("/api/agents/ghost/reject")
+        r = client.post("/api/v1/agents/ghost/reject")
         assert r.status_code == 404
 
 
 class TestUnapproveAgent:
     def test_unapprove_agent(self, client):
         _seed_agent(client, "un-agent", approval="approved", status="online")
-        r = client.post("/api/agents/un-agent/unapprove")
+        r = client.post("/api/v1/agents/un-agent/unapprove")
         assert r.status_code == 200
 
     def test_unapprove_nonexistent(self, client):
-        r = client.post("/api/agents/ghost/unapprove")
+        r = client.post("/api/v1/agents/ghost/unapprove")
         assert r.status_code == 404
 
 
 class TestListAgents:
     def test_empty(self, client):
-        r = client.get("/api/agents")
+        r = client.get("/api/v1/agents")
         assert r.status_code == 200
         assert r.json() == []
 
     def test_returns_agents(self, client):
         _seed_agent(client, "list-a")
-        r = client.get("/api/agents")
+        r = client.get("/api/v1/agents")
         assert r.status_code == 200
         assert len(r.json()) == 1
         assert r.json()[0]["id"] == "list-a"
@@ -459,7 +459,7 @@ class TestListAgents:
 
 class TestAgentEvents:
     def test_returns_list(self, client):
-        r = client.get("/api/agent-events")
+        r = client.get("/api/v1/agent-events")
         assert r.status_code == 200
         assert isinstance(r.json(), list)
 
@@ -467,11 +467,11 @@ class TestAgentEvents:
 class TestAgentLogs:
     def test_unapproved_agent_returns_400(self, client):
         _seed_agent(client, "logs-agent", approval="pending", status="pending")
-        r = client.get("/api/agents/logs-agent/logs")
+        r = client.get("/api/v1/agents/logs-agent/logs")
         assert r.status_code == 400
 
     def test_nonexistent_agent_returns_404(self, client):
-        r = client.get("/api/agents/ghost/logs")
+        r = client.get("/api/v1/agents/ghost/logs")
         assert r.status_code == 404
 
 
@@ -480,7 +480,7 @@ class TestAgentLogs:
 
 class TestCreateBot:
     def test_create_bot(self, client):
-        r = client.post("/api/bots", json={
+        r = client.post("/api/v1/bots", json={
             "name": "My Bot",
             "config": {
                 "market": "BTC-EUR",
@@ -512,58 +512,58 @@ class TestCreateBot:
 
 class TestListBots:
     def test_empty(self, client):
-        r = client.get("/api/bots")
+        r = client.get("/api/v1/bots")
         assert r.status_code == 200
         assert r.json() == []
 
     def test_returns_bots(self, client):
         _seed_agent(client, "lb-agent")
         _seed_bot(client, "lb-bot", agent_id="lb-agent")
-        r = client.get("/api/bots")
+        r = client.get("/api/v1/bots")
         assert r.status_code == 200
         assert len(r.json()) == 1
 
 
 class TestStartBot:
-    @patch("manager.app.main.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
     def test_start_with_agent(self, mock_post, client):
         _seed_agent(client, "start-agent")
         _seed_bot(client, "start-bot", agent_id="start-agent")
-        r = client.post("/api/bots/start-bot/start", json={"agent_id": "start-agent"})
+        r = client.post("/api/v1/bots/start-bot/start", json={"agent_id": "start-agent"})
         assert r.status_code == 200
 
     def test_start_nonexistent_bot(self, client):
-        r = client.post("/api/bots/ghost/start", json={})
+        r = client.post("/api/v1/bots/ghost/start", json={})
         assert r.status_code == 404
 
     def test_start_no_agent_available(self, client):
         _seed_bot(client, "lonely-bot")
-        r = client.post("/api/bots/lonely-bot/start", json={})
+        r = client.post("/api/v1/bots/lonely-bot/start", json={})
         assert r.status_code == 400
 
-    @patch("manager.app.main.post_json", return_value=(False, "connection refused"))
+    @patch("manager.app.routes.bots.post_json", return_value=(False, "connection refused"))
     def test_start_agent_failure(self, mock_post, client):
         _seed_agent(client, "fail-agent")
         _seed_bot(client, "fail-bot", agent_id="fail-agent")
-        r = client.post("/api/bots/fail-bot/start", json={"agent_id": "fail-agent"})
+        r = client.post("/api/v1/bots/fail-bot/start", json={"agent_id": "fail-agent"})
         assert r.status_code == 502
 
 
 class TestStopBot:
-    @patch("manager.app.main.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
     def test_stop_running_bot(self, mock_post, client):
         _seed_agent(client, "stop-agent")
         _seed_bot(client, "stop-bot", agent_id="stop-agent", status="running")
-        r = client.post("/api/bots/stop-bot/stop")
+        r = client.post("/api/v1/bots/stop-bot/stop")
         assert r.status_code == 200
 
     def test_stop_nonexistent_bot(self, client):
-        r = client.post("/api/bots/ghost/stop")
+        r = client.post("/api/v1/bots/ghost/stop")
         assert r.status_code == 404
 
     def test_stop_unassigned_bot(self, client):
         _seed_bot(client, "unassigned-bot")
-        r = client.post("/api/bots/unassigned-bot/stop")
+        r = client.post("/api/v1/bots/unassigned-bot/stop")
         assert r.status_code == 200
 
 
@@ -572,24 +572,24 @@ class TestUpdateBudget:
         _seed_agent(client, "bud-agent")
         _seed_bot(client, "bud-bot", agent_id="bud-agent")
         r = client.post(
-            "/api/bots/bud-bot/budget",
+            "/api/v1/bots/bud-bot/budget",
             json={"quote_budget": 2000.0, "base_budget": 0.5},
         )
         assert r.status_code == 200
 
     def test_update_budget_nonexistent(self, client):
         r = client.post(
-            "/api/bots/ghost/budget",
+            "/api/v1/bots/ghost/budget",
             json={"quote_budget": 100.0, "base_budget": 0.0},
         )
         assert r.status_code == 404
 
-    @patch("manager.app.main.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
     def test_update_budget_running_bot_forwards_to_agent(self, mock_post, client):
         _seed_agent(client, "brun-agent")
         _seed_bot(client, "brun-bot", agent_id="brun-agent", status="running")
         r = client.post(
-            "/api/bots/brun-bot/budget",
+            "/api/v1/bots/brun-bot/budget",
             json={"quote_budget": 3000.0, "base_budget": 1.0},
         )
         assert r.status_code == 200
@@ -601,7 +601,7 @@ class TestPushMetrics:
         _seed_agent(client, "met-agent")
         _seed_bot(client, "met-bot", agent_id="met-agent")
         r = client.post(
-            "/api/agents/met-agent/bots/met-bot/metrics",
+            "/api/v1/agents/met-agent/bots/met-bot/metrics",
             json={
                 "snapshot": {
                     "bot_id": "met-bot",
@@ -623,7 +623,7 @@ class TestPushMetrics:
     def test_push_metrics_nonexistent_bot(self, client):
         _seed_agent(client, "met2-agent")
         r = client.post(
-            "/api/agents/met2-agent/bots/ghost/metrics",
+            "/api/v1/agents/met2-agent/bots/ghost/metrics",
             json={
                 "snapshot": {
                     "bot_id": "ghost",
@@ -648,7 +648,7 @@ class TestPushMetrics:
 
 class TestBacktest:
     def test_backtest_with_prices(self, client):
-        r = client.post("/api/backtest", json={
+        r = client.post("/api/v1/backtest", json={
             "config": {
                 "market": "BTC-EUR",
                 "base_currency": "BTC",
@@ -677,7 +677,7 @@ class TestBacktest:
         assert "trades_executed" in body
 
     def test_backtest_auto_prices(self, client):
-        r = client.post("/api/backtest", json={
+        r = client.post("/api/v1/backtest", json={
             "config": {
                 "market": "BTC-EUR",
                 "base_currency": "BTC",
@@ -707,7 +707,7 @@ class TestBacktest:
 
 class TestGridPreview:
     def test_profitable_grid(self, client):
-        r = client.post("/api/strategy/static-grid/preview", json={
+        r = client.post("/api/v1/strategy/static-grid/preview", json={
             "grid": {
                 "lower_price": 90.0,
                 "upper_price": 110.0,
@@ -723,7 +723,7 @@ class TestGridPreview:
         assert body["total_trade_paths"] == 4  # levels - 1
 
     def test_high_fee_unprofitable(self, client):
-        r = client.post("/api/strategy/static-grid/preview", json={
+        r = client.post("/api/v1/strategy/static-grid/preview", json={
             "grid": {
                 "lower_price": 99.0,
                 "upper_price": 101.0,
@@ -740,7 +740,7 @@ class TestGridPreview:
 
 
 class TestMarketSummary:
-    @patch("manager.app.main.requests.get")
+    @patch("manager.app.routes.market.requests.get")
     def test_market_summary_ok(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -753,25 +753,25 @@ class TestMarketSummary:
         }]
         mock_get.return_value = mock_resp
 
-        r = client.get("/api/market/summary?market=BTC-EUR")
+        r = client.get("/api/v1/market/summary?market=BTC-EUR")
         assert r.status_code == 200
         body = r.json()
         assert body["market"] == "BTC-EUR"
         assert body["last_price"] == 51000.0
 
-    @patch("manager.app.main.requests.get")
+    @patch("manager.app.routes.market.requests.get")
     def test_market_summary_empty(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = []
         mock_get.return_value = mock_resp
 
-        r = client.get("/api/market/summary?market=FAKE-EUR")
+        r = client.get("/api/v1/market/summary?market=FAKE-EUR")
         assert r.status_code == 404
 
 
 class TestListMarkets:
-    @patch("manager.app.main.requests.get")
+    @patch("manager.app.routes.market.requests.get")
     def test_list_markets(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -782,20 +782,20 @@ class TestListMarkets:
         ]
         mock_get.return_value = mock_resp
 
-        r = client.get("/api/markets?status=trading")
+        r = client.get("/api/v1/markets?status=trading")
         assert r.status_code == 200
         markets = r.json()
         assert len(markets) == 2
         assert all(m["status"] == "trading" for m in markets)
 
-    @patch("manager.app.main.requests.get")
+    @patch("manager.app.routes.market.requests.get")
     def test_list_markets_api_error(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.status_code = 500
         mock_resp.text = "Internal Server Error"
         mock_get.return_value = mock_resp
 
-        r = client.get("/api/markets")
+        r = client.get("/api/v1/markets")
         assert r.status_code == 502
 
 
@@ -803,7 +803,7 @@ class TestListMarkets:
 
 
 class TestGetBalance:
-    @patch("manager.app.main.requests.get")
+    @patch("manager.app.routes.market.requests.get")
     @patch.dict("os.environ", {"BITVAVO_API_KEY": "key", "BITVAVO_API_SECRET": "secret"})
     def test_balance_ok(self, mock_get, client):
         mock_resp = MagicMock()
@@ -811,22 +811,22 @@ class TestGetBalance:
         mock_resp.json.return_value = [{"symbol": "BTC", "available": "1.5", "inOrder": "0.1"}]
         mock_get.return_value = mock_resp
 
-        r = client.get("/api/balance?symbol=BTC")
+        r = client.get("/api/v1/balance?symbol=BTC")
         assert r.status_code == 200
         assert r.json()["available"] == "1.5"
 
     def test_balance_no_credentials(self, client):
         with patch.dict("os.environ", {"BITVAVO_API_KEY": "", "BITVAVO_API_SECRET": ""}):
-            r = client.get("/api/balance?symbol=BTC")
+            r = client.get("/api/v1/balance?symbol=BTC")
             assert r.status_code == 500
 
-    @patch("manager.app.main.requests.get")
+    @patch("manager.app.routes.market.requests.get")
     @patch.dict("os.environ", {"BITVAVO_API_KEY": "key", "BITVAVO_API_SECRET": "secret"})
     def test_balance_401_returns_zeros(self, mock_get, client):
         mock_resp = MagicMock()
         mock_resp.status_code = 401
         mock_get.return_value = mock_resp
 
-        r = client.get("/api/balance?symbol=BTC")
+        r = client.get("/api/v1/balance?symbol=BTC")
         assert r.status_code == 200
         assert r.json()["available"] == "0"

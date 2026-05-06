@@ -14,12 +14,16 @@ import os
 
 import requests
 
-from common.exchange.base import Exchange
-from common.exchange.bitvavo import BitvavoExchange
-from common.exchange.simulated import SimulatedExchange
-from common.models import BotConfig, BotSnapshot, BudgetConfig
-from common.strategy.base import StrategyState
-from common.strategy.static_grid import StaticGridStrategy
+from common import (
+    BotConfig,
+    BotSnapshot,
+    BudgetConfig,
+    Exchange,
+    BitvavoExchange,
+    SimulatedExchange,
+    StrategyState,
+    StaticGridStrategy,
+)
 
 
 class AgentLogStore:
@@ -227,7 +231,7 @@ class BotRunner:
         """
         try:
             requests.post(
-                f"{self.manager_url}/api/agents/{self.agent_id}/bots/{self.bot_id}/metrics",
+                f"{self.manager_url}/api/v1/agents/{self.agent_id}/bots/{self.bot_id}/metrics",
                 json={"snapshot": snapshot.model_dump(mode="json")},
                 timeout=4,
             )
