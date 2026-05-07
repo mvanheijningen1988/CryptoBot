@@ -60,12 +60,18 @@ def try_failover_for_bot(bot: Bot, failed_agent: Agent, db: Session) -> bool:
         return False
 
     cfg = json.loads(bot.config_json)
+    payload: dict = {
+        "bot_id": bot.id,
+        "config": cfg,
+    }
+    # Include saved runner state so the new agent can resume
+    saved_state = bot.state_json if hasattr(bot, "state_json") else "{}"
+    if saved_state and saved_state != "{}":
+        payload["runner_state"] = json.loads(saved_state)
+
     ok, message = post_json(
         f"{target.base_url}/agent/bots/{bot.id}/start",
-        {
-            "bot_id": bot.id,
-            "config": cfg,
-        },
+        payload,
     )
     if not ok:
         add_agent_event(
@@ -135,7 +141,16 @@ def failover_maintenance_loop(session_factory: sessionmaker) -> None:
                     .all()
                 )
                 for bot in running_bots:
-                    try_failover_for_bot(bot, offline_agent, db)
+                    if not try_failover_for_bot(bot, offline_agent, db):
+                        # No target agent available — force-stop the bot
+                        bot.status = "stopped"
+                        bot.assigned_agent_id = None
+                        bot.updated_at = datetime.now(UTC)
+                        add_agent_event(
+                            offline_agent.id,
+                            "failover_stopped",
+                            f"Bot {bot.name} stopped: no agents available for failover.",
+                        )
 
             db.commit()
         except Exception:

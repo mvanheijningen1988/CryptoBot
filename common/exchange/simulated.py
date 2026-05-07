@@ -2,24 +2,36 @@
 
 Maintains in-memory quote and base balances and executes trades
 instantly at the current market price.  When a *market* symbol is
-provided, real prices are fetched from the Bitvavo public REST API;
-otherwise a simple random walk is used (back-test mode).
+provided, real prices are streamed from the Bitvavo **public**
+WebSocket (no authentication, no real orders); otherwise a simple
+random walk is used (back-test mode).
 
 Unlike the live exchange, the simulated exchange always fills orders
 in full and allows the balance to go negative (virtual budget).
 A configurable fee rate is applied to every trade, matching real
 exchange behaviour.
+
+**Safety guarantee:** this class never authenticates with Bitvavo and
+never sends order actions — all trade execution is pure arithmetic on
+in-memory balances.
 """
 from __future__ import annotations
 
+import json
+import logging
+import threading
 import time
 
 import requests as _requests
+import websocket as _ws
 
 from common.exchange.base import Exchange
 from common.models import BudgetConfig, TradeSignal
 
 _BITVAVO_TICKER_URL = "https://api.bitvavo.com/v2/ticker/price"
+_BITVAVO_WS_URL = "wss://ws.bitvavo.com/v2/"
+
+logger = logging.getLogger(__name__)
 
 
 class SimulatedExchange(Exchange):
@@ -30,8 +42,9 @@ class SimulatedExchange(Exchange):
     * Orders are always filled instantly and in full (no partial fills).
     * Balances may go negative — the bot operates on a virtual budget.
     * A fee is deducted from every trade (configurable via *fee_rate*).
-    * Prices come from the Bitvavo public ticker when *market* is set,
-      or from a random walk when it is not (back-test).
+    * Prices are streamed from the Bitvavo **public** WebSocket when
+      *market* is set (no API key required, no orders placed).
+    * Falls back to a random walk when no market is configured (back-test).
     """
 
     def __init__(
@@ -47,8 +60,7 @@ class SimulatedExchange(Exchange):
         :param budget: Capital allocation with quote and base amounts.
         :param start_price: Seed price used until the first live price arrives.
         :param market: Bitvavo market symbol (e.g. ``'BTC-EUR'``).  When set,
-                       :meth:`get_price` fetches the real market price via
-                       the public ticker API.
+                       prices are streamed from the public WebSocket.
         :param fee_rate: Fee fraction applied per trade (e.g. 0.0025 = 0.25 %).
         """
         self.quote_balance: float = budget.quote_budget
@@ -59,10 +71,94 @@ class SimulatedExchange(Exchange):
         self.market: str | None = market
         self.fee_rate: float = fee_rate
 
+        # WebSocket state (only used when market is set)
+        self._ws: _ws.WebSocket | None = None
+        self._ws_thread: threading.Thread | None = None
+        self._running = False
+        self._price_event = threading.Event()
+
+    # ── Connection lifecycle ──────────────────────────────────
+
+    def start(self) -> None:
+        """Open the public Bitvavo WebSocket and subscribe to ticker updates.
+
+        No authentication is performed — only the public ticker channel
+        is used.  This method is a no-op when no *market* is configured.
+        Blocks briefly until the first real price arrives so that callers
+        never see the seed ``start_price``.
+        """
+        if not self.market or self._running:
+            return
+        try:
+            self._ws = _ws.create_connection(_BITVAVO_WS_URL, timeout=10)
+            self._running = True
+            self._ws.send(json.dumps({
+                "action": "subscribe",
+                "channels": [{"name": "ticker", "markets": [self.market]}],
+            }))
+            self._ws_thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self._ws_thread.start()
+            logger.info("Simulation WS connected for %s", self.market)
+            # Wait up to 10 s for the first real price from the WS
+            if self._price_event.wait(timeout=10):
+                logger.info("Simulation WS got initial price %.6f for %s", self.price, self.market)
+            else:
+                logger.warning("Simulation WS did not receive initial price for %s within 10 s", self.market)
+        except Exception:
+            logger.warning("Simulation WS connect failed for %s, falling back to REST", self.market)
+            self._running = False
+            self._ws = None
+
+    def stop(self) -> None:
+        """Close the WebSocket connection."""
+        self._running = False
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+    def _reader_loop(self) -> None:
+        """Background thread: read ticker messages and update the price."""
+        while self._running and self._ws:
+            try:
+                raw = self._ws.recv()
+                if not raw:
+                    continue
+                msg = json.loads(raw)
+                if not isinstance(msg, dict):
+                    continue
+                price = self._extract_price(msg)
+                if price is not None:
+                    self.price = price
+                    self._price_event.set()
+            except Exception:
+                break
+        self._running = False
+        logger.info("Simulation WS reader stopped for %s", self.market)
+
+    @staticmethod
+    def _extract_price(msg: dict) -> float | None:
+        """Try to pull a price from a WS message."""
+        for key in ("price", "last"):
+            if key in msg:
+                try:
+                    return float(msg[key])
+                except (TypeError, ValueError):
+                    pass
+        bid, ask = msg.get("bestBid"), msg.get("bestAsk")
+        if bid is not None and ask is not None:
+            try:
+                return (float(bid) + float(ask)) / 2.0
+            except (TypeError, ValueError):
+                pass
+        return None
+
     # ── Price retrieval ───────────────────────────────────────
 
-    def _fetch_live_price(self) -> float | None:
-        """Fetch the latest price from the Bitvavo public ticker API.
+    def _fetch_rest_price(self) -> float | None:
+        """Fetch the latest price from the Bitvavo public REST API (fallback).
 
         :return: The current market price, or ``None`` on failure.
         """
@@ -84,18 +180,25 @@ class SimulatedExchange(Exchange):
     def get_price(self, fallback_price: float | None = None) -> float:
         """Return the current market price.
 
-        When a *market* is configured the price is fetched from the
-        Bitvavo public API.  Otherwise a small random-walk step is
-        applied (used by the back-tester).
+        When the WebSocket is connected the cached price is returned
+        immediately.  If the WS is down but a *market* is configured,
+        the REST ticker API is tried as a fallback.  Without a market,
+        a simple random walk is applied (back-test mode).
 
         :param fallback_price: Ignored; present for interface compatibility.
         :return: The current price.
         """
-        live = self._fetch_live_price()
-        if live is not None:
-            self.price = live
+        # WS is feeding prices — just return the latest
+        if self._running:
             return self.price
-        # Fallback: random walk for back-test mode (no market set)
+
+        # WS not available — try REST
+        rest = self._fetch_rest_price()
+        if rest is not None:
+            self.price = rest
+            return self.price
+
+        # No market at all — random walk for back-test
         import random
 
         move = random.uniform(-0.01, 0.01)
@@ -103,12 +206,23 @@ class SimulatedExchange(Exchange):
         return self.price
 
     def wait_for_price_update(self, last_price: float | None = None, timeout_seconds: float = 1.0) -> float:
-        """Sleep for *timeout_seconds* then return the next price.
+        """Block until a new WebSocket price arrives or the timeout elapses.
 
-        :param last_price: The previous price (unused).
-        :param timeout_seconds: Seconds to sleep before fetching a new price.
+        Falls back to :meth:`get_price` when WebSocket is not active.
+
+        :param last_price: The previous price (used for change detection on WS).
+        :param timeout_seconds: Seconds to wait before giving up.
         :return: The next price.
         """
+        if self._running:
+            # If the price already changed, return immediately
+            if self.price != last_price:
+                return self.price
+            self._price_event.clear()
+            self._price_event.wait(timeout=timeout_seconds)
+            return self.price
+
+        # Fallback: sleep + poll
         time.sleep(max(0.05, timeout_seconds))
         return self.get_price(last_price)
 

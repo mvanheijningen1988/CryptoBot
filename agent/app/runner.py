@@ -20,6 +20,7 @@ from common import (
     BudgetConfig,
     Exchange,
     BitvavoExchange,
+    RunnerState,
     SimulatedExchange,
     StrategyState,
     StaticGridStrategy,
@@ -156,29 +157,51 @@ class BotRunner:
             fee_rate=float(os.getenv("SIM_FEE_RATE", "0.0025")),
         )
 
-    def start(self) -> None:
+    def start(self, restored: bool = False) -> None:
         """
         Start the exchange connection and launch the trading loop.
+
+        The heavy work (WS connect, price wait) runs in the background
+        thread so the HTTP caller is not blocked.
+
+        :param restored: If True, skip strategy priming (state was restored from failover).
         """
         if self.running:
             return
         self.running = True
-        self.exchange.start()
-        quote_balance, base_balance = self.exchange.get_balances()
-        self.exchange.quote_balance = quote_balance
-        self.exchange.base_balance = base_balance
-
-        for _ in range(20):
-            try:
-                self.price = self.exchange.get_price(self.price)
-                break
-            except Exception:
-                time.sleep(0.5)
-
-        self.initial_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
-        self.log_store.add("bot_start", f"Bot {self.bot_id} started.", bot_id=self.bot_id, category="system")
-        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread = threading.Thread(target=self._startup_and_loop, args=(restored,), daemon=True)
         self.thread.start()
+
+    def _startup_and_loop(self, restored: bool) -> None:
+        """Connect to the exchange, prime the strategy, then enter the tick loop."""
+        try:
+            self.exchange.start()
+
+            if not restored:
+                quote_balance, base_balance = self.exchange.get_balances()
+                self.exchange.quote_balance = quote_balance
+                self.exchange.base_balance = base_balance
+
+            for _ in range(20):
+                if not self.running:
+                    return
+                try:
+                    self.price = self.exchange.get_price(self.price)
+                    break
+                except Exception:
+                    time.sleep(0.5)
+
+            if not restored:
+                self.strategy.on_price(self.price, self.state)
+                self.initial_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+
+            label = "resumed" if restored else "started"
+            self.log_store.add("bot_start", f"Bot {self.bot_id} {label}.", bot_id=self.bot_id, category="system")
+            self._loop()
+        except Exception:
+            self.running = False
+            self.log_store.add("bot_error", f"Bot {self.bot_id} failed to start.", bot_id=self.bot_id, category="system")
+            raise
 
     def stop(self) -> None:
         """
@@ -204,6 +227,36 @@ class BotRunner:
             data={"quote_budget": budget.quote_budget, "base_budget": budget.base_budget},
             category="system",
         )
+
+    def get_runner_state(self) -> RunnerState:
+        """Capture the full runner state for persistence / failover."""
+        return RunnerState(
+            level_index=self.state.level_index,
+            open_orders={int(k): v for k, v in self.state.open_orders.items()},
+            filled_buys=sorted(self.state.filled_buys),
+            filled_amounts={int(k): v for k, v in self.state.filled_amounts.items()},
+            price=self.price,
+            quote_balance=self.exchange.quote_balance,
+            base_balance=self.exchange.base_balance,
+            initial_equity=self.initial_equity,
+            realized_pnl=self.realized_pnl,
+            skimmed_quote=self.skimmed_quote,
+            trade_count=self.trade_count,
+        )
+
+    def restore_runner_state(self, rs: RunnerState) -> None:
+        """Restore runner from a previously saved state."""
+        self.state.level_index = rs.level_index
+        self.state.open_orders = {int(k): v for k, v in rs.open_orders.items()}
+        self.state.filled_buys = set(rs.filled_buys)
+        self.state.filled_amounts = {int(k): v for k, v in rs.filled_amounts.items()}
+        self.price = rs.price
+        self.exchange.quote_balance = rs.quote_balance
+        self.exchange.base_balance = rs.base_balance
+        self.initial_equity = rs.initial_equity
+        self.realized_pnl = rs.realized_pnl
+        self.skimmed_quote = rs.skimmed_quote
+        self.trade_count = rs.trade_count
 
     def _apply_profit_mode(self, total_equity: float) -> None:
         """
@@ -236,13 +289,28 @@ class BotRunner:
         :param snapshot: Point-in-time bot metrics to push.
         """
         try:
+            runner_state = self.get_runner_state()
             requests.post(
                 f"{self.manager_url}/api/v1/agents/{self.agent_id}/bots/{self.bot_id}/metrics",
-                json={"snapshot": snapshot.model_dump(mode="json")},
+                json={
+                    "snapshot": snapshot.model_dump(mode="json"),
+                    "runner_state": runner_state.model_dump(mode="json"),
+                },
                 timeout=4,
             )
         except requests.RequestException:
             return
+
+    def _undo_fill(self, signal: "TradeSignal") -> None:
+        """Reverse detection of a fill (re-place the order).
+
+        Called when the exchange rejects a signal so the order goes
+        back into open_orders for the next tick.
+        """
+        idx = signal.level_index
+        if idx is None:
+            return
+        self.state.open_orders[idx] = signal.side
 
     def _loop(self) -> None:
         """
@@ -263,7 +331,20 @@ class BotRunner:
                 continue
 
             signals = self.strategy.on_price(self.price, self.state)
-            for signal in signals:
+            for i, signal in enumerate(signals):
+                # Log that an order has been placed (pending execution)
+                self.log_store.add(
+                    "order_placed",
+                    f"Order placed: {signal.side.upper()} {signal.quote_amount:.2f} at level {signal.level_index} (price {self.price:.6f})",
+                    bot_id=self.bot_id,
+                    data={
+                        "side": signal.side,
+                        "quote_amount": signal.quote_amount,
+                        "level_index": signal.level_index,
+                        "price": self.price,
+                    },
+                    category="trading",
+                )
                 before_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
                 try:
                     success = self.exchange.execute(signal, self.price)
@@ -276,6 +357,9 @@ class BotRunner:
                         category="system",
                     )
                 if success:
+                    # Confirm the fill — this places the follow-up
+                    # orders (sell after buy, cascade buy, etc.)
+                    self.strategy.confirm_fill(signal, self.state)
                     quote_balance, base_balance = self.exchange.get_balances()
                     self.exchange.quote_balance = quote_balance
                     self.exchange.base_balance = base_balance
@@ -305,6 +389,11 @@ class BotRunner:
                         data={"side": signal.side, "quote_amount": signal.quote_amount, "price": self.price},
                         category="trading",
                     )
+                    # Restore the unfilled order and any remaining
+                    # signals back into open_orders.
+                    for s in signals[i:]:
+                        self._undo_fill(s)
+                    break
 
             quote_balance, base_balance = self.exchange.get_balances()
             self.exchange.quote_balance = quote_balance
@@ -346,19 +435,22 @@ class RunnerManager:
         self.runners: dict[str, BotRunner] = {}
         self.log_store = AgentLogStore()
 
-    def start_bot(self, bot_id: str, config: BotConfig) -> None:
+    def start_bot(self, bot_id: str, config: BotConfig, runner_state: RunnerState | None = None) -> None:
         """
         Start a bot, creating a new runner if needed.
 
         :param bot_id: Unique identifier for the bot.
         :param config: Full bot configuration.
+        :param runner_state: Optional saved state for failover resume.
         """
         if bot_id in self.runners:
             self.runners[bot_id].start()
             return
         runner = BotRunner(bot_id, config, self.manager_url, self.agent_id, self.log_store)
+        if runner_state:
+            runner.restore_runner_state(runner_state)
         self.runners[bot_id] = runner
-        runner.start()
+        runner.start(restored=runner_state is not None)
 
     def stop_bot(self, bot_id: str) -> None:
         """

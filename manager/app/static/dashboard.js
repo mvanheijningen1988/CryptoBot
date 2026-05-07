@@ -112,8 +112,17 @@ async function api(url, options = {}) {
     throw new Error("Unauthorized");
   }
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(txt || `HTTP ${res.status}`);
+    let msg = `HTTP ${res.status}`;
+    try {
+      const txt = await res.text();
+      try {
+        const body = JSON.parse(txt);
+        msg = body.detail || JSON.stringify(body);
+      } catch {
+        if (txt) msg = txt;
+      }
+    } catch { /* empty */ }
+    throw new Error(msg);
   }
   return res.headers.get("content-type")?.includes("application/json") ? res.json() : res.text();
 }
@@ -414,11 +423,9 @@ function startMarketRealtime() {
 
 /**
  * POST the current grid parameters to the profitability preview
- * endpoint and render the result (or an error) into the
- * #grid_profit_result element.
+ * endpoint and update the inline summary with a "View details" link.
  */
 async function checkGridProfitability() {
-  const el = document.getElementById("grid_profit_result");
   try {
     const payload = {
       grid: {
@@ -434,18 +441,109 @@ async function checkGridProfitability() {
 
     const cls = r.is_profitable ? "profit-ok" : "profit-warn";
     const txt = r.is_profitable ? t("grid_profitable") : t("grid_not_profitable");
-    el.innerHTML = `
-      <div class="${cls}"><strong>${txt}</strong></div>
-      <div>${t("grid_step_size")}: ${r.step_size.toFixed(6)} (${r.step_percent.toFixed(3)}%)</div>
-      <div>${t("grid_profit_per_trade")} ${r.profit_per_trade_quote_min.toFixed(6)}, ${t("grid_avg")} ${r.profit_per_trade_quote_avg.toFixed(6)}, ${t("grid_max")} ${r.profit_per_trade_quote_max.toFixed(6)}</div>
-      <div>${t("grid_profitable_paths")}: ${r.profitable_trades}/${r.total_trade_paths}</div>
-      <div>${t("grid_used_fee")}: ${(r.fee_rate * 100).toFixed(3)}%</div>
-    `;
+
+    const inlineEl = document.getElementById("grid_profit_summary");
+    if (inlineEl) {
+      inlineEl.innerHTML = `<span class="${cls}"><strong>${txt}</strong></span> — <a href="#" id="grid_preview_link" style="color:var(--accent)">${t("btn_view_details")}</a>`;
+      document.getElementById("grid_preview_link").onclick = (e) => { e.preventDefault(); openGridPreviewModal(r); };
+    }
+
+    // If the preview modal is already open, refresh its content in-place
+    const previewModal = document.getElementById("grid_preview_modal");
+    if (previewModal && previewModal.open) {
+      openGridPreviewModal(r, true);
+    }
   } catch (err) {
     lastGridPreview = null;
-    el.innerHTML = `<div class="profit-warn">${t("grid_calc_error")}: ${String(err.message || err)}</div>`;
+    const inlineEl = document.getElementById("grid_profit_summary");
+    if (inlineEl) inlineEl.innerHTML = `<div class="profit-warn">${t("grid_calc_error")}: ${String(err.message || err)}</div>`;
   }
 }
+
+/**
+ * Render the grid preview modal with profitability summary
+ * and the full list of scheduled trades.
+ */
+function openGridPreviewModal(r, skipShowModal = false) {
+  const modal = document.getElementById("grid_preview_modal");
+  const summary = document.getElementById("grid_preview_summary");
+  const tbody = document.getElementById("grid_trades_body");
+
+  const cls = r.is_profitable ? "profit-ok" : "profit-warn";
+  const txt = r.is_profitable ? t("grid_profitable") : t("grid_not_profitable");
+
+  summary.innerHTML = `
+    <div class="${cls}"><strong>${txt}</strong></div>
+    <div>${t("grid_step_size")}: ${r.step_size.toFixed(6)} (${r.step_percent.toFixed(3)}%)</div>
+    <div>${t("grid_profit_per_trade")} ${r.profit_per_trade_quote_min.toFixed(6)}, ${t("grid_avg")} ${r.profit_per_trade_quote_avg.toFixed(6)}, ${t("grid_max")} ${r.profit_per_trade_quote_max.toFixed(6)}</div>
+    <div>${t("grid_profitable_paths")}: ${r.profitable_trades}/${r.total_trade_paths}</div>
+    <div>${t("grid_used_fee")}: ${(r.fee_rate * 100).toFixed(3)}%</div>
+  `;
+
+  tbody.innerHTML = "";
+  for (const tr of (r.trades || [])) {
+    const row = document.createElement("tr");
+    const pcls = tr.profitable ? "grid-trade-ok" : "grid-trade-bad";
+    const icon = tr.profitable ? "✓" : "✗";
+    row.innerHTML = `<td>${tr.level}</td><td>${tr.buy_price.toFixed(2)}</td><td>${tr.sell_price.toFixed(2)}</td><td>${tr.order_size_quote.toFixed(2)}</td><td class="${pcls}">${tr.net_profit.toFixed(6)}</td><td class="${pcls}">${icon}</td>`;
+    tbody.appendChild(row);
+  }
+
+  if (!skipShowModal) modal.showModal();
+}
+
+document.getElementById("close_grid_preview")?.addEventListener("click", () => {
+  document.getElementById("grid_preview_modal").close();
+});
+
+// ──────────────────────────────────────────────────────────────
+// Bi-directional order size ↔ quote budget calculation
+// ──────────────────────────────────────────────────────────────
+
+/** Track which field the user last edited to determine sync direction. */
+let _budgetCalcSource = "";
+
+/**
+ * When quote_budget changes, compute order_size_quote = budget / levels.
+ * When order_size_quote changes, compute quote_budget = size × levels.
+ * The levels field triggers a recalc based on whichever was last edited.
+ */
+function syncBudgetAndOrderSize(source) {
+  const levels = Number(document.getElementById("levels").value) || 1;
+  const budgetEl = document.getElementById("quote_budget");
+  const sizeEl = document.getElementById("order_size_quote");
+
+  if (source === "budget") {
+    _budgetCalcSource = "budget";
+    const budget = Number(budgetEl.value) || 0;
+    if (budget > 0 && levels > 0) {
+      sizeEl.value = (budget / levels).toFixed(2);
+    }
+  } else if (source === "size") {
+    _budgetCalcSource = "size";
+    const size = Number(sizeEl.value) || 0;
+    if (size > 0 && levels > 0) {
+      budgetEl.value = (size * levels).toFixed(2);
+    }
+  } else if (source === "levels") {
+    // Recalculate based on whichever the user last touched
+    if (_budgetCalcSource === "budget") {
+      const budget = Number(budgetEl.value) || 0;
+      if (budget > 0 && levels > 0) {
+        sizeEl.value = (budget / levels).toFixed(2);
+      }
+    } else if (_budgetCalcSource === "size") {
+      const size = Number(sizeEl.value) || 0;
+      if (size > 0 && levels > 0) {
+        budgetEl.value = (size * levels).toFixed(2);
+      }
+    }
+  }
+}
+
+document.getElementById("quote_budget").addEventListener("input", () => syncBudgetAndOrderSize("budget"));
+document.getElementById("order_size_quote").addEventListener("input", () => syncBudgetAndOrderSize("size"));
+document.getElementById("levels").addEventListener("input", () => syncBudgetAndOrderSize("levels"));
 
 // ──────────────────────────────────────────────────────────────
 // Bot list
@@ -479,24 +577,51 @@ async function loadBots() {
     const m = bot.latest_metrics || {};
     const pnl = Number(m.unrealized_pnl_quote || 0);
     const trades = Number(m.trade_count || 0);
+    const lastPrice = Number(m.price || 0);
+    const market = bot.config?.market || "-";
     const tr = document.createElement("tr");
 
-    // Viewers see no action buttons
+    // Viewers see no action dropdown
     const acts = isViewer
       ? "<td>-</td>"
-      : `<td><div class="bot-actions"><button data-start="${bot.id}">${t("btn_start")}</button><button class="secondary" data-stop="${bot.id}">${t("btn_stop")}</button></div></td>`;
+      : `<td><select class="bot-action-select" data-bot-id="${bot.id}"><option value="">${t("btn_actions")}</option><option value="start">${t("btn_start")}</option><option value="stop">${t("btn_stop")}</option><option value="chart">${t("btn_chart")}</option><option value="orders">${t("btn_orders")}</option><option value="delete">${t("btn_delete")}</option></select></td>`;
 
-    tr.innerHTML = `<td>${bot.name}</td><td>${bot.status}</td><td>${Number(m.total_equity_quote || 0).toFixed(2)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${pnl.toFixed(2)}</td><td>${trades}</td>${acts}`;
+    const modeLabel = bot.mode === "live" ? "🟢 Live" : "🔵 Sim";
+    const priceStr = lastPrice > 0 ? formatNumber(lastPrice, 6) : "-";
+    tr.innerHTML = `<td>${bot.name}</td><td>${market}</td><td>${modeLabel}</td><td>${bot.status}</td><td>${priceStr}</td><td>${Number(m.total_equity_quote || 0).toFixed(2)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${pnl.toFixed(2)}</td><td>${trades}</td>${acts}`;
     body.appendChild(tr);
   }
 
-  // Wire up action buttons (only present for non-viewers)
+  // Wire up action dropdowns (only present for non-viewers)
   if (!isViewer) {
-    body.querySelectorAll("button[data-start]").forEach((b) => {
-      b.onclick = async () => { await api(`/api/v1/bots/${b.dataset.start}/start`, { method: "POST", body: JSON.stringify({}) }); await loadBots(); };
-    });
-    body.querySelectorAll("button[data-stop]").forEach((b) => {
-      b.onclick = async () => { await api(`/api/v1/bots/${b.dataset.stop}/stop`, { method: "POST" }); await loadBots(); };
+    body.querySelectorAll("select.bot-action-select").forEach((sel) => {
+      sel.onchange = async () => {
+        const action = sel.value;
+        const botId = sel.dataset.botId;
+        const bot = bots.find((x) => x.id === botId);
+        sel.value = ""; // reset dropdown
+        if (!action || !bot) return;
+
+        try {
+          if (action === "start") {
+            await api(`/api/v1/bots/${botId}/start`, { method: "POST", body: JSON.stringify({}) });
+          } else if (action === "stop") {
+            await api(`/api/v1/bots/${botId}/stop`, { method: "POST" });
+          } else if (action === "chart") {
+            openTradeChart(bot);
+            return;
+          } else if (action === "orders") {
+            openOrdersModal(bot);
+            return;
+          } else if (action === "delete") {
+            if (!await showConfirm(t("confirm_delete_bot"))) return;
+            await api(`/api/v1/bots/${botId}`, { method: "DELETE" });
+          }
+        } catch (err) {
+          showToast(t("btn_" + action) || action, err.message || String(err), "warn", 5000);
+        }
+        await loadBots();
+      };
     });
   }
 }
@@ -923,6 +1048,237 @@ async function loadEquityChart() {
 document.getElementById("equity_chart_bot")?.addEventListener("change", loadEquityChart);
 
 // ──────────────────────────────────────────────────────────────
+// Trade levels chart (modal, per-bot)
+// ──────────────────────────────────────────────────────────────
+
+// ──────────────────────────────────────────────────────────────
+// Open orders modal
+// ──────────────────────────────────────────────────────────────
+
+async function openOrdersModal(bot) {
+  const modal = document.getElementById("orders_modal");
+  document.getElementById("orders_title").textContent = `${t("orders_modal_title")} — ${bot.name}`;
+  const tbody = document.getElementById("orders_body");
+  tbody.innerHTML = `<tr><td colspan="4">${t("loading")}</td></tr>`;
+  modal.showModal();
+  try {
+    const data = await api(`/api/v1/bots/${bot.id}/open-orders`);
+    const orders = data.orders || [];
+    if (orders.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="4">${t("no_open_orders")}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = "";
+    for (const o of orders) {
+      const tr = document.createElement("tr");
+      const sideClass = o.side === "buy" ? "order-buy" : "order-sell";
+      const amt = Number(o.quote_amount || 0).toFixed(2);
+      const filled = Number(o.filled_quote || 0).toFixed(2);
+      tr.innerHTML = `<td>${o.level}</td><td>${o.price}</td><td class="${sideClass}">${o.side.toUpperCase()}</td><td>${amt}</td><td>${filled}</td>`;
+      tbody.appendChild(tr);
+    }
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5">${e.message}</td></tr>`;
+  }
+}
+
+/** Cached pixel points and trade markers for tooltip hit-testing. */
+let _tradeChartMarkers = [];
+let _tradeChartBot = null;
+
+/**
+ * Open the trade chart modal for a bot, fetch its price history
+ * and trades, then draw the chart.
+ */
+async function openTradeChart(bot) {
+  _tradeChartBot = bot;
+  const modal = document.getElementById("trade_chart_modal");
+  document.getElementById("trade_chart_title").textContent = `${t("chart_modal_title")} — ${bot.name}`;
+  modal.showModal();
+
+  let history = [];
+  let trades = [];
+  try { history = await api(`/api/v1/bots/${bot.id}/equity-history`); } catch {}
+  try {
+    const all = await api("/api/v1/trade-events");
+    trades = all.filter((e) => e.bot_id === bot.id);
+  } catch {}
+
+  const grid = bot.config?.grid || {};
+  drawTradeChart(history, trades, grid);
+}
+
+document.getElementById("close_trade_chart")?.addEventListener("click", () => {
+  document.getElementById("trade_chart_modal").close();
+  _tradeChartMarkers = [];
+});
+
+document.getElementById("close_orders_modal")?.addEventListener("click", () => {
+  document.getElementById("orders_modal").close();
+});
+
+/**
+ * Draw the trade chart: price line, grid levels, and trade markers.
+ *
+ * @param {Array<{t:string,v:number,p:number}>} history - equity/price points
+ * @param {Array} trades - trade events for this bot
+ * @param {{lower_price:number,upper_price:number,levels:number}} grid
+ */
+function drawTradeChart(history, trades, grid) {
+  const canvas = document.getElementById("trade_chart_canvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width;
+  const H = rect.height;
+  ctx.clearRect(0, 0, W, H);
+
+  _tradeChartMarkers = [];
+
+  // Filter to points that have a price
+  const priceData = history.filter((d) => d.p && d.p > 0);
+  if (priceData.length < 2) {
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(t("chart_no_data"), W / 2, H / 2);
+    return;
+  }
+
+  const pad = { top: 20, right: 20, bottom: 30, left: 70 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  // Compute price range (include grid bounds if available)
+  const prices = priceData.map((d) => d.p);
+  let minP = Math.min(...prices);
+  let maxP = Math.max(...prices);
+  if (grid.lower_price) minP = Math.min(minP, grid.lower_price);
+  if (grid.upper_price) maxP = Math.max(maxP, grid.upper_price);
+  const margin = (maxP - minP) * 0.05 || 0.001;
+  minP -= margin;
+  maxP += margin;
+  const rangeP = maxP - minP || 1;
+
+  const tMin = new Date(priceData[0].t).getTime();
+  const tMax = new Date(priceData[priceData.length - 1].t).getTime();
+  const tRange = tMax - tMin || 1;
+
+  const toX = (ts) => pad.left + ((new Date(ts).getTime() - tMin) / tRange) * plotW;
+  const toY = (p) => pad.top + plotH - ((p - minP) / rangeP) * plotH;
+
+  // Draw axes
+  ctx.strokeStyle = "#334155";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, pad.top);
+  ctx.lineTo(pad.left, pad.top + plotH);
+  ctx.lineTo(pad.left + plotW, pad.top + plotH);
+  ctx.stroke();
+
+  // Y-axis labels
+  ctx.fillStyle = "#94a3b8";
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "right";
+  for (let i = 0; i <= 4; i++) {
+    const v = minP + (rangeP * i) / 4;
+    const y = pad.top + plotH - (i / 4) * plotH;
+    ctx.fillText(v.toFixed(4), pad.left - 6, y + 4);
+  }
+
+  // X-axis labels
+  ctx.textAlign = "center";
+  const timeFmt = (d) => d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  ctx.fillText(timeFmt(new Date(priceData[0].t)), toX(priceData[0].t), pad.top + plotH + 18);
+  const midIdx = Math.floor(priceData.length / 2);
+  ctx.fillText(timeFmt(new Date(priceData[midIdx].t)), toX(priceData[midIdx].t), pad.top + plotH + 18);
+  ctx.fillText(timeFmt(new Date(priceData[priceData.length - 1].t)), toX(priceData[priceData.length - 1].t), pad.top + plotH + 18);
+
+  // Draw grid levels as dashed horizontal lines
+  if (grid.lower_price && grid.upper_price && grid.levels >= 2) {
+    const step = (grid.upper_price - grid.lower_price) / (grid.levels - 1);
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1;
+    for (let i = 0; i < grid.levels; i++) {
+      const lvl = grid.lower_price + i * step;
+      const y = toY(lvl);
+      if (y < pad.top || y > pad.top + plotH) continue;
+      ctx.strokeStyle = "rgba(250,204,21,0.35)";
+      ctx.beginPath();
+      ctx.moveTo(pad.left, y);
+      ctx.lineTo(pad.left + plotW, y);
+      ctx.stroke();
+      // Label on right side
+      ctx.fillStyle = "rgba(250,204,21,0.6)";
+      ctx.textAlign = "left";
+      ctx.fillText(lvl.toFixed(4), pad.left + plotW + 2, y + 4);
+    }
+    ctx.restore();
+  }
+
+  // Draw price line
+  ctx.beginPath();
+  ctx.moveTo(toX(priceData[0].t), toY(priceData[0].p));
+  for (let i = 1; i < priceData.length; i++) {
+    ctx.lineTo(toX(priceData[i].t), toY(priceData[i].p));
+  }
+  ctx.strokeStyle = "#3b82f6";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([]);
+  ctx.stroke();
+
+  // Draw trade markers
+  for (const tr of trades) {
+    const x = toX(tr.timestamp);
+    const y = toY(tr.price);
+    if (x < pad.left || x > pad.left + plotW) continue;
+    const isBuy = tr.side === "buy" || tr.trade_pnl < 0;
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = isBuy ? "#22c55e" : "#ef4444";
+    ctx.fill();
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    _tradeChartMarkers.push({ x, y, trade: tr });
+  }
+}
+
+// Tooltip on hover over trade markers
+document.getElementById("trade_chart_canvas")?.addEventListener("mousemove", (e) => {
+  const canvas = e.target;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const tip = document.getElementById("trade_chart_tooltip");
+
+  let hit = null;
+  for (const m of _tradeChartMarkers) {
+    if (Math.hypot(mx - m.x, my - m.y) <= 8) { hit = m; break; }
+  }
+  if (hit) {
+    const tr = hit.trade;
+    const time = new Date(tr.timestamp).toLocaleString();
+    const pnl = Number(tr.trade_pnl || 0);
+    const pnlCls = pnl >= 0 ? "color:#22c55e" : "color:#ef4444";
+    tip.innerHTML = `<div><strong>#${tr.trade_number}</strong> @ ${Number(tr.price).toFixed(6)}</div><div>${time}</div><div style="${pnlCls}">PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(6)}</div><div>Equity: ${Number(tr.total_equity).toFixed(2)}</div>`;
+    tip.style.display = "block";
+    tip.style.left = Math.min(hit.x + 12, canvas.clientWidth - 180) + "px";
+    tip.style.top = (hit.y - 10) + "px";
+  } else {
+    tip.style.display = "none";
+  }
+});
+document.getElementById("trade_chart_canvas")?.addEventListener("mouseleave", () => {
+  document.getElementById("trade_chart_tooltip").style.display = "none";
+});
+
+// ──────────────────────────────────────────────────────────────
 // Event handlers
 // ──────────────────────────────────────────────────────────────
 
@@ -985,11 +1341,45 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
 /** Open the "Create Bot" modal and load market data + balances. */
 document.getElementById("open_create_bot").onclick = () => {
   document.getElementById("create_bot_modal").showModal();
-  loadMarkets().then(() => { startMarketRealtime(); loadBalances(); toggleStartPrice(); });
+  loadMarkets().then(() => { startMarketRealtime(); loadBalances(); });
 };
 
 document.getElementById("cancel_create_bot").onclick = () => { document.getElementById("create_bot_modal").close(); };
-document.getElementById("check_grid_profit").onclick = async () => { await checkGridProfitability(); };
+
+/** Debounce timer for auto grid profitability check. */
+let _gridCheckTimer = null;
+
+/** Auto-check grid profitability when any grid parameter changes. */
+function scheduleGridCheck() {
+  clearTimeout(_gridCheckTimer);
+  _gridCheckTimer = setTimeout(() => checkGridProfitability(), 400);
+}
+["lower_price", "upper_price", "levels", "order_size_quote", "fee_rate_percent"].forEach(
+  (id) => document.getElementById(id)?.addEventListener("input", scheduleGridCheck)
+);
+
+/**
+ * Fetch the average high/low for the selected market over the
+ * configured lookback period and fill in the lower/upper fields.
+ */
+document.getElementById("btn_suggest_range").onclick = async () => {
+  const market = document.getElementById("market").value;
+  const days = Number(document.getElementById("lookback_days").value) || 7;
+  const btn = document.getElementById("btn_suggest_range");
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    const r = await api(`/api/v1/market/price-range?market=${encodeURIComponent(market)}&days=${days}`);
+    document.getElementById("lower_price").value = r.avg_low.toFixed(2);
+    document.getElementById("upper_price").value = r.avg_high.toFixed(2);
+    syncBudgetAndOrderSize("levels");
+  } catch (err) {
+    showToast(t("grid_calc_error"), String(err.message || err), "warn", 4000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = t("btn_suggest_range");
+  }
+};
 
 /** Run a quick backtest using the current form parameters. */
 document.getElementById("backtest").onclick = async () => {

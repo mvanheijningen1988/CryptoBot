@@ -117,6 +117,7 @@ input, select, button, textarea {
   margin-top: 4px;
 }
 button.secondary { background: #475569; }
+button.danger { background: #dc2626; }
 
 /* ── Tooltips ── */
 
@@ -159,6 +160,30 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 .pnl-positive { color: var(--good); }
 .pnl-negative { color: var(--bad); }
 .bot-actions { display: flex; gap: 8px; align-items: center; }
+.bot-action-select {
+  width: auto;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--text);
+  border: 1px solid #475569;
+  cursor: pointer;
+}
+
+/* ── Trade chart tooltip ── */
+.chart-tooltip {
+  position: absolute; pointer-events: none;
+  background: #1e293b; border: 1px solid #475569; border-radius: 6px;
+  padding: 6px 10px; font-size: 0.8rem; color: #e2e8f0;
+  white-space: nowrap; z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+/* ── Open orders table ── */
+.orders-table th { text-align: left; color: #94a3b8; font-weight: 600; padding: 6px 10px; border-bottom: 1px solid #334155; }
+.orders-table td { padding: 6px 10px; border-bottom: 1px solid #1e293b; }
+.order-buy { color: #22c55e; font-weight: 600; }
+.order-sell { color: #ef4444; font-weight: 600; }
 
 /* ── Expandable agent rows ── */
 
@@ -302,6 +327,25 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 .profit-ok { color: #10b981; }
 .profit-warn { color: #f59e0b; }
 
+/* ── Grid preview modal trades ── */
+
+.grid-trades-wrap {
+  max-height: 300px; overflow-y: auto;
+  border: 1px solid #334155; border-radius: 10px;
+}
+.grid-trades-table {
+  width: 100%; border-collapse: collapse; font-size: 0.85rem;
+}
+.grid-trades-table th {
+  position: sticky; top: 0; background: var(--panel);
+  text-align: left; padding: 6px 8px; font-size: 0.78rem;
+  color: #94a3b8; border-bottom: 1px solid #475569;
+}
+.grid-trades-table td { padding: 5px 8px; border-bottom: 1px solid #1e293b; }
+.grid-trades-table tr:last-child td { border-bottom: none; }
+.grid-trade-ok { color: #10b981; }
+.grid-trade-bad { color: #ef4444; }
+
 /* ── Market stats ── */
 
 .market-stats {
@@ -313,6 +357,19 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 .market-value { font-size: 1rem; font-weight: 600; }
 .market-positive { color: #10b981; }
 .market-negative { color: #ef4444; }
+
+/* ── Suggest range row ── */
+
+.suggest-range-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+}
+.suggest-range-days {
+  display: flex; align-items: center; gap: 4px; font-size: 0.85rem; flex: 0 0 auto;
+}
+.suggest-range-days input {
+  width: 52px; padding: 4px 6px; text-align: center;
+}
+.suggest-range-row button { flex: 0 0 auto; }
 
 /* ── Agent logs ── */
 

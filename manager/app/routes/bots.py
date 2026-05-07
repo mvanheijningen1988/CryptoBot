@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -9,6 +10,8 @@ from typing import Annotated
 from fastapi import Depends, HTTPException
 from fastapi.routing import APIRouter
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from manager.app.database import get_db
 from manager.app.events import (
@@ -34,6 +37,46 @@ DbSession = Annotated[Session, Depends(get_db)]
 _BOT_NOT_FOUND = "Bot not found"
 _AGENT_NOT_FOUND = "Agent not found"
 _AGENT_NOT_APPROVED = "Agent is not approved"
+
+
+def _select_least_loaded_agent(db: Session) -> Agent | None:
+    """Pick the approved online agent with the fewest assigned bots.
+
+    Only agents whose current bot count is below their capacity are
+    considered.  Among those, the agent with the fewest bots wins
+    (ties broken by agent id for determinism).
+
+    :param db: Database session.
+    :return: The best agent, or ``None`` if none are available.
+    """
+    from sqlalchemy import func
+
+    agents = (
+        db.query(Agent)
+        .filter(Agent.status == "online", Agent.approval_status == "approved")
+        .all()
+    )
+    if not agents:
+        return None
+
+    # Count running bots per agent
+    counts = dict(
+        db.query(Bot.assigned_agent_id, func.count(Bot.id))
+        .filter(Bot.status == "running", Bot.assigned_agent_id.isnot(None))
+        .group_by(Bot.assigned_agent_id)
+        .all()
+    )
+
+    best: Agent | None = None
+    best_count = float("inf")
+    for agent in agents:
+        n = counts.get(agent.id, 0)
+        if n >= agent.capacity:
+            continue
+        if n < best_count or (n == best_count and best and agent.id < best.id):
+            best = agent
+            best_count = n
+    return best
 
 
 def bot_to_response(bot: Bot) -> BotResponse:
@@ -131,55 +174,101 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
 
     agent_id = payload.agent_id or bot.assigned_agent_id
     if not agent_id:
-        agent = db.query(Agent).filter(Agent.status == "online", Agent.approval_status == "approved").first()
+        agent = _select_least_loaded_agent(db)
         if not agent:
             raise HTTPException(status_code=400, detail="No approved online agent available")
         agent_id = agent.id
 
     agent_url = resolve_agent_url(agent_id, db)
+    logger.info("Starting bot %s on agent %s (%s)", bot.id, agent_id, agent_url)
+    start_payload: dict = {
+        "bot_id": bot.id,
+        "config": json.loads(bot.config_json),
+    }
+    # Include saved runner state so the agent can resume from last position
+    saved_state = bot.state_json or "{}"
+    if saved_state and saved_state != "{}":
+        start_payload["runner_state"] = json.loads(saved_state)
+
     ok, message = post_json(
         f"{agent_url}/agent/bots/{bot.id}/start",
-        {
-            "bot_id": bot.id,
-            "config": json.loads(bot.config_json),
-        },
+        start_payload,
     )
     if not ok:
+        logger.error("Agent %s failed to start bot %s: %s", agent_id, bot.id, message)
         raise HTTPException(status_code=502, detail=f"Agent start failed: {message}")
 
     bot.assigned_agent_id = agent_id
     bot.status = "running"
     bot.updated_at = datetime.now(UTC)
     db.commit()
+    logger.info("Bot %s now running on agent %s", bot.id, agent_id)
     return {"ok": True}
 
 
-@router.post("/bots/{bot_id}/stop", responses={404: {"description": "Not found"}, 502: {"description": "Agent failure"}})
+@router.post("/bots/{bot_id}/stop", responses={404: {"description": "Not found"}})
 def stop_bot(bot_id: str, db: DbSession) -> dict:
     """
     Stop a running bot and notify its assigned agent.
 
+    If the agent is unreachable or missing, the bot is force-stopped
+    and unassigned so it doesn't remain in a stuck "running" state.
+
     :param bot_id: Unique identifier of the bot to stop.
     :param db: Database session (injected).
-    :return: Dict with ok status.
-    :raises HTTPException: 404 if bot not found, 502 on agent failure.
+    :return: Dict with ok status and optional warning.
+    :raises HTTPException: 404 if bot not found.
     """
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
         raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
-    if not bot.assigned_agent_id:
-        bot.status = "stopped"
-        db.commit()
-        return {"ok": True}
 
-    agent_url = resolve_agent_url(bot.assigned_agent_id, db)
-    ok, message = post_json(f"{agent_url}/agent/bots/{bot.id}/stop", {"bot_id": bot.id})
-    if not ok:
-        raise HTTPException(status_code=502, detail=f"Agent stop failed: {message}")
+    warning = None
+
+    if bot.assigned_agent_id:
+        agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
+        if agent and agent.approval_status == "approved":
+            ok, message = post_json(
+                f"{agent.base_url}/agent/bots/{bot.id}/stop",
+                {"bot_id": bot.id},
+            )
+            if not ok:
+                logger.warning(
+                    "Could not reach agent %s to stop bot %s: %s – force-stopping",
+                    bot.assigned_agent_id, bot.id, message,
+                )
+                warning = f"Agent unreachable, bot force-stopped: {message}"
+        else:
+            warning = "Agent not found or not approved, bot force-stopped"
 
     bot.status = "stopped"
+    bot.assigned_agent_id = None
     bot.updated_at = datetime.now(UTC)
     db.commit()
+    result: dict = {"ok": True}
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+@router.delete("/bots/{bot_id}", responses={404: {"description": "Not found"}, 409: {"description": "Bot is running"}})
+def delete_bot(bot_id: str, db: DbSession) -> dict:
+    """
+    Delete a stopped bot and its associated event data.
+
+    :param bot_id: Unique identifier of the bot to delete.
+    :param db: Database session (injected).
+    :return: Dict with ok status.
+    :raises HTTPException: 404 if bot not found, 409 if bot is still running.
+    """
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
+    if bot.status == "running":
+        raise HTTPException(status_code=409, detail="Cannot delete a running bot – stop it first")
+    db.delete(bot)
+    db.commit()
+    logger.info("Bot %s deleted", bot_id)
     return {"ok": True}
 
 
@@ -251,6 +340,7 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
         bot_id,
         snapshot.timestamp.isoformat(),
         snapshot.total_equity_quote,
+        snapshot.price,
     )
 
     # ── Detect new trades and emit trade events ──
@@ -274,6 +364,8 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
             )
 
     bot.latest_metrics_json = snapshot.model_dump_json()
+    if payload.runner_state:
+        bot.state_json = payload.runner_state.model_dump_json()
     bot.updated_at = datetime.now(UTC)
     db.commit()
     return {"ok": True}
@@ -297,3 +389,23 @@ def get_equity_history(bot_id: str) -> list[dict]:
 
     with EQUITY_HISTORY_LOCK:
         return EQUITY_HISTORY.get(bot_id, [])
+
+
+@router.get("/bots/{bot_id}/open-orders")
+def get_open_orders(bot_id: str, db: DbSession) -> dict:
+    """Proxy open orders from the agent running this bot."""
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
+    if bot.status != "running" or not bot.assigned_agent_id:
+        raise HTTPException(status_code=409, detail="Bot is not running")
+    agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
+    import requests as req
+    try:
+        resp = req.get(f"{agent.base_url}/agent/bots/{bot_id}/open-orders", timeout=5)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

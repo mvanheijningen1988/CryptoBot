@@ -6,6 +6,7 @@ from common.models import (
     BudgetConfig,
     GridConfig,
     ProfitMode,
+    RunnerState,
     TradeSignal,
 )
 from common.strategy.base import Strategy, StrategyState
@@ -20,6 +21,7 @@ __all__ = [
     "BudgetConfig",
     "GridConfig",
     "ProfitMode",
+    "RunnerState",
     "TradeSignal",
     "Strategy",
     "StrategyState",

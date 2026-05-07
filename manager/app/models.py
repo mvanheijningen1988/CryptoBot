@@ -50,5 +50,6 @@ class Bot(Base):
     assigned_agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     config_json: Mapped[str] = mapped_column(Text, nullable=False)
     latest_metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    state_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))

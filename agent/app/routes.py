@@ -1,11 +1,16 @@
 """Agent HTTP route handlers for bot lifecycle and log retrieval."""
 from __future__ import annotations
 
+import logging
+
+from fastapi import HTTPException
 from fastapi.routing import APIRouter
 
 from agent.app.config import AGENT_ID, runner_manager
 from agent.app.schemas import BudgetPayload, StartBotPayload, StopBotPayload
 from agent.app.version import __version__
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -29,7 +34,13 @@ def start_bot(bot_id: str, payload: StartBotPayload) -> dict:
     :param payload: Request body containing bot_id and config.
     :return: Acknowledgement dict.
     """
-    runner_manager.start_bot(bot_id, payload.config)
+    logger.info("START request for bot %s (mode=%s, market=%s)", bot_id, payload.config.mode, payload.config.market)
+    try:
+        runner_manager.start_bot(bot_id, payload.config, runner_state=payload.runner_state)
+    except Exception as exc:
+        logger.exception("Failed to start bot %s", bot_id)
+        raise HTTPException(status_code=500, detail=f"Bot start failed: {exc}") from exc
+    logger.info("Bot %s started successfully", bot_id)
     return {"ok": True}
 
 
@@ -42,7 +53,13 @@ def stop_bot(bot_id: str, payload: StopBotPayload) -> dict:
     :param payload: Request body containing bot_id.
     :return: Acknowledgement dict.
     """
-    runner_manager.stop_bot(bot_id)
+    logger.info("STOP request for bot %s", bot_id)
+    try:
+        runner_manager.stop_bot(bot_id)
+    except Exception as exc:
+        logger.exception("Failed to stop bot %s", bot_id)
+        raise HTTPException(status_code=500, detail=f"Bot stop failed: {exc}") from exc
+    logger.info("Bot %s stopped successfully", bot_id)
     return {"ok": True}
 
 
@@ -55,7 +72,12 @@ def update_budget(bot_id: str, payload: BudgetPayload) -> dict:
     :param payload: Request body containing bot_id and new budget.
     :return: Acknowledgement dict.
     """
-    runner_manager.update_budget(bot_id, payload.budget)
+    logger.info("BUDGET update for bot %s", bot_id)
+    try:
+        runner_manager.update_budget(bot_id, payload.budget)
+    except Exception as exc:
+        logger.exception("Failed to update budget for bot %s", bot_id)
+        raise HTTPException(status_code=500, detail=f"Budget update failed: {exc}") from exc
     return {"ok": True}
 
 
@@ -84,3 +106,13 @@ def list_logs(limit: int = 200, bot_id: str | None = None, category: str | None 
         "agent_id": AGENT_ID,
         "logs": runner_manager.get_logs(limit=safe_limit, bot_id=bot_id, category=category),
     }
+
+
+@router.get("/agent/bots/{bot_id}/open-orders")
+def get_open_orders(bot_id: str) -> dict:
+    """Return open grid orders for a running bot."""
+    runner = runner_manager.runners.get(bot_id)
+    if not runner or not runner.running:
+        raise HTTPException(status_code=404, detail="Bot not running")
+    orders = runner.strategy.get_open_orders(runner.state)
+    return {"bot_id": bot_id, "orders": orders}

@@ -82,15 +82,16 @@ EQUITY_HISTORY_LOCK = Lock()
 MAX_EQUITY_POINTS = 500
 
 
-def add_equity_point(bot_id: str, timestamp: str, total_equity: float) -> None:
+def add_equity_point(bot_id: str, timestamp: str, total_equity: float, price: float = 0.0) -> None:
     """
     Append an equity data-point for a bot's budget trend chart.
 
     :param bot_id: Bot identifier.
     :param timestamp: ISO timestamp string.
     :param total_equity: Total equity value at this point.
+    :param price: Market price at this point.
     """
-    point = {"t": timestamp, "v": round(total_equity, 4)}
+    point = {"t": timestamp, "v": round(total_equity, 4), "p": round(price, 6)}
     with EQUITY_HISTORY_LOCK:
         if bot_id not in EQUITY_HISTORY:
             EQUITY_HISTORY[bot_id] = []

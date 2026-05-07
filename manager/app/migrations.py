@@ -18,6 +18,7 @@ def run_migrations(engine: Engine) -> None:
     _ensure_agent_version_column(engine)
     _ensure_users_table(engine)
     _drop_agent_name_column(engine)
+    _ensure_bot_state_column(engine)
 
 
 def _ensure_agent_approval_column(engine: Engine) -> None:
@@ -84,6 +85,21 @@ def _drop_agent_name_column(engine: Engine) -> None:
             columns = {row[1] for row in rows}
             if "name" in columns:
                 conn.exec_driver_sql("ALTER TABLE agents DROP COLUMN name")
+                conn.commit()
+        except Exception:
+            pass
+
+
+def _ensure_bot_state_column(engine: Engine) -> None:
+    """Add ``state_json`` column to bots if missing."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(bots)").fetchall()
+            columns = {row[1] for row in rows}
+            if "state_json" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE bots ADD COLUMN state_json TEXT DEFAULT '{}'"
+                )
                 conn.commit()
         except Exception:
             pass

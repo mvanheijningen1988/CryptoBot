@@ -171,3 +171,58 @@ def list_markets(status: str = "trading") -> list[dict]:
 
     normalized.sort(key=lambda x: x["market"])
     return normalized
+
+
+@router.get("/market/price-range", responses={502: {"description": "API failure"}})
+def market_price_range(market: str, days: int = 7) -> dict:
+    """
+    Return the average daily high/low for a market over the last *days* days.
+
+    Uses the Bitvavo public ``/v2/candles`` endpoint with ``1d`` interval.
+
+    :param market: Market pair (e.g. ``'BTC-EUR'``).
+    :param days: Number of days to look back (1–90, default 7).
+    :return: Dict with ``avg_high``, ``avg_low``, ``min_low``, ``max_high``,
+             and the raw daily ``candles`` list.
+    """
+    days = max(1, min(days, 90))
+
+    try:
+        resp = requests.get(
+            "https://api.bitvavo.com/v2/candles",
+            params={"market": market, "interval": "1d", "limit": days},
+            timeout=8,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch candles: {exc}") from exc
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Bitvavo returned {resp.status_code}: {resp.text}")
+
+    payload = resp.json()
+    if not isinstance(payload, list) or not payload:
+        raise HTTPException(status_code=502, detail="No candle data returned")
+
+    # Bitvavo candles: [timestamp, open, high, low, close, volume]
+    highs: list[float] = []
+    lows: list[float] = []
+    for candle in payload:
+        if not isinstance(candle, list) or len(candle) < 4:
+            continue
+        try:
+            highs.append(float(candle[2]))
+            lows.append(float(candle[3]))
+        except (ValueError, TypeError):
+            continue
+
+    if not highs or not lows:
+        raise HTTPException(status_code=502, detail="Could not parse candle data")
+
+    return {
+        "market": market,
+        "days": days,
+        "avg_high": sum(highs) / len(highs),
+        "avg_low": sum(lows) / len(lows),
+        "min_low": min(lows),
+        "max_high": max(highs),
+    }

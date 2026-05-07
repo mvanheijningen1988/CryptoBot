@@ -29,6 +29,34 @@ def _sides(signals: list[TradeSignal]) -> list[str]:
     return [s.side for s in signals]
 
 
+def _tick(s: StaticGridStrategy, price: float, state: StrategyState) -> list[TradeSignal]:
+    """Detect fills at *price* and confirm them all (places follow-up orders).
+
+    This simulates one exchange round-trip: detect → execute → confirm.
+    """
+    signals = s.on_price(price, state)
+    for sig in signals:
+        s.confirm_fill(sig, state)
+    return signals
+
+
+def _process(s: StaticGridStrategy, price: float, state: StrategyState) -> list[TradeSignal]:
+    """Full cascade: detect fills, confirm, re-check until stable.
+
+    Used when the price jumps multiple levels and cascade orders also
+    fill at the same price.
+    """
+    all_signals: list[TradeSignal] = []
+    while True:
+        signals = s.on_price(price, state)
+        if not signals:
+            break
+        for sig in signals:
+            s.confirm_fill(sig, state)
+        all_signals.extend(signals)
+    return all_signals
+
+
 # ===================================================================
 # 1. Grid level computation
 # ===================================================================
@@ -175,18 +203,34 @@ class TestFirstPriceInit:
         s.on_price(150.0, state)
         assert state.level_index == 5
 
+    def test_first_call_places_one_buy_below(self):
+        """Init should place exactly one buy at the level below current price."""
+        s = StaticGridStrategy(_grid(100, 200, 11))
+        state = StrategyState()
+        s.on_price(150.0, state)  # idx 5
+        assert state.open_orders == {4: "buy"}
+
+    def test_first_call_no_sells(self):
+        """Init should NOT place any sell orders (no base currency held)."""
+        s = StaticGridStrategy(_grid(100, 200, 11))
+        state = StrategyState()
+        s.on_price(150.0, state)
+        assert all(side == "buy" for side in state.open_orders.values())
+
     def test_first_call_at_lower_bound(self):
+        """At the lowest level there is no level below — no orders placed."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
         s.on_price(100.0, state)
         assert state.level_index == 0
-        assert s.on_price(100.0, state) == []  # no move, no signals
+        assert state.open_orders == {}
 
     def test_first_call_at_upper_bound(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
         s.on_price(200.0, state)
         assert state.level_index == 10
+        assert state.open_orders == {9: "buy"}
 
     def test_first_call_below_grid(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
@@ -211,18 +255,28 @@ class TestSingleLevelMovement:
     def test_one_level_down_emits_buy(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(150.0, state)  # init at idx 5
-        signals = s.on_price(140.0, state)  # idx 4 → 1 buy
+        s.on_price(150.0, state)  # init at idx 5, buy pending at 4
+        signals = s.on_price(140.0, state)  # fills buy at idx 4
         assert _sides(signals) == ["buy"]
         assert signals[0].quote_amount == pytest.approx(10.0)
 
-    def test_one_level_up_emits_sell(self):
+    def test_buy_then_sell(self):
+        """After a confirmed buy, sell is placed one level above — price rising fills it."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(150.0, state)  # init at idx 5
-        signals = s.on_price(160.0, state)  # idx 6 → 1 sell
+        s.on_price(150.0, state)  # init, buy at 4
+        _tick(s, 140.0, state)    # fills buy at 4, confirm places sell at 5
+        signals = s.on_price(150.0, state)  # fills sell at 5
         assert _sides(signals) == ["sell"]
         assert signals[0].quote_amount == pytest.approx(10.0)
+
+    def test_sell_without_prior_buy_impossible(self):
+        """Price rising from init should not produce sell (no base currency)."""
+        s = StaticGridStrategy(_grid(100, 200, 11))
+        state = StrategyState()
+        s.on_price(150.0, state)  # init, only buy at 4
+        signals = s.on_price(160.0, state)  # no sell order there
+        assert signals == []
 
     def test_state_updated_after_buy(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
@@ -235,54 +289,57 @@ class TestSingleLevelMovement:
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
         s.on_price(150.0, state)
-        s.on_price(160.0, state)
-        assert state.level_index == 6
+        _tick(s, 140.0, state)    # buy at 4 confirmed → sell at 5
+        s.on_price(150.0, state)  # sell at 5 fills
+        assert state.level_index == 5
 
 
 # ===================================================================
-# 5. Multi-level movements
+# 5. Multi-level movements (cascading buys)
 # ===================================================================
 
 class TestMultiLevelMovement:
-    """Price crosses multiple grid levels in one tick."""
+    """Price crosses multiple grid levels — buys cascade downward."""
 
-    def test_two_levels_down_emits_two_buys(self):
+    def test_cascade_two_buys(self):
+        """Drop 2 levels: buy at 4 fills, confirm places buy at 3, second tick fills it."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(150.0, state)
-        signals = s.on_price(130.0, state)  # idx 5 → idx 3
-        assert _sides(signals) == ["buy", "buy"]
-
-    def test_three_levels_up_emits_three_sells(self):
-        s = StaticGridStrategy(_grid(100, 200, 11))
-        state = StrategyState()
-        s.on_price(150.0, state)
-        signals = s.on_price(180.0, state)  # idx 5 → idx 8
-        assert _sides(signals) == ["sell", "sell", "sell"]
-
-    def test_full_grid_drop_bottom_to_top(self):
-        """Price jumps from top to bottom: expect levels-1 buys."""
-        s = StaticGridStrategy(_grid(100, 200, 11))
-        state = StrategyState()
-        s.on_price(200.0, state)  # init at idx 10
-        signals = s.on_price(100.0, state)
-        assert _sides(signals) == ["buy"] * 10
-
-    def test_full_grid_rise_bottom_to_top(self):
-        """Price jumps from bottom to top: expect levels-1 sells."""
-        s = StaticGridStrategy(_grid(100, 200, 11))
-        state = StrategyState()
-        s.on_price(100.0, state)
-        signals = s.on_price(200.0, state)
-        assert _sides(signals) == ["sell"] * 10
-
-    def test_five_levels_down(self):
-        s = StaticGridStrategy(_grid(100, 200, 11))
-        state = StrategyState()
-        s.on_price(200.0, state)  # idx 10
-        signals = s.on_price(150.0, state)  # idx 5
-        assert len(signals) == 5
+        s.on_price(150.0, state)  # init, buy at 4
+        signals = _process(s, 130.0, state)
+        assert len(signals) == 2
         assert all(sig.side == "buy" for sig in signals)
+
+    def test_cascade_fills_sell_and_buy(self):
+        """After cascading buys confirmed, sells are placed above each filled buy."""
+        s = StaticGridStrategy(_grid(100, 200, 11))
+        state = StrategyState()
+        s.on_price(150.0, state)
+        _process(s, 130.0, state)  # buys at 4 and 3 confirmed
+        assert state.open_orders.get(5) == "sell"
+        assert state.open_orders.get(4) == "sell"
+
+    def test_sell_requires_prior_buy(self):
+        """Rising price from init with no filled buys → no sells."""
+        s = StaticGridStrategy(_grid(100, 200, 11))
+        state = StrategyState()
+        s.on_price(100.0, state)  # idx 0, no level below → no buy order
+        signals = s.on_price(200.0, state)  # no sell orders exist
+        assert signals == []
+
+    def test_gradual_decline_one_at_a_time(self):
+        """Step-by-step decline: each step fills one buy and cascades the next."""
+        s = StaticGridStrategy(_grid(100, 200, 11))
+        state = StrategyState()
+        s.on_price(150.0, state)  # idx 5, buy at 4
+
+        total_buys = 0
+        for price in [140, 130, 120, 110, 100]:
+            signals = _tick(s, float(price), state)
+            assert len(signals) == 1
+            assert signals[0].side == "buy"
+            total_buys += 1
+        assert total_buys == 5
 
 
 # ===================================================================
@@ -303,7 +360,6 @@ class TestNoMovement:
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
         s.on_price(150.0, state)  # idx 5
-        # Stay close to 150
         assert s.on_price(151.0, state) == []
         assert s.on_price(149.0, state) == []
         assert s.on_price(150.5, state) == []
@@ -325,50 +381,32 @@ class TestBoundaryPrices:
     """Price at or beyond grid boundaries."""
 
     def test_price_stays_below_grid(self):
-        """Once initialised below the grid, staying below produces no signals."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(50.0, state)  # idx 0
+        s.on_price(50.0, state)
         assert s.on_price(30.0, state) == []
 
     def test_price_stays_above_grid(self):
-        """Once initialised above the grid, staying above produces no signals."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(300.0, state)  # idx 10
+        s.on_price(300.0, state)  # idx 10, buy at 9
         assert s.on_price(500.0, state) == []
 
-    def test_drop_from_above_to_within(self):
-        """Coming from above the grid into the grid should trigger buys."""
+    def test_drop_from_above_fills_cascading_buys(self):
+        """Price dropping from above should fill the initial buy and cascade."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(300.0, state)  # snaps to idx 10
-        signals = s.on_price(170.0, state)  # idx 7 → 3 buys
-        assert _sides(signals) == ["buy"] * 3
+        s.on_price(200.0, state)  # idx 10, buy at 9 (price 190)
+        signals = _process(s, 170.0, state)  # fills 9 → 8 → 7
+        assert len(signals) == 3
+        assert all(sig.side == "buy" for sig in signals)
 
-    def test_rise_from_below_to_within(self):
-        """Coming from below the grid into the grid should trigger sells."""
+    def test_rise_from_below_no_sells(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(50.0, state)  # snaps to idx 0
-        signals = s.on_price(130.0, state)  # idx 3 → 3 sells
-        assert _sides(signals) == ["sell"] * 3
-
-    def test_from_below_to_above_entire_grid(self):
-        """Price jumps from below grid to above grid → all levels crossed upward."""
-        s = StaticGridStrategy(_grid(100, 200, 11))
-        state = StrategyState()
-        s.on_price(10.0, state)  # idx 0
-        signals = s.on_price(500.0, state)  # idx 10 → 10 sells
-        assert _sides(signals) == ["sell"] * 10
-
-    def test_from_above_to_below_entire_grid(self):
-        """Price jumps from above grid to below grid → all levels crossed downward."""
-        s = StaticGridStrategy(_grid(100, 200, 11))
-        state = StrategyState()
-        s.on_price(500.0, state)  # idx 10
-        signals = s.on_price(10.0, state)  # idx 0 → 10 buys
-        assert _sides(signals) == ["buy"] * 10
+        s.on_price(50.0, state)
+        signals = s.on_price(130.0, state)
+        assert signals == []
 
 
 # ===================================================================
@@ -376,43 +414,39 @@ class TestBoundaryPrices:
 # ===================================================================
 
 class TestOscillation:
-    """Price oscillating between levels produces alternating signals."""
+    """Price oscillating between levels produces alternating buy/sell."""
 
     def test_simple_zigzag(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
         s.on_price(150.0, state)
 
-        assert _sides(s.on_price(140.0, state)) == ["buy"]
-        assert _sides(s.on_price(150.0, state)) == ["sell"]
-        assert _sides(s.on_price(140.0, state)) == ["buy"]
-        assert _sides(s.on_price(150.0, state)) == ["sell"]
+        assert _sides(_tick(s, 140.0, state)) == ["buy"]
+        assert _sides(_tick(s, 150.0, state)) == ["sell"]
+        assert _sides(_tick(s, 140.0, state)) == ["buy"]
+        assert _sides(_tick(s, 150.0, state)) == ["sell"]
 
     def test_rapid_adjacent_oscillation(self):
-        """Oscillating one level up and down repeatedly."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(150.0, state)  # idx 5
+        s.on_price(150.0, state)
 
         for _ in range(20):
-            buy_signals = s.on_price(140.0, state)
+            buy_signals = _tick(s, 140.0, state)
             assert len(buy_signals) == 1 and buy_signals[0].side == "buy"
-            sell_signals = s.on_price(150.0, state)
+            sell_signals = _tick(s, 150.0, state)
             assert len(sell_signals) == 1 and sell_signals[0].side == "sell"
 
-    def test_wider_oscillation(self):
-        """Oscillating 3 levels each way."""
+    def test_wider_oscillation_cascade(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(150.0, state)  # idx 5
+        s.on_price(150.0, state)
 
-        # Drop 3 levels
-        signals = s.on_price(120.0, state)  # idx 2
-        assert len(signals) == 3 and all(s.side == "buy" for s in signals)
+        signals = _process(s, 130.0, state)
+        assert len(signals) == 2 and all(sig.side == "buy" for sig in signals)
 
-        # Rise 3 levels
-        signals = s.on_price(150.0, state)  # idx 5
-        assert len(signals) == 3 and all(s.side == "sell" for s in signals)
+        signals = _process(s, 150.0, state)
+        assert len(signals) == 2 and all(sig.side == "sell" for sig in signals)
 
 
 # ===================================================================
@@ -425,36 +459,31 @@ class TestStatePersistence:
     def test_state_tracks_across_many_ticks(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(100.0, state)  # idx 0
+        s.on_price(150.0, state)
 
-        s.on_price(130.0, state)  # idx 3 → 3 sells
-        assert state.level_index == 3
+        _tick(s, 140.0, state)
+        assert state.level_index == 4
 
-        s.on_price(110.0, state)  # idx 1 → 2 buys
-        assert state.level_index == 1
-
-        s.on_price(190.0, state)  # idx 9 → 8 sells
-        assert state.level_index == 9
+        _tick(s, 150.0, state)
+        assert state.level_index == 5
 
     def test_separate_states_independent(self):
-        """Two state objects used with the same strategy don't interfere."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state_a = StrategyState()
         state_b = StrategyState()
 
-        s.on_price(150.0, state_a)  # init A at idx 5
-        s.on_price(100.0, state_b)  # init B at idx 0
+        s.on_price(150.0, state_a)
+        s.on_price(140.0, state_b)
 
-        signals_a = s.on_price(140.0, state_a)  # A: idx 5→4 → 1 buy
-        signals_b = s.on_price(120.0, state_b)  # B: idx 0→2 → 2 sells
+        signals_a = s.on_price(140.0, state_a)
+        signals_b = s.on_price(130.0, state_b)
 
         assert _sides(signals_a) == ["buy"]
-        assert _sides(signals_b) == ["sell", "sell"]
+        assert _sides(signals_b) == ["buy"]
         assert state_a.level_index == 4
-        assert state_b.level_index == 2
+        assert state_b.level_index == 3
 
     def test_fresh_state_always_inits(self):
-        """A fresh StrategyState starts with level_index = None."""
         state = StrategyState()
         assert state.level_index is None
 
@@ -477,15 +506,16 @@ class TestOrderSize:
         s = StaticGridStrategy(_grid(order_size=25.0))
         state = StrategyState()
         s.on_price(150.0, state)
-        signals = s.on_price(160.0, state)
+        _tick(s, 140.0, state)  # buy confirmed → sell at 5
+        signals = s.on_price(150.0, state)
         assert all(sig.quote_amount == pytest.approx(25.0) for sig in signals)
 
-    def test_multi_level_all_same_amount(self):
+    def test_cascade_all_same_amount(self):
         s = StaticGridStrategy(_grid(order_size=7.5))
         state = StrategyState()
-        s.on_price(200.0, state)
-        signals = s.on_price(100.0, state)  # 10 buys
-        assert len(signals) == 10
+        s.on_price(150.0, state)
+        signals = _process(s, 130.0, state)
+        assert len(signals) == 2
         assert all(sig.quote_amount == pytest.approx(7.5) for sig in signals)
 
     def test_very_small_order_size(self):
@@ -511,49 +541,49 @@ class TestProductionScenarios:
     """Scenarios that could lead to money loss if handled incorrectly."""
 
     def test_flash_crash_and_recovery(self):
-        """Sudden drop then recovery should produce buys then sells, net zero signals."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
         s.on_price(150.0, state)
 
-        crash_signals = s.on_price(100.0, state)  # 5 buys
-        assert _sides(crash_signals) == ["buy"] * 5
+        crash_signals = _process(s, 100.0, state)
+        assert all(sig.side == "buy" for sig in crash_signals)
+        assert len(crash_signals) == 5
 
-        recovery_signals = s.on_price(150.0, state)  # 5 sells
-        assert _sides(recovery_signals) == ["sell"] * 5
+        recovery_signals = _process(s, 150.0, state)
+        assert all(sig.side == "sell" for sig in recovery_signals)
+        assert len(recovery_signals) == 5
 
-    def test_gradual_decline(self):
-        """Step-by-step price decline produces one buy per step."""
+    def test_gradual_decline_step_by_step(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(200.0, state)
+        s.on_price(150.0, state)
 
         total_buys = 0
-        for price in [190, 180, 170, 160, 150, 140, 130, 120, 110, 100]:
-            signals = s.on_price(float(price), state)
+        for price in [140, 130, 120, 110, 100]:
+            signals = _tick(s, float(price), state)
             assert len(signals) == 1
             assert signals[0].side == "buy"
             total_buys += 1
+        assert total_buys == 5
 
-        assert total_buys == 10
-
-    def test_gradual_rise(self):
-        """Step-by-step price rise produces one sell per step."""
+    def test_gradual_rise_after_buys(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(100.0, state)
+        s.on_price(150.0, state)
+
+        _tick(s, 140.0, state)
+        _tick(s, 130.0, state)
+        _tick(s, 120.0, state)
 
         total_sells = 0
-        for price in [110, 120, 130, 140, 150, 160, 170, 180, 190, 200]:
-            signals = s.on_price(float(price), state)
+        for price in [130, 140, 150]:
+            signals = _tick(s, float(price), state)
             assert len(signals) == 1
             assert signals[0].side == "sell"
             total_sells += 1
-
-        assert total_sells == 10
+        assert total_sells == 3
 
     def test_no_duplicate_signals_on_same_level(self):
-        """Calling on_price repeatedly at the same level never generates signals."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
         s.on_price(150.0, state)
@@ -561,101 +591,58 @@ class TestProductionScenarios:
             assert s.on_price(150.0, state) == []
 
     def test_symmetry_buy_then_sell(self):
-        """For any round-trip the number of buy signals equals sell signals."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
         s.on_price(150.0, state)
 
-        down = s.on_price(110.0, state)  # 4 buys
-        up = s.on_price(150.0, state)    # 4 sells
+        down = _tick(s, 140.0, state)
+        up = _tick(s, 150.0, state)
         assert len(down) == len(up)
         assert all(d.side == "buy" for d in down)
         assert all(u.side == "sell" for u in up)
 
-    def test_price_at_exact_grid_boundaries_no_overshoot(self):
-        """Exact boundary prices should not produce extra signals."""
+    def test_no_sell_without_base(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(100.0, state)  # idx 0
-
-        # Move to exact last level
-        signals = s.on_price(200.0, state)
-        assert len(signals) == 10  # exactly levels - 1
-
-        # Back to exact first level
-        signals = s.on_price(100.0, state)
-        assert len(signals) == 10  # exactly levels - 1
-
-    def test_micro_grid_high_frequency_scenario(self):
-        """Very tight grid with many levels simulating HFT-like conditions."""
-        g = _grid(lower=99.0, upper=101.0, levels=201, order_size=1.0)
-        s = StaticGridStrategy(g)
-        state = StrategyState()
-
-        # Step size = 0.01
-        s.on_price(100.0, state)  # init at midpoint (~idx 100)
-        signals = s.on_price(99.5, state)  # ~50 levels down
-        # Should be ~50 buys
-        assert all(sig.side == "buy" for sig in signals)
-        assert len(signals) == 50
-
-    def test_very_large_price_move_does_not_miss_levels(self):
-        """A massive move should emit one signal per crossed level."""
-        g = _grid(lower=10.0, upper=10000.0, levels=1000)
-        s = StaticGridStrategy(g)
-        state = StrategyState()
-        s.on_price(10.0, state)  # idx 0
-        signals = s.on_price(10000.0, state)  # idx 999
-        assert len(signals) == 999
-        assert all(sig.side == "sell" for sig in signals)
-
-    def test_mixed_direction_sequence(self):
-        """Complex up/down/up/down sequence tracks state correctly."""
-        s = StaticGridStrategy(_grid(100, 200, 11))
-        state = StrategyState()
-        s.on_price(150.0, state)  # idx 5
-
-        # Down to idx 3 → 2 buys
-        assert len(s.on_price(130.0, state)) == 2
-
-        # Up to idx 7 → 4 sells
-        assert len(s.on_price(170.0, state)) == 4
-
-        # Down to idx 1 → 6 buys
-        assert len(s.on_price(110.0, state)) == 6
-
-        # Up to idx 9 → 8 sells
-        assert len(s.on_price(190.0, state)) == 8
-
-        assert state.level_index == 9
+        s.on_price(100.0, state)
+        for price in [110, 120, 130, 140, 150]:
+            assert s.on_price(float(price), state) == []
 
     def test_staircase_down_then_up(self):
-        """Price goes down one level at a time then back up."""
-        s = StaticGridStrategy(_grid(100, 200, 6))  # levels: 100,120,140,160,180,200
+        s = StaticGridStrategy(_grid(100, 200, 6))
         state = StrategyState()
-        s.on_price(160.0, state)  # idx 3
+        s.on_price(160.0, state)
 
-        # Down one at a time
-        assert _sides(s.on_price(140.0, state)) == ["buy"]     # idx 2
-        assert _sides(s.on_price(120.0, state)) == ["buy"]     # idx 1
-        assert _sides(s.on_price(100.0, state)) == ["buy"]     # idx 0
+        assert _sides(_tick(s, 140.0, state)) == ["buy"]
+        assert _sides(_tick(s, 120.0, state)) == ["buy"]
+        assert _sides(_tick(s, 100.0, state)) == ["buy"]
 
-        # Up one at a time
-        assert _sides(s.on_price(120.0, state)) == ["sell"]    # idx 1
-        assert _sides(s.on_price(140.0, state)) == ["sell"]    # idx 2
-        assert _sides(s.on_price(160.0, state)) == ["sell"]    # idx 3
+        assert _sides(_tick(s, 120.0, state)) == ["sell"]
+        assert _sides(_tick(s, 140.0, state)) == ["sell"]
+        assert _sides(_tick(s, 160.0, state)) == ["sell"]
 
     def test_return_type_is_list_of_trade_signals(self):
-        """Ensure all returned items are TradeSignal instances."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(200.0, state)
-        signals = s.on_price(100.0, state)
+        s.on_price(150.0, state)
+        signals = s.on_price(140.0, state)
         assert isinstance(signals, list)
         for sig in signals:
             assert isinstance(sig, TradeSignal)
             assert sig.side in ("buy", "sell")
             assert sig.quote_amount > 0
+
+    def test_unconfirmed_buy_does_not_place_sell(self):
+        """If a buy is detected but NOT confirmed, no sell order appears."""
+        s = StaticGridStrategy(_grid(100, 200, 11))
+        state = StrategyState()
+        s.on_price(150.0, state)  # buy at 4
+        signals = s.on_price(140.0, state)  # detects buy at 4, removes it
+        assert len(signals) == 1
+        # Do NOT confirm — no sell should exist
+        assert "sell" not in state.open_orders.values()
+        # No cascade buy either
+        assert 3 not in state.open_orders
 
 
 # ===================================================================
@@ -666,23 +653,19 @@ class TestMidpointBoundary:
     """Prices near the exact midpoint between two levels."""
 
     def test_just_below_midpoint_stays(self):
-        """Price just below midpoint should snap to lower level."""
-        s = StaticGridStrategy(_grid(100, 200, 11))  # levels every 10
+        s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(150.0, state)  # idx 5
-        # 154.99 → closer to 150 (distance 4.99) than 160 (distance 5.01)
+        s.on_price(150.0, state)
         signals = s.on_price(154.99, state)
         assert signals == []
         assert state.level_index == 5
 
     def test_just_above_midpoint_moves(self):
-        """Price just above midpoint should snap to upper level → sell."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(150.0, state)  # idx 5
-        # 155.01 → closer to 160 (distance 4.99) than 150 (distance 5.01)
+        s.on_price(150.0, state)
         signals = s.on_price(155.01, state)
-        assert _sides(signals) == ["sell"]
+        assert signals == []
         assert state.level_index == 6
 
 
@@ -694,21 +677,17 @@ class TestCumulativeSignals:
     """Verify total signal count over complex price paths."""
 
     def test_total_signals_round_trip(self):
-        """A full down-and-up trip produces 2*(levels-1) signals total."""
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState()
-        s.on_price(150.0, state)  # idx 5
+        s.on_price(150.0, state)
 
         all_signals = []
-        all_signals.extend(s.on_price(100.0, state))  # 5 buys
-        all_signals.extend(s.on_price(200.0, state))  # 10 sells
-        all_signals.extend(s.on_price(100.0, state))  # 10 buys
-        all_signals.extend(s.on_price(150.0, state))  # 5 sells
+        all_signals.extend(_process(s, 100.0, state))
+        all_signals.extend(_process(s, 150.0, state))
 
         buys = sum(1 for sig in all_signals if sig.side == "buy")
         sells = sum(1 for sig in all_signals if sig.side == "sell")
-        assert buys == 15
-        assert sells == 15
+        assert buys == sells
 
 
 # ===================================================================
@@ -722,26 +701,22 @@ class TestConfigEdgeCases:
         g = _grid(lower=0.0001, upper=0.0002, levels=2)
         s = StaticGridStrategy(g)
         state = StrategyState()
-        s.on_price(0.0001, state)
-        signals = s.on_price(0.0002, state)
-        assert _sides(signals) == ["sell"]
+        s.on_price(0.0002, state)
+        signals = s.on_price(0.0001, state)
+        assert _sides(signals) == ["buy"]
 
     def test_order_size_zero_rejected_by_config(self):
-        """GridConfig rejects order_size_quote <= 0."""
         with pytest.raises(Exception):
             _grid(order_size=0.0)
 
     def test_negative_order_size_rejected(self):
-        """GridConfig rejects negative order sizes."""
         with pytest.raises(Exception):
             _grid(order_size=-5.0)
 
     def test_extremely_many_levels(self):
-        """Grid with 10,000 levels should still function correctly."""
         g = _grid(lower=1.0, upper=2.0, levels=10000)
         s = StaticGridStrategy(g)
         assert len(s.levels) == 10000
         state = StrategyState()
-        s.on_price(1.0, state)
-        signals = s.on_price(2.0, state)
-        assert len(signals) == 9999
+        s.on_price(1.5, state)
+        assert len(state.open_orders) == 1

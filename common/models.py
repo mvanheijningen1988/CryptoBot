@@ -52,6 +52,7 @@ class TradeSignal(BaseModel):
 
     side: Literal["buy", "sell"]
     quote_amount: float = Field(..., gt=0)
+    level_index: int | None = None
 
 
 class BotSnapshot(BaseModel):
@@ -69,3 +70,23 @@ class BotSnapshot(BaseModel):
     skimmed_quote: float
     trade_count: int = 0
     status: str
+
+
+class RunnerState(BaseModel):
+    """Serialisable snapshot of a runner's full state for failover.
+
+    Contains everything needed to resume a bot on a different agent:
+    strategy state, balances, and cumulative counters.
+    """
+
+    level_index: int | None = None
+    open_orders: dict[int, str] = Field(default_factory=dict)
+    filled_buys: list[int] = Field(default_factory=list)
+    filled_amounts: dict[int, float] = Field(default_factory=dict)
+    price: float = 0.0
+    quote_balance: float = 0.0
+    base_balance: float = 0.0
+    initial_equity: float = 0.0
+    realized_pnl: float = 0.0
+    skimmed_quote: float = 0.0
+    trade_count: int = 0

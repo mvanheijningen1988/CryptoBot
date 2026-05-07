@@ -9,15 +9,18 @@ def build_static_grid_profit_preview(grid: GridConfig, fee_rate: float) -> dict:
     Compute per-trade profit for each adjacent level pair in a grid.
 
     Returns a summary dict indicating whether every trade cycle is
-    profitable after accounting for fee_rate (buy + sell fees).
+    profitable after accounting for fee_rate (buy + sell fees), along
+    with the full list of grid levels and per-trade details.
 
     :param grid: Grid configuration with price range, levels, and order size.
     :param fee_rate: The exchange fee rate per trade (e.g. 0.0025 for 0.25%).
-    :return: Dict with profitability summary, step sizes, and per-trade profit stats.
+    :return: Dict with profitability summary, step sizes, per-trade profit
+             stats, and a ``trades`` list of individual level pairs.
     """
     step = (grid.upper_price - grid.lower_price) / (grid.levels - 1)
     levels = [grid.lower_price + i * step for i in range(grid.levels)]
 
+    trades: list[dict] = []
     per_trade_profits: list[float] = []
     profitable_count = 0
 
@@ -36,11 +39,19 @@ def build_static_grid_profit_preview(grid: GridConfig, fee_rate: float) -> dict:
         if net_profit > 0:
             profitable_count += 1
 
+        trades.append({
+            "level": i + 1,
+            "buy_price": round(buy_price, 6),
+            "sell_price": round(sell_price, 6),
+            "order_size_quote": round(quote_spent, 6),
+            "net_profit": round(net_profit, 6),
+            "profitable": net_profit > 0,
+        })
+
     min_profit = min(per_trade_profits)
     max_profit = max(per_trade_profits)
     avg_profit = sum(per_trade_profits) / len(per_trade_profits)
 
-    # If the worst adjacent grid cycle is profitable, the full grid is considered robustly profitable.
     is_profitable = min_profit > 0
 
     return {
@@ -53,4 +64,6 @@ def build_static_grid_profit_preview(grid: GridConfig, fee_rate: float) -> dict:
         "profitable_trades": profitable_count,
         "total_trade_paths": len(per_trade_profits),
         "fee_rate": fee_rate,
+        "levels": [round(lv, 6) for lv in levels],
+        "trades": trades,
     }

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from common import BotConfig, BudgetConfig
+from common import BotConfig, BudgetConfig, RunnerState
 
 
 class StartBotPayload(BaseModel):
@@ -11,6 +11,7 @@ class StartBotPayload(BaseModel):
 
     bot_id: str
     config: BotConfig
+    runner_state: RunnerState | None = None
 
 
 class StopBotPayload(BaseModel):

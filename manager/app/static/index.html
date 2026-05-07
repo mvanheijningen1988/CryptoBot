@@ -39,7 +39,10 @@
               <thead>
                 <tr>
                   <th data-i18n="th_name">Name</th>
+                  <th data-i18n="th_market">Market</th>
+                  <th data-i18n="th_mode">Mode</th>
                   <th data-i18n="th_status">Status</th>
+                  <th data-i18n="th_last_price">Price</th>
                   <th data-i18n="th_equity">Equity</th>
                   <th data-i18n="th_pnl">PnL</th>
                   <th data-i18n="th_trades">Trades</th>
@@ -144,13 +147,16 @@
 
           <hr style="border:none;border-top:1px solid #334155;margin:14px 0;">
           <h3 style="margin-top:0" data-i18n="lbl_grid">Grid</h3>
+          <div class="suggest-range-row">
+            <label class="suggest-range-days"><span data-i18n="lbl_lookback_days">Lookback</span> <input id="lookback_days" type="number" min="1" max="90" value="7" /> <span data-i18n="lbl_days">days</span></label>
+            <button id="btn_suggest_range" class="secondary" data-i18n="btn_suggest_range">Suggest range</button>
+          </div>
           <label><span data-i18n="lbl_lower">Lower</span> <span class="info-tip" data-tip-key="tip_lower">&#9432;</span> <input id="lower_price" type="number" value="90" /></label>
           <label><span data-i18n="lbl_upper">Upper</span> <span class="info-tip" data-tip-key="tip_upper">&#9432;</span> <input id="upper_price" type="number" value="110" /></label>
           <label><span data-i18n="lbl_levels">Levels</span> <span class="info-tip" data-tip-key="tip_levels">&#9432;</span> <input id="levels" type="number" value="10" /></label>
           <label><span data-i18n="lbl_order_size">Order size (quote)</span> <span class="info-tip" data-tip-key="tip_order_size">&#9432;</span> <input id="order_size_quote" type="number" value="25" /></label>
           <label><span data-i18n="lbl_fee_rate">Fee rate (%)</span> <span class="info-tip" data-tip-key="tip_fee_rate">&#9432;</span> <input id="fee_rate_percent" type="number" step="0.01" value="0.25" /></label>
-          <button id="check_grid_profit" class="secondary" data-i18n="btn_check_profit">Check grid profitability</button>
-          <div id="grid_profit_result" class="profit-preview" data-i18n="no_calculation">No calculation yet.</div>
+          <div id="grid_profit_summary" class="profit-preview" data-i18n="no_calculation">No calculation yet.</div>
 
           <hr style="border:none;border-top:1px solid #334155;margin:14px 0;">
           <h3 style="margin-top:0" data-i18n="lbl_budget">Budget</h3>
@@ -169,6 +175,39 @@
           <div class="bot-actions">
             <button id="create" data-i18n="btn_create_bot">Create bot</button>
             <button id="cancel_create_bot" class="secondary" data-i18n="btn_cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- Grid preview modal -->
+    <dialog id="grid_preview_modal" class="modal-backdrop">
+      <div class="modal" style="width:min(620px,95vw);grid-template-rows:auto 1fr auto;">
+        <div class="modal-header">
+          <h3 class="modal-title" data-i18n="grid_preview_title">Grid Preview</h3>
+        </div>
+        <div class="modal-body">
+          <div id="grid_preview_summary" class="profit-preview"></div>
+          <h4 style="margin:14px 0 8px" data-i18n="grid_scheduled_trades">Scheduled Trades</h4>
+          <div class="grid-trades-wrap">
+            <table class="grid-trades-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th data-i18n="th_buy_price">Buy</th>
+                  <th data-i18n="th_sell_price">Sell</th>
+                  <th data-i18n="th_order_size">Size</th>
+                  <th data-i18n="th_net_profit">Net Profit</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="grid_trades_body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <div class="bot-actions">
+            <button id="close_grid_preview" data-i18n="btn_close">Close</button>
           </div>
         </div>
       </div>
@@ -207,6 +246,52 @@
           <div class="bot-actions">
             <button id="modal_refresh_agent_logs" class="secondary" data-i18n="btn_refresh">Refresh now</button>
             <button id="modal_close_agent_logs" data-i18n="btn_close">Close</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- Trade chart modal -->
+    <dialog id="trade_chart_modal" class="modal-backdrop">
+      <div class="modal" style="width:min(900px,95vw);grid-template-rows:auto 1fr auto;">
+        <div class="modal-header">
+          <h3 class="modal-title" id="trade_chart_title" data-i18n="chart_modal_title">Trade Levels</h3>
+        </div>
+        <div class="modal-body" style="position:relative;padding:10px 14px;">
+          <canvas id="trade_chart_canvas" width="860" height="400" style="width:100%;height:400px;"></canvas>
+          <div id="trade_chart_tooltip" class="chart-tooltip" style="display:none;"></div>
+        </div>
+        <div class="modal-footer">
+          <div class="bot-actions">
+            <button id="close_trade_chart" data-i18n="btn_close">Close</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- Open orders modal -->
+    <dialog id="orders_modal" class="modal-backdrop">
+      <div class="modal" style="width:min(500px,90vw);grid-template-rows:auto 1fr auto;">
+        <div class="modal-header">
+          <h3 class="modal-title" id="orders_title" data-i18n="orders_modal_title">Open Orders</h3>
+        </div>
+        <div class="modal-body" style="padding:10px 14px;">
+          <table class="orders-table" style="width:100%;border-collapse:collapse;">
+            <thead>
+              <tr>
+                <th data-i18n="th_level">Level</th>
+                <th data-i18n="th_price">Price</th>
+                <th data-i18n="th_side">Side</th>
+                <th data-i18n="th_amount">Amount</th>
+                <th data-i18n="th_filled">Filled</th>
+              </tr>
+            </thead>
+            <tbody id="orders_body"></tbody>
+          </table>
+        </div>
+        <div class="modal-footer">
+          <div class="bot-actions">
+            <button id="close_orders_modal" data-i18n="btn_close">Close</button>
           </div>
         </div>
       </div>
