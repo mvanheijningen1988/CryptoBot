@@ -67,6 +67,12 @@ class BitvavoExchange(Exchange):
         self.pending_responses: dict[int, dict[str, Any]] = {}
         self.price_update_event = threading.Event()
 
+        # Limit order tracking
+        self._limit_orders: dict[str, dict[str, Any]] = {}  # order_id → order info
+        self._exchange_order_map: dict[str, str] = {}  # exchange_order_id → our order_id
+        self._fills: list[dict[str, Any]] = []
+        self._fills_lock = threading.Lock()
+
     def _next_request_id(self) -> int:
         """Thread-safe auto-incrementing request ID."""
         with self.lock:
@@ -185,6 +191,17 @@ class BitvavoExchange(Exchange):
                 self.price_update_event.set()
             return
 
+        # Order fill events from the account channel
+        if message.get("event") == "fill":
+            self._handle_fill_event(message)
+            return
+
+        if message.get("event") == "order":
+            status = message.get("status", "")
+            if status in ("filled", "partiallyFilled"):
+                self._handle_fill_event(message)
+            return
+
         if message.get("market") == self.market:
             price = self._extract_price(message)
             if price is not None:
@@ -226,10 +243,8 @@ class BitvavoExchange(Exchange):
             {
                 "action": "subscribe",
                 "channels": [
-                    {
-                        "name": "ticker",
-                        "markets": [self.market],
-                    }
+                    {"name": "ticker", "markets": [self.market]},
+                    {"name": "account", "markets": [self.market]},
                 ],
             }
         )
@@ -344,3 +359,104 @@ class BitvavoExchange(Exchange):
 
         self._refresh_balances()
         return True
+
+    # ── Limit orders ──────────────────────────────────────────
+
+    def _handle_fill_event(self, message: dict[str, Any]) -> None:
+        """Process an order fill event from the WS account channel."""
+        exchange_oid = message.get("orderId", "")
+        our_oid = self._exchange_order_map.get(exchange_oid)
+        if not our_oid or our_oid not in self._limit_orders:
+            return
+
+        order_info = self._limit_orders[our_oid]
+        fill_price = order_info["limit_price"]
+        try:
+            fill_price = float(message.get("price", fill_price))
+        except (TypeError, ValueError):
+            pass
+
+        with self._fills_lock:
+            self._fills.append({
+                "order_id": our_oid,
+                "side": order_info["side"],
+                "quote_amount": order_info["quote_amount"],
+                "fill_price": fill_price,
+                "level_index": order_info.get("level_index"),
+            })
+
+        del self._limit_orders[our_oid]
+        del self._exchange_order_map[exchange_oid]
+
+    def place_limit_order(
+        self,
+        order_id: str,
+        side: str,
+        quote_amount: float,
+        limit_price: float,
+        level_index: int | None = None,
+    ) -> bool:
+        """Place a limit order on Bitvavo at the given price.
+
+        :return: True if the order was accepted by the exchange.
+        """
+        if not self.authenticated:
+            raise RuntimeError("Bitvavo websocket is not authenticated")
+
+        body: dict[str, Any] = {
+            "market": self.market,
+            "orderType": "limit",
+            "side": side,
+            "price": f"{limit_price:.8f}",
+        }
+
+        if side == "buy":
+            amount_base = quote_amount / limit_price
+            body["amount"] = f"{amount_base:.8f}"
+        else:
+            amount_base = quote_amount / limit_price
+            body["amount"] = f"{amount_base:.8f}"
+
+        response = self._call_action("privateCreateOrder", body)
+        if response.get("errorCode") is not None:
+            return False
+
+        exchange_oid = response.get("orderId", "")
+        if not exchange_oid:
+            resp = response.get("response", {})
+            if isinstance(resp, dict):
+                exchange_oid = resp.get("orderId", "")
+
+        self._limit_orders[order_id] = {
+            "side": side,
+            "quote_amount": quote_amount,
+            "limit_price": limit_price,
+            "level_index": level_index,
+            "exchange_order_id": exchange_oid,
+        }
+        if exchange_oid:
+            self._exchange_order_map[exchange_oid] = order_id
+        return True
+
+    def get_filled_orders(self) -> list[dict[str, Any]]:
+        """Return and clear accumulated fill events."""
+        with self._fills_lock:
+            fills = list(self._fills)
+            self._fills.clear()
+        self._refresh_balances()
+        return fills
+
+    def cancel_all_orders(self) -> None:
+        """Cancel all pending limit orders on Bitvavo."""
+        for order_id, info in list(self._limit_orders.items()):
+            exchange_oid = info.get("exchange_order_id", "")
+            if exchange_oid:
+                try:
+                    self._call_action("privateCancelOrder", {
+                        "market": self.market,
+                        "orderId": exchange_oid,
+                    })
+                except Exception:
+                    pass
+                self._exchange_order_map.pop(exchange_oid, None)
+        self._limit_orders.clear()

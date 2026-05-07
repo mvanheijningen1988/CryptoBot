@@ -344,24 +344,40 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
     )
 
     # ── Detect new trades and emit trade events ──
-    prev_metrics = json.loads(bot.latest_metrics_json or "{}")
-    prev_trade_count = prev_metrics.get("trade_count", 0)
-    if snapshot.trade_count > prev_trade_count:
-        # A new trade happened since last snapshot
-        new_trades = snapshot.trade_count - prev_trade_count
-        prev_equity = prev_metrics.get("total_equity_quote", snapshot.total_equity_quote)
-        trade_pnl = (snapshot.total_equity_quote - prev_equity) / max(new_trades, 1)
-        for i in range(new_trades):
+    if payload.trade_events:
+        # Use detailed events from the agent
+        for ev in payload.trade_events:
             add_trade_event(
                 bot_id=bot_id,
                 bot_name=bot.name,
-                side="trade",
-                quote_amount=0,
-                price=snapshot.price,
-                trade_pnl=trade_pnl,
-                total_equity=snapshot.total_equity_quote,
-                trade_number=prev_trade_count + i + 1,
+                side=ev.get("side", "trade"),
+                quote_amount=ev.get("quote_amount", 0),
+                price=ev.get("price", snapshot.price),
+                trade_pnl=ev.get("trade_pnl", 0),
+                total_equity=ev.get("total_equity", snapshot.total_equity_quote),
+                trade_number=ev.get("trade_number", snapshot.trade_count),
+                event_type=ev.get("event_type", "trade"),
+                level_index=ev.get("level_index"),
             )
+    else:
+        # Fallback: infer from trade_count change
+        prev_metrics = json.loads(bot.latest_metrics_json or "{}")
+        prev_trade_count = prev_metrics.get("trade_count", 0)
+        if snapshot.trade_count > prev_trade_count:
+            new_trades = snapshot.trade_count - prev_trade_count
+            prev_equity = prev_metrics.get("total_equity_quote", snapshot.total_equity_quote)
+            trade_pnl = (snapshot.total_equity_quote - prev_equity) / max(new_trades, 1)
+            for i in range(new_trades):
+                add_trade_event(
+                    bot_id=bot_id,
+                    bot_name=bot.name,
+                    side="trade",
+                    quote_amount=0,
+                    price=snapshot.price,
+                    trade_pnl=trade_pnl,
+                    total_equity=snapshot.total_equity_quote,
+                    trade_number=prev_trade_count + i + 1,
+                )
 
     bot.latest_metrics_json = snapshot.model_dump_json()
     if payload.runner_state:

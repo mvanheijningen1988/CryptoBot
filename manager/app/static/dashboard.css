@@ -159,17 +159,59 @@ table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-size: 0.9rem; }
 .pnl-positive { color: var(--good); }
 .pnl-negative { color: var(--bad); }
+.status-badge { padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; }
+.status-running { background: rgba(16,185,129,0.15); color: #10b981; }
+.status-queued  { background: rgba(251,191,36,0.15); color: #fbbf24; }
+.status-stopped { background: rgba(100,116,139,0.15); color: #94a3b8; }
 .bot-actions { display: flex; gap: 8px; align-items: center; }
-.bot-action-select {
+
+/* ── Custom action dropdown ── */
+.action-dropdown {
+  position: relative;
+  display: inline-block;
+}
+.action-toggle {
   width: auto;
-  padding: 4px 8px;
+  padding: 5px 14px;
   font-size: 0.8rem;
   border-radius: 6px;
-  background: var(--panel-soft);
+  background: linear-gradient(135deg, #0891b2, #2563eb);
   color: var(--text);
-  border: 1px solid #475569;
+  border: none;
   cursor: pointer;
+  font-weight: 600;
+  white-space: nowrap;
 }
+.action-toggle:hover { filter: brightness(1.15); }
+.action-menu {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 140px;
+  background: var(--panel);
+  border: 1px solid #475569;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  z-index: 100;
+  overflow: hidden;
+}
+.action-menu.open { display: flex; flex-direction: column; }
+.action-menu button {
+  width: 100%;
+  padding: 8px 14px;
+  font-size: 0.82rem;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+  font-weight: 500;
+}
+.action-menu button:hover { background: var(--panel-soft); }
+.action-menu button.danger { color: var(--bad); }
+.action-menu button.danger:hover { background: rgba(239,68,68,.15); }
 
 /* ── Trade chart tooltip ── */
 .chart-tooltip {
@@ -302,6 +344,7 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 }
 .event-item { border-bottom: 1px solid #334155; padding: 8px 4px; font-size: 0.9rem; }
 .event-item:last-child { border-bottom: none; }
+.event-placement { opacity: 0.75; font-size: 0.85rem; }
 .event-time { color: #94a3b8; font-size: 0.8rem; }
 .trade-buy { border-left: 3px solid #10b981; padding-left: 8px; }
 .trade-sell { border-left: 3px solid #ef4444; padding-left: 8px; }

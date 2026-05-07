@@ -649,3 +649,101 @@ class TestExchangeABC:
     def test_simulated_is_exchange(self):
         ex = SimulatedExchange(_budget())
         assert isinstance(ex, Exchange)
+
+
+# ===================================================================
+# SimulatedExchange – Limit orders
+# ===================================================================
+
+class TestSimulatedLimitOrders:
+
+    def test_place_limit_buy(self):
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
+        ok = ex.place_limit_order("o1", "buy", 50.0, 95.0, level_index=3)
+        assert ok is True
+        assert "o1" in ex._pending_orders
+
+    def test_buy_not_filled_above_limit(self):
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
+        ex.place_limit_order("o1", "buy", 50.0, 95.0, level_index=3)
+        fills = ex.get_filled_orders()
+        assert fills == []
+        assert ex.quote_balance == pytest.approx(1000.0)
+
+    def test_buy_filled_at_limit(self):
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
+        ex.place_limit_order("o1", "buy", 50.0, 95.0, level_index=3)
+        ex.price = 95.0
+        fills = ex.get_filled_orders()
+        assert len(fills) == 1
+        assert fills[0]["order_id"] == "o1"
+        assert fills[0]["side"] == "buy"
+        assert fills[0]["fill_price"] == pytest.approx(95.0)
+        assert fills[0]["level_index"] == 3
+        assert ex.quote_balance == pytest.approx(950.0)
+        assert ex.base_balance == pytest.approx(50.0 / 95.0)
+
+    def test_buy_filled_below_limit(self):
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
+        ex.place_limit_order("o1", "buy", 50.0, 95.0, level_index=3)
+        ex.price = 90.0  # below limit
+        fills = ex.get_filled_orders()
+        assert len(fills) == 1
+        # Executes at limit price, not market price
+        assert fills[0]["fill_price"] == pytest.approx(95.0)
+        assert ex.quote_balance == pytest.approx(950.0)
+
+    def test_sell_not_filled_below_limit(self):
+        ex = SimulatedExchange(_budget(0.0, 1.0), start_price=100.0, fee_rate=0)
+        ex.place_limit_order("o1", "sell", 50.0, 105.0, level_index=5)
+        fills = ex.get_filled_orders()
+        assert fills == []
+
+    def test_sell_filled_at_limit(self):
+        ex = SimulatedExchange(_budget(0.0, 1.0), start_price=100.0, fee_rate=0)
+        ex.place_limit_order("o1", "sell", 50.0, 105.0, level_index=5)
+        ex.price = 105.0
+        fills = ex.get_filled_orders()
+        assert len(fills) == 1
+        assert fills[0]["side"] == "sell"
+        assert fills[0]["fill_price"] == pytest.approx(105.0)
+
+    def test_limit_order_with_fee(self):
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0.01)
+        ex.place_limit_order("o1", "buy", 100.0, 50.0, level_index=0)
+        ex.price = 50.0
+        fills = ex.get_filled_orders()
+        assert len(fills) == 1
+        # 100 / 50 = 2.0 base, minus 1% fee = 1.98
+        assert ex.base_balance == pytest.approx(1.98)
+        assert ex.quote_balance == pytest.approx(900.0)
+
+    def test_multiple_orders_partial_fill(self):
+        """Only orders whose price condition is met should fill."""
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
+        ex.place_limit_order("buy_90", "buy", 50.0, 90.0, level_index=0)
+        ex.place_limit_order("buy_95", "buy", 50.0, 95.0, level_index=1)
+        ex.price = 93.0  # only buy_95 should fill (93 <= 95), buy_90 should not (93 > 90)
+        fills = ex.get_filled_orders()
+        assert len(fills) == 1
+        assert fills[0]["order_id"] == "buy_95"
+        # buy_90 still pending
+        assert "buy_90" in ex._pending_orders
+
+    def test_filled_orders_cleared_after_get(self):
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=50.0, fee_rate=0)
+        ex.place_limit_order("o1", "buy", 50.0, 50.0, level_index=0)
+        fills = ex.get_filled_orders()
+        assert len(fills) == 1
+        fills2 = ex.get_filled_orders()
+        assert fills2 == []
+
+    def test_cancel_all_orders(self):
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
+        ex.place_limit_order("o1", "buy", 50.0, 95.0, level_index=0)
+        ex.place_limit_order("o2", "buy", 50.0, 90.0, level_index=1)
+        ex.cancel_all_orders()
+        assert len(ex._pending_orders) == 0
+        ex.price = 80.0
+        fills = ex.get_filled_orders()
+        assert fills == []

@@ -584,22 +584,49 @@ async function loadBots() {
     // Viewers see no action dropdown
     const acts = isViewer
       ? "<td>-</td>"
-      : `<td><select class="bot-action-select" data-bot-id="${bot.id}"><option value="">${t("btn_actions")}</option><option value="start">${t("btn_start")}</option><option value="stop">${t("btn_stop")}</option><option value="chart">${t("btn_chart")}</option><option value="orders">${t("btn_orders")}</option><option value="delete">${t("btn_delete")}</option></select></td>`;
+      : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
 
     const modeLabel = bot.mode === "live" ? "🟢 Live" : "🔵 Sim";
     const priceStr = lastPrice > 0 ? formatNumber(lastPrice, 6) : "-";
-    tr.innerHTML = `<td>${bot.name}</td><td>${market}</td><td>${modeLabel}</td><td>${bot.status}</td><td>${priceStr}</td><td>${Number(m.total_equity_quote || 0).toFixed(2)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${pnl.toFixed(2)}</td><td>${trades}</td>${acts}`;
+    let statusHtml;
+    if (bot.status === "running") {
+      statusHtml = `<span class="status-badge status-running">${t("lbl_running")}</span>`;
+    } else if (bot.status === "queued") {
+      statusHtml = `<span class="status-badge status-queued">${t("lbl_queued")}</span>`;
+    } else if (bot.status === "stopped") {
+      statusHtml = `<span class="status-badge status-stopped">${t("lbl_stopped")}</span>`;
+    } else {
+      statusHtml = bot.status;
+    }
+    const agentLabel = bot.assigned_agent_id ? bot.assigned_agent_id.slice(0, 8) : "-";
+    tr.innerHTML = `<td>${bot.name}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${bot.assigned_agent_id || ''}">${agentLabel}</td><td>${priceStr}</td><td>${Number(m.total_equity_quote || 0).toFixed(2)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${pnl.toFixed(2)}</td><td>${trades}</td>${acts}`;
     body.appendChild(tr);
   }
 
-  // Wire up action dropdowns (only present for non-viewers)
+  // Wire up custom action dropdowns (only present for non-viewers)
   if (!isViewer) {
-    body.querySelectorAll("select.bot-action-select").forEach((sel) => {
-      sel.onchange = async () => {
-        const action = sel.value;
-        const botId = sel.dataset.botId;
+    // Toggle menu open/close
+    body.querySelectorAll(".action-toggle").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const menu = btn.nextElementSibling;
+        // Close all other open menus first
+        document.querySelectorAll(".action-menu.open").forEach((m) => {
+          if (m !== menu) m.classList.remove("open");
+        });
+        menu.classList.toggle("open");
+      };
+    });
+    // Handle action clicks
+    body.querySelectorAll(".action-menu button").forEach((btn) => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        const action = btn.dataset.action;
+        const dropdown = btn.closest(".action-dropdown");
+        const botId = dropdown.dataset.botId;
         const bot = bots.find((x) => x.id === botId);
-        sel.value = ""; // reset dropdown
+        // Close the menu
+        btn.closest(".action-menu").classList.remove("open");
         if (!action || !bot) return;
 
         try {
@@ -622,6 +649,10 @@ async function loadBots() {
         }
         await loadBots();
       };
+    });
+    // Close menus on outside click
+    document.addEventListener("click", () => {
+      document.querySelectorAll(".action-menu.open").forEach((m) => m.classList.remove("open"));
     });
   }
 }
@@ -878,25 +909,47 @@ async function loadTradeEvents() {
   list.innerHTML = "";
 
   for (const ev of events) {
-    // Toast for new trades
+    const evType = ev.event_type || "trade";
+    const isPlacement = evType === "order_placed";
+    const isFill = evType === "order_filled";
+
+    // Toast for new events
     if (!seenTradeIds.has(ev.id)) {
       seenTradeIds.add(ev.id);
-      const pnlStr = ev.trade_pnl >= 0 ? `+${ev.trade_pnl.toFixed(4)}` : ev.trade_pnl.toFixed(4);
-      showToast(
-        `${t("toast_trade")} #${ev.trade_number}`,
-        `${ev.bot_name} @ ${ev.price.toFixed(2)} | PnL: ${pnlStr}`,
-        ev.trade_pnl >= 0 ? "info" : "warn",
-        4000,
-      );
+      if (isPlacement) {
+        showToast(
+          t("toast_order_placed"),
+          `${ev.bot_name} ${ev.side.toUpperCase()} ${ev.quote_amount.toFixed(2)} @ ${ev.price.toFixed(2)}`,
+          "info",
+          3000,
+        );
+      } else {
+        const pnlStr = ev.trade_pnl >= 0 ? `+${ev.trade_pnl.toFixed(4)}` : ev.trade_pnl.toFixed(4);
+        showToast(
+          isFill ? t("toast_order_filled") : `${t("toast_trade")} #${ev.trade_number}`,
+          `${ev.bot_name} ${ev.side.toUpperCase()} @ ${ev.price.toFixed(2)} | PnL: ${pnlStr}`,
+          ev.trade_pnl >= 0 ? "info" : "warn",
+          4000,
+        );
+      }
     }
 
     const item = document.createElement("div");
     const sideClass = ev.side === "buy" ? "trade-buy" : ev.side === "sell" ? "trade-sell" : "";
-    const pnlClass = ev.trade_pnl >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
-    const pnlStr = ev.trade_pnl >= 0 ? `+${ev.trade_pnl.toFixed(4)}` : ev.trade_pnl.toFixed(4);
     const timeLabel = new Date(ev.timestamp).toLocaleString();
-    item.className = `event-item ${sideClass}`;
-    item.innerHTML = `<div><strong>#${ev.trade_number}</strong> ${ev.bot_name} @ ${ev.price.toFixed(2)} &mdash; <span class="${pnlClass}">${pnlStr}</span> | ${t("lbl_equity")}: ${ev.total_equity.toFixed(2)}</div><div class="event-time">${timeLabel}</div>`;
+
+    if (isPlacement) {
+      const levelStr = ev.level_index != null ? ` L${ev.level_index}` : "";
+      item.className = `event-item ${sideClass} event-placement`;
+      item.innerHTML = `<div><strong>📋 ${ev.side.toUpperCase()}</strong>${levelStr} ${ev.bot_name} — ${ev.quote_amount.toFixed(2)} @ ${ev.price.toFixed(2)}</div><div class="event-time">${timeLabel}</div>`;
+    } else {
+      const pnlClass = ev.trade_pnl >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
+      const pnlStr = ev.trade_pnl >= 0 ? `+${ev.trade_pnl.toFixed(4)}` : ev.trade_pnl.toFixed(4);
+      const icon = isFill ? "✅" : "🔄";
+      const label = isFill ? t("toast_order_filled") : `#${ev.trade_number}`;
+      item.className = `event-item ${sideClass}`;
+      item.innerHTML = `<div><strong>${icon} ${label}</strong> ${ev.bot_name} ${ev.side.toUpperCase()} @ ${ev.price.toFixed(2)} &mdash; <span class="${pnlClass}">${pnlStr}</span> | ${t("lbl_equity")}: ${ev.total_equity.toFixed(2)}</div><div class="event-time">${timeLabel}</div>`;
+    }
     list.appendChild(item);
   }
 }

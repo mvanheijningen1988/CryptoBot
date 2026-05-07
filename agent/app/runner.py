@@ -123,6 +123,7 @@ class BotRunner:
         self.realized_pnl = 0.0
         self.skimmed_quote = 0.0
         self.trade_count = 0
+        self._pending_trade_events: list[dict] = []
 
     def _build_exchange(self, config: BotConfig) -> Exchange:
         """
@@ -197,6 +198,27 @@ class BotRunner:
 
             label = "resumed" if restored else "started"
             self.log_store.add("bot_start", f"Bot {self.bot_id} {label}.", bot_id=self.bot_id, category="system")
+            if restored:
+                self.log_store.add(
+                    "bot_resumed",
+                    f"Bot {self.bot_id} continuing from saved state: "
+                    f"level={self.state.level_index}, open_orders={len(self.state.open_orders)}, "
+                    f"trades={self.trade_count}, equity={self.initial_equity:.2f}",
+                    bot_id=self.bot_id,
+                    data={
+                        "level_index": self.state.level_index,
+                        "open_orders": len(self.state.open_orders),
+                        "filled_buys": len(self.state.filled_buys),
+                        "trade_count": self.trade_count,
+                        "initial_equity": round(self.initial_equity, 4),
+                        "price": self.price,
+                    },
+                    category="system",
+                )
+
+            # Place limit orders for all open orders on the exchange
+            self._place_all_limit_orders("initial")
+
             self._loop()
         except Exception:
             self.running = False
@@ -208,6 +230,7 @@ class BotRunner:
         Stop the trading loop and close the exchange connection.
         """
         self.running = False
+        self.exchange.cancel_all_orders()
         self.exchange.stop()
         self.log_store.add("bot_stop", f"Bot {self.bot_id} stopped.", bot_id=self.bot_id, category="system")
 
@@ -290,32 +313,60 @@ class BotRunner:
         """
         try:
             runner_state = self.get_runner_state()
+            events = self._pending_trade_events
+            self._pending_trade_events = []
             requests.post(
                 f"{self.manager_url}/api/v1/agents/{self.agent_id}/bots/{self.bot_id}/metrics",
                 json={
                     "snapshot": snapshot.model_dump(mode="json"),
                     "runner_state": runner_state.model_dump(mode="json"),
+                    "trade_events": events,
                 },
                 timeout=4,
             )
         except requests.RequestException:
             return
 
-    def _undo_fill(self, signal: "TradeSignal") -> None:
-        """Reverse detection of a fill (re-place the order).
-
-        Called when the exchange rejects a signal so the order goes
-        back into open_orders for the next tick.
-        """
-        idx = signal.level_index
-        if idx is None:
+    def _place_limit_order(self, level_idx: int, context: str = "") -> None:
+        """Place a single limit order on the exchange for a grid level."""
+        side = self.state.open_orders.get(level_idx)
+        if side is None:
             return
-        self.state.open_orders[idx] = signal.side
+        limit_price = self.strategy.levels[level_idx]
+        order_id = f"lvl_{level_idx}"
+        success = self.exchange.place_limit_order(
+            order_id=order_id,
+            side=side,
+            quote_amount=self.config.grid.order_size_quote,
+            limit_price=limit_price,
+            level_index=level_idx,
+        )
+        if success:
+            self.log_store.add(
+                "order_opened",
+                f"Limit order ({context}): {side.upper()} at level {level_idx} (price {limit_price:.6f})",
+                bot_id=self.bot_id,
+                data={"side": side, "level_index": level_idx, "price": limit_price, "context": context},
+                category="trading",
+            )
+            self._pending_trade_events.append({
+                "event_type": "order_placed",
+                "side": side,
+                "quote_amount": self.config.grid.order_size_quote,
+                "price": limit_price,
+                "level_index": level_idx,
+                "trade_pnl": 0,
+                "total_equity": self.exchange.quote_balance + self.exchange.base_balance * self.price,
+                "trade_number": self.trade_count,
+            })
+
+    def _place_all_limit_orders(self, context: str = "") -> None:
+        """Place limit orders for all current open orders in state."""
+        for idx in sorted(self.state.open_orders.keys()):
+            self._place_limit_order(idx, context)
 
     def _loop(self) -> None:
-        """
-        Main trading loop: fetch price, run strategy, execute signals, push metrics.
-        """
+        """Main trading loop: wait for price updates, check for filled limit orders."""
         while self.running:
             try:
                 wait_timeout = 15.0 if self.config.mode == "live" else 5.0
@@ -330,36 +381,51 @@ class BotRunner:
                 time.sleep(0.5)
                 continue
 
-            signals = self.strategy.on_price(self.price, self.state)
-            for i, signal in enumerate(signals):
-                # Log that an order has been placed (pending execution)
-                self.log_store.add(
-                    "order_placed",
-                    f"Order placed: {signal.side.upper()} {signal.quote_amount:.2f} at level {signal.level_index} (price {self.price:.6f})",
-                    bot_id=self.bot_id,
-                    data={
-                        "side": signal.side,
-                        "quote_amount": signal.quote_amount,
-                        "level_index": signal.level_index,
-                        "price": self.price,
-                    },
-                    category="trading",
-                )
-                before_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
-                try:
-                    success = self.exchange.execute(signal, self.price)
-                except Exception as exc:
-                    success = False
+            # Process fills — loop until no more cascading fills
+            while True:
+                fills = self.exchange.get_filled_orders()
+                if not fills:
+                    break
+
+                for fill in fills:
+                    idx = fill["level_index"]
+                    side = fill["side"]
+                    fill_price = fill["fill_price"]
+
+                    # Remove from strategy state
+                    self.state.open_orders.pop(idx, None)
+
                     self.log_store.add(
-                        "trade_error",
-                        f"Trade failed for bot {self.bot_id}: {exc}",
+                        "order_filled",
+                        f"Filled: {side.upper()} {fill['quote_amount']:.2f} at level {idx} (price {fill_price:.6f})",
                         bot_id=self.bot_id,
-                        category="system",
+                        data={
+                            "side": side,
+                            "quote_amount": fill["quote_amount"],
+                            "level_index": idx,
+                            "fill_price": fill_price,
+                        },
+                        category="trading",
                     )
-                if success:
-                    # Confirm the fill — this places the follow-up
-                    # orders (sell after buy, cascade buy, etc.)
+
+                    signal = TradeSignal(
+                        side=side,
+                        quote_amount=fill["quote_amount"],
+                        level_index=idx,
+                    )
+
+                    before_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+
+                    # Confirm the fill — places follow-up orders in state
+                    orders_before = set(self.state.open_orders.keys())
                     self.strategy.confirm_fill(signal, self.state)
+
+                    # Place limit orders for any new follow-up orders
+                    for new_idx in sorted(self.state.open_orders.keys()):
+                        if new_idx not in orders_before:
+                            self._place_limit_order(new_idx, "follow-up")
+
+                    # Update balances
                     quote_balance, base_balance = self.exchange.get_balances()
                     self.exchange.quote_balance = quote_balance
                     self.exchange.base_balance = base_balance
@@ -367,33 +433,31 @@ class BotRunner:
                     trade_pnl = after_equity - before_equity
                     self.realized_pnl += trade_pnl
                     self.trade_count += 1
+
                     self.log_store.add(
                         "trade_executed",
-                        f"{signal.side.upper()} {signal.quote_amount:.2f} at {self.price:.6f} | pnl: {trade_pnl:+.4f}",
+                        f"{side.upper()} {fill['quote_amount']:.2f} at {fill_price:.6f} | pnl: {trade_pnl:+.4f}",
                         bot_id=self.bot_id,
                         data={
-                            "side": signal.side,
-                            "quote_amount": signal.quote_amount,
-                            "price": self.price,
+                            "side": side,
+                            "quote_amount": fill["quote_amount"],
+                            "price": fill_price,
                             "trade_pnl_quote": round(trade_pnl, 6),
                             "realized_pnl_quote": round(self.realized_pnl, 6),
                             "trade_number": self.trade_count,
                         },
                         category="trading",
                     )
-                else:
-                    self.log_store.add(
-                        "trade_skipped",
-                        f"{signal.side.upper()} skipped for bot {self.bot_id} due to balance/risk constraints.",
-                        bot_id=self.bot_id,
-                        data={"side": signal.side, "quote_amount": signal.quote_amount, "price": self.price},
-                        category="trading",
-                    )
-                    # Restore the unfilled order and any remaining
-                    # signals back into open_orders.
-                    for s in signals[i:]:
-                        self._undo_fill(s)
-                    break
+                    self._pending_trade_events.append({
+                        "event_type": "order_filled",
+                        "side": side,
+                        "quote_amount": fill["quote_amount"],
+                        "price": fill_price,
+                        "level_index": idx,
+                        "trade_pnl": round(trade_pnl, 6),
+                        "total_equity": round(self.exchange.quote_balance + self.exchange.base_balance * self.price, 4),
+                        "trade_number": self.trade_count,
+                    })
 
             quote_balance, base_balance = self.exchange.get_balances()
             self.exchange.quote_balance = quote_balance

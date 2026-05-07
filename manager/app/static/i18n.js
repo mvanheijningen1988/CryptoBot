@@ -23,6 +23,7 @@ const I18N = {
     bots_title: "Bots",
     th_name: "Name",
     th_status: "Status",
+    th_agent: "Agent",
     th_equity: "Equity",
     th_pnl: "PnL",
     th_actions: "Actions",
@@ -40,6 +41,8 @@ const I18N = {
     ntab_agents: "Agents",
     th_trades: "Trades",
     toast_trade: "Trade",
+    toast_order_placed: "Order Placed",
+    toast_order_filled: "Order Filled",
     lbl_equity: "Equity",
     equity_chart_title: "Budget Trend",
     lbl_select_bot: "Select a bot…",
@@ -125,6 +128,7 @@ const I18N = {
     btn_remove: "Remove",
     lbl_running: "running",
     lbl_stopped: "stopped",
+    lbl_queued: "queued",
     confirm_remove_agent: "Are you sure you want to remove this agent?",
 
     // Toast notifications
@@ -191,6 +195,7 @@ const I18N = {
     bots_title: "Bots",
     th_name: "Naam",
     th_status: "Status",
+    th_agent: "Agent",
     th_equity: "Vermogen",
     th_pnl: "W&V",
     th_actions: "Acties",
@@ -217,6 +222,8 @@ const I18N = {
     ntab_agents: "Agents",
     th_trades: "Trades",
     toast_trade: "Trade",
+    toast_order_placed: "Order Geplaatst",
+    toast_order_filled: "Order Gevuld",
     lbl_equity: "Vermogen",
     equity_chart_title: "Budget Trend",
     lbl_select_bot: "Selecteer een bot…",
@@ -302,6 +309,7 @@ const I18N = {
     btn_remove: "Verwijderen",
     lbl_running: "actief",
     lbl_stopped: "gestopt",
+    lbl_queued: "in wachtrij",
     confirm_remove_agent: "Weet je zeker dat je deze agent wilt verwijderen?",
 
     // Toast notifications

@@ -71,6 +71,10 @@ class SimulatedExchange(Exchange):
         self.market: str | None = market
         self.fee_rate: float = fee_rate
 
+        # Limit order tracking
+        self._pending_orders: dict[str, dict] = {}
+        self._fills: list[dict] = []
+
         # WebSocket state (only used when market is set)
         self._ws: _ws.WebSocket | None = None
         self._ws_thread: threading.Thread | None = None
@@ -267,3 +271,76 @@ class SimulatedExchange(Exchange):
             return True
 
         return False
+
+    # ── Limit orders ──────────────────────────────────────────
+
+    def place_limit_order(
+        self,
+        order_id: str,
+        side: str,
+        quote_amount: float,
+        limit_price: float,
+        level_index: int | None = None,
+    ) -> bool:
+        """Place a pending limit order.
+
+        The order is stored and will fill when the market price reaches
+        the limit price (buy ≤ limit, sell ≥ limit).
+        """
+        self._pending_orders[order_id] = {
+            "order_id": order_id,
+            "side": side,
+            "quote_amount": quote_amount,
+            "limit_price": limit_price,
+            "level_index": level_index,
+        }
+        return True
+
+    def get_filled_orders(self) -> list[dict]:
+        """Check pending orders against the current price and return fills.
+
+        Buy orders fill when ``price ≤ limit_price``.
+        Sell orders fill when ``price ≥ limit_price``.
+        Balance changes are applied at the limit price (not market price).
+        """
+        filled: list[dict] = []
+        to_remove: list[str] = []
+        fee_multiplier = 1.0 - self.fee_rate
+
+        for order_id, order in self._pending_orders.items():
+            side = order["side"]
+            limit_price = order["limit_price"]
+            hit = (side == "buy" and self.price <= limit_price) or \
+                  (side == "sell" and self.price >= limit_price)
+            if not hit:
+                continue
+
+            # Execute at the limit price
+            if side == "buy":
+                cost = order["quote_amount"]
+                base_bought = (cost / limit_price) * fee_multiplier
+                self.quote_balance -= cost
+                self.base_balance += base_bought
+            else:
+                base_to_sell = order["quote_amount"] / limit_price
+                quote_received = (base_to_sell * limit_price) * fee_multiplier
+                self.base_balance -= base_to_sell
+                self.quote_balance += quote_received
+
+            filled.append({
+                "order_id": order_id,
+                "side": side,
+                "quote_amount": order["quote_amount"],
+                "fill_price": limit_price,
+                "level_index": order["level_index"],
+            })
+            to_remove.append(order_id)
+
+        for oid in to_remove:
+            del self._pending_orders[oid]
+
+        return filled
+
+    def cancel_all_orders(self) -> None:
+        """Cancel all pending limit orders."""
+        self._pending_orders.clear()

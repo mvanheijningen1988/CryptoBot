@@ -45,30 +45,34 @@ MAX_TRADE_EVENTS = 500
 
 def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
                     price: float, trade_pnl: float, total_equity: float,
-                    trade_number: int) -> None:
-    """
-    Record a trade execution event.
+                    trade_number: int, event_type: str = "trade",
+                    level_index: int | None = None) -> None:
+    """Record a trade-related event (order placed, filled, etc.).
 
-    :param bot_id: Bot that executed the trade.
+    :param bot_id: Bot that triggered the event.
     :param bot_name: Human-readable bot name.
     :param side: ``'buy'`` or ``'sell'``.
-    :param quote_amount: Quote currency amount of the trade.
-    :param price: Execution price.
-    :param trade_pnl: Profit/loss of this individual trade.
-    :param total_equity: Total equity after the trade.
+    :param quote_amount: Quote currency amount.
+    :param price: Execution / limit price.
+    :param trade_pnl: Profit/loss (0 for placements).
+    :param total_equity: Total equity at the time.
     :param trade_number: Sequential trade number for this bot.
+    :param event_type: ``'order_placed'``, ``'order_filled'``, or ``'trade'``.
+    :param level_index: Grid level index (optional).
     """
     event = {
         "id": str(uuid.uuid4()),
         "timestamp": datetime.now(UTC).isoformat(),
         "bot_id": bot_id,
         "bot_name": bot_name,
+        "event_type": event_type,
         "side": side,
         "quote_amount": round(quote_amount, 6),
         "price": round(price, 6),
         "trade_pnl": round(trade_pnl, 6),
         "total_equity": round(total_equity, 4),
         "trade_number": trade_number,
+        "level_index": level_index,
     }
     with TRADE_EVENTS_LOCK:
         TRADE_EVENTS.insert(0, event)

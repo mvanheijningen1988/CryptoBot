@@ -34,3 +34,21 @@ def post_json(url: str, payload: dict, timeout: float = 5.0) -> tuple[bool, str]
     except requests.RequestException as exc:
         logger.error("POST %s failed: %s", url, exc)
         return False, str(exc)
+
+
+def get_json(url: str, timeout: float = 5.0) -> tuple[bool, object]:
+    """
+    GET JSON from a URL.
+
+    :param url: The target URL.
+    :param timeout: Request timeout in seconds.
+    :return: Tuple of (success, parsed_json_or_error_message).
+    """
+    try:
+        response = requests.get(url, timeout=timeout)
+        if response.status_code >= 400:
+            return False, f"{response.status_code}: {response.text}"
+        return True, response.json()
+    except requests.RequestException as exc:
+        logger.error("GET %s failed: %s", url, exc)
+        return False, str(exc)

@@ -81,6 +81,7 @@ class MetricsPushRequest(BaseModel):
 
     snapshot: BotSnapshot
     runner_state: RunnerState | None = None
+    trade_events: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class StaticGridPreviewRequest(BaseModel):
