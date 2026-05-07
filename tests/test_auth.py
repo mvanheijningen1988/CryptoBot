@@ -175,7 +175,7 @@ class TestExtractToken:
 
 class TestEnsureAdminUser:
     def test_creates_admin_when_missing(self, db_session):
-        with patch.dict(os.environ, {"ADMIN_USER": "boss", "ADMIN_PASSWORD": "secret123"}):
+        with patch.dict(os.environ, {"INITIAL_ADMIN_USER": "boss", "INITIAL_ADMIN_PASS": "secret123"}):
             ensure_admin_user(db_session)
         user = db_session.query(User).filter(User.username == "boss").first()
         assert user is not None
@@ -184,16 +184,16 @@ class TestEnsureAdminUser:
         assert verify_password("secret123", user.password_hash)
 
     def test_skips_when_no_password(self, db_session):
-        with patch.dict(os.environ, {"ADMIN_USER": "admin", "ADMIN_PASSWORD": ""}):
+        with patch.dict(os.environ, {"INITIAL_ADMIN_USER": "admin", "INITIAL_ADMIN_PASS": ""}):
             ensure_admin_user(db_session)
         assert db_session.query(User).count() == 0
 
-    def test_resyncs_changed_password(self, db_session):
-        # Create admin with old password
+    def test_skips_when_user_exists(self, db_session):
+        """If the admin user already exists, do not touch their password."""
         user = User(
             id=str(uuid.uuid4()),
             username="admin",
-            password_hash=hash_password("old-password"),
+            password_hash=hash_password("my-own-password"),
             role="admin",
             locale="en",
             must_change_password=False,
@@ -201,29 +201,10 @@ class TestEnsureAdminUser:
         db_session.add(user)
         db_session.commit()
 
-        # Now env has a different password
-        with patch.dict(os.environ, {"ADMIN_USER": "admin", "ADMIN_PASSWORD": "new-password"}):
+        with patch.dict(os.environ, {"INITIAL_ADMIN_USER": "admin", "INITIAL_ADMIN_PASS": "different-pass"}):
             ensure_admin_user(db_session)
 
         db_session.refresh(user)
-        assert verify_password("new-password", user.password_hash)
-        assert user.must_change_password is True
-
-    def test_no_resync_when_password_matches(self, db_session):
-        user = User(
-            id=str(uuid.uuid4()),
-            username="admin",
-            password_hash=hash_password("same-pass"),
-            role="admin",
-            locale="en",
-            must_change_password=False,
-        )
-        db_session.add(user)
-        db_session.commit()
-
-        with patch.dict(os.environ, {"ADMIN_USER": "admin", "ADMIN_PASSWORD": "same-pass"}):
-            ensure_admin_user(db_session)
-
-        db_session.refresh(user)
-        # must_change_password should stay False – no resync needed
+        # Password must remain unchanged
+        assert verify_password("my-own-password", user.password_hash)
         assert user.must_change_password is False

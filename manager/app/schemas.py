@@ -13,7 +13,6 @@ class AgentRegisterRequest(BaseModel):
     """Payload sent by an agent to register itself with the manager."""
 
     agent_id: str
-    name: str
     base_url: str
     capacity: int = Field(default=5, ge=1)
     version: str = ""

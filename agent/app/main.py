@@ -9,7 +9,7 @@ import threading
 
 from fastapi import FastAPI
 
-from agent.app.config import AGENT_ID, AGENT_NAME, runner_manager
+from agent.app.config import AGENT_ID, runner_manager
 from agent.app.heartbeat import heartbeat_loop, register_agent
 from agent.app.routes import router
 from agent.app.version import __version__
@@ -21,7 +21,7 @@ app.include_router(router)
 @app.on_event("startup")
 def startup_event() -> None:
     """Register agent and start the heartbeat loop on application start."""
-    runner_manager.log_system("agent_startup", "Agent process started.", {"agent_id": AGENT_ID, "agent_name": AGENT_NAME})
+    runner_manager.log_system("agent_startup", "Agent process started.", {"agent_id": AGENT_ID})
     register_agent()
     thread = threading.Thread(target=heartbeat_loop, daemon=True)
     thread.start()

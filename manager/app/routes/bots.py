@@ -11,6 +11,12 @@ from fastapi.routing import APIRouter
 from sqlalchemy.orm import Session
 
 from manager.app.database import get_db
+from manager.app.events import (
+    TRADE_EVENTS,
+    TRADE_EVENTS_LOCK,
+    add_equity_point,
+    add_trade_event,
+)
 from manager.app.models import Agent, Bot
 from manager.app.schemas import (
     BotCreateRequest,
@@ -224,6 +230,9 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
     """
     Accept a metrics snapshot from an agent for a specific bot.
 
+    Records the equity data-point for the budget trend chart and
+    generates trade events when the trade count increases.
+
     :param agent_id: Unique identifier of the reporting agent.
     :param bot_id: Unique identifier of the bot.
     :param payload: Metrics data containing a BotSnapshot.
@@ -235,7 +244,56 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
     if not bot:
         raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
 
-    bot.latest_metrics_json = payload.snapshot.model_dump_json()
+    snapshot = payload.snapshot
+
+    # ── Record equity history for budget trend chart ──
+    add_equity_point(
+        bot_id,
+        snapshot.timestamp.isoformat(),
+        snapshot.total_equity_quote,
+    )
+
+    # ── Detect new trades and emit trade events ──
+    prev_metrics = json.loads(bot.latest_metrics_json or "{}")
+    prev_trade_count = prev_metrics.get("trade_count", 0)
+    if snapshot.trade_count > prev_trade_count:
+        # A new trade happened since last snapshot
+        new_trades = snapshot.trade_count - prev_trade_count
+        prev_equity = prev_metrics.get("total_equity_quote", snapshot.total_equity_quote)
+        trade_pnl = (snapshot.total_equity_quote - prev_equity) / max(new_trades, 1)
+        for i in range(new_trades):
+            add_trade_event(
+                bot_id=bot_id,
+                bot_name=bot.name,
+                side="trade",
+                quote_amount=0,
+                price=snapshot.price,
+                trade_pnl=trade_pnl,
+                total_equity=snapshot.total_equity_quote,
+                trade_number=prev_trade_count + i + 1,
+            )
+
+    bot.latest_metrics_json = snapshot.model_dump_json()
     bot.updated_at = datetime.now(UTC)
     db.commit()
     return {"ok": True}
+
+
+@router.get("/trade-events")
+def list_trade_events() -> list[dict]:
+    """Return all trade events (most recent first)."""
+    with TRADE_EVENTS_LOCK:
+        return list(TRADE_EVENTS)
+
+
+@router.get("/bots/{bot_id}/equity-history")
+def get_equity_history(bot_id: str) -> list[dict]:
+    """Return equity data-points for a bot's budget trend chart.
+
+    :param bot_id: The bot to fetch history for.
+    :return: List of ``{t: ISO timestamp, v: equity}`` points.
+    """
+    from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
+
+    with EQUITY_HISTORY_LOCK:
+        return EQUITY_HISTORY.get(bot_id, [])

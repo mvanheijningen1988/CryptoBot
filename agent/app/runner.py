@@ -117,10 +117,11 @@ class BotRunner:
         self.strategy = StaticGridStrategy(config.grid)
         self.state = StrategyState()
 
-        self.price = config.start_price
+        self.price = config.start_price or 0.0
         self.initial_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
         self.realized_pnl = 0.0
         self.skimmed_quote = 0.0
+        self.trade_count = 0
 
     def _build_exchange(self, config: BotConfig) -> Exchange:
         """
@@ -148,7 +149,12 @@ class BotRunner:
                 quote_currency=config.quote_currency,
             )
 
-        return SimulatedExchange(config.budget, start_price=config.start_price)
+        return SimulatedExchange(
+            config.budget,
+            start_price=config.start_price or 100.0,
+            market=config.market,
+            fee_rate=float(os.getenv("SIM_FEE_RATE", "0.0025")),
+        )
 
     def start(self) -> None:
         """
@@ -244,7 +250,7 @@ class BotRunner:
         """
         while self.running:
             try:
-                wait_timeout = 15.0 if self.config.mode == "live" else 1.0
+                wait_timeout = 15.0 if self.config.mode == "live" else 5.0
                 self.price = self.exchange.wait_for_price_update(self.price, timeout_seconds=wait_timeout)
             except Exception as exc:
                 self.log_store.add(
@@ -274,16 +280,20 @@ class BotRunner:
                     self.exchange.quote_balance = quote_balance
                     self.exchange.base_balance = base_balance
                     after_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
-                    self.realized_pnl += after_equity - before_equity
+                    trade_pnl = after_equity - before_equity
+                    self.realized_pnl += trade_pnl
+                    self.trade_count += 1
                     self.log_store.add(
                         "trade_executed",
-                        f"{signal.side.upper()} executed for bot {self.bot_id} at price {self.price:.6f}",
+                        f"{signal.side.upper()} {signal.quote_amount:.2f} at {self.price:.6f} | pnl: {trade_pnl:+.4f}",
                         bot_id=self.bot_id,
                         data={
                             "side": signal.side,
                             "quote_amount": signal.quote_amount,
                             "price": self.price,
-                            "realized_pnl_quote": self.realized_pnl,
+                            "trade_pnl_quote": round(trade_pnl, 6),
+                            "realized_pnl_quote": round(self.realized_pnl, 6),
+                            "trade_number": self.trade_count,
                         },
                         category="trading",
                     )
@@ -315,6 +325,7 @@ class BotRunner:
                 realized_pnl_quote=self.realized_pnl,
                 unrealized_pnl_quote=total_equity - self.initial_equity,
                 skimmed_quote=self.skimmed_quote,
+                trade_count=self.trade_count,
                 status="running",
             )
             self._push_snapshot(snapshot)

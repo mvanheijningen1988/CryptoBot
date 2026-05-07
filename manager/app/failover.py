@@ -70,7 +70,6 @@ def try_failover_for_bot(bot: Bot, failed_agent: Agent, db: Session) -> bool:
     if not ok:
         add_agent_event(
             failed_agent.id,
-            failed_agent.name,
             "failover_failed",
             f"Failover for bot {bot.name} failed: {message}",
         )
@@ -80,9 +79,8 @@ def try_failover_for_bot(bot: Bot, failed_agent: Agent, db: Session) -> bool:
     bot.updated_at = datetime.now(UTC)
     add_agent_event(
         target.id,
-        target.name,
         "failover_success",
-        f"Bot {bot.name} moved from {failed_agent.name} to {target.name}.",
+        f"Bot {bot.name} moved from {failed_agent.id} to {target.id}.",
     )
     return True
 
@@ -105,23 +103,26 @@ def failover_maintenance_loop(session_factory: sessionmaker) -> None:
             approved_agents = db.query(Agent).filter(Agent.approval_status == "approved").all()
 
             for agent in approved_agents:
-                age_seconds = (now - agent.last_heartbeat).total_seconds()
+                if agent.status == "stopped":
+                    continue
+                hb = agent.last_heartbeat
+                if hb and hb.tzinfo is None:
+                    hb = hb.replace(tzinfo=UTC)
+                age_seconds = (now - hb).total_seconds() if hb else HEARTBEAT_TIMEOUT_SECONDS + 1
                 if age_seconds > HEARTBEAT_TIMEOUT_SECONDS:
                     if agent.status != "offline":
                         add_agent_event(
                             agent.id,
-                            agent.name,
                             "offline",
-                            f"Agent {agent.name} marked offline after heartbeat timeout.",
+                            f"Agent {agent.id} marked offline after heartbeat timeout.",
                         )
                     agent.status = "offline"
                 elif agent.status == "offline":
                     agent.status = "online"
                     add_agent_event(
                         agent.id,
-                        agent.name,
                         "recovered",
-                        f"Agent {agent.name} recovered and is online again.",
+                        f"Agent {agent.id} recovered and is online again.",
                     )
 
             db.commit()

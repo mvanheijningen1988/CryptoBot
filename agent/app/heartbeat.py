@@ -5,7 +5,7 @@ import time
 
 import requests
 
-from agent.app.config import AGENT_BASE_URL, AGENT_ID, AGENT_NAME, MANAGER_URL, runner_manager
+from agent.app.config import AGENT_BASE_URL, AGENT_ID, MANAGER_URL, runner_manager
 from agent.app.version import __version__
 
 
@@ -17,7 +17,6 @@ def register_agent() -> bool:
     """
     payload = {
         "agent_id": AGENT_ID,
-        "name": AGENT_NAME,
         "base_url": AGENT_BASE_URL,
         "capacity": 10,
         "version": __version__,
@@ -61,10 +60,11 @@ def heartbeat_loop() -> None:
                 registered = False
             state = "online" if response.status_code < 400 else f"heartbeat_error_{response.status_code}"
             if state != last_state:
+                msg = f"Agent heartbeat state changed from '{last_state or 'unknown'}' to '{state}'."
                 runner_manager.log_system(
                     "heartbeat_state",
-                    "Agent heartbeat state changed.",
-                    {"state": state},
+                    msg,
+                    {"previous_state": last_state, "state": state},
                 )
                 last_state = state
         except requests.RequestException:

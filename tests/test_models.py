@@ -73,7 +73,7 @@ class TestUserModel:
 class TestAgentModel:
     def test_default_status(self, db_session):
         agent = Agent(
-            id="a1", name="Agent1", base_url="http://localhost:8100"
+            id="a1", base_url="http://localhost:8100"
         )
         db_session.add(agent)
         db_session.commit()
@@ -81,7 +81,7 @@ class TestAgentModel:
 
     def test_default_approval_status(self, db_session):
         agent = Agent(
-            id="a2", name="Agent2", base_url="http://localhost:8100"
+            id="a2", base_url="http://localhost:8100"
         )
         db_session.add(agent)
         db_session.commit()
@@ -89,7 +89,7 @@ class TestAgentModel:
 
     def test_default_capacity(self, db_session):
         agent = Agent(
-            id="a3", name="Agent3", base_url="http://localhost:8100"
+            id="a3", base_url="http://localhost:8100"
         )
         db_session.add(agent)
         db_session.commit()
@@ -97,7 +97,7 @@ class TestAgentModel:
 
     def test_last_heartbeat_has_value(self, db_session):
         agent = Agent(
-            id="a4", name="Agent4", base_url="http://localhost:8100"
+            id="a4", base_url="http://localhost:8100"
         )
         db_session.add(agent)
         db_session.commit()

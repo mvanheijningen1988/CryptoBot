@@ -144,27 +144,21 @@ def require_role(*allowed_roles: str) -> Any:
 
 def ensure_admin_user(db: Session) -> None:
     """
-    Create or re-sync the admin user from ADMIN_USER / ADMIN_PASSWORD env vars.
+    Seed the initial admin user from INITIAL_ADMIN_USER / INITIAL_ADMIN_PASS.
 
-    On first run the user is created with must_change_password=True.
-    On subsequent runs the stored hash is verified against the env password;
-    if they no longer match the password is reset and must_change_password
-    is set back to True.
+    Only creates the user if no user with that username exists yet.
+    The user is created with must_change_password=True so they are
+    forced to set their own password on first login.
 
     :param db: Database session to use for querying and persisting the user.
     """
-    admin_user = os.getenv("ADMIN_USER", "admin")
-    admin_pass = os.getenv("ADMIN_PASSWORD", "")
+    admin_user = os.getenv("INITIAL_ADMIN_USER", "admin")
+    admin_pass = os.getenv("INITIAL_ADMIN_PASS", "")
     if not admin_pass:
         return
 
     existing = db.query(User).filter(User.username == admin_user).first()
     if existing:
-        # Re-sync: if the env password changed or the hash is broken, reset it
-        if not verify_password(admin_pass, existing.password_hash):
-            existing.password_hash = hash_password(admin_pass)
-            existing.must_change_password = True
-            db.commit()
         return
 
     user = User(

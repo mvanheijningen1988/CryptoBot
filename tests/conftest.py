@@ -11,8 +11,8 @@ import os
 # Set env vars before any app modules are imported so JWT_SECRET is
 # deterministic and the admin bootstrap uses known credentials.
 os.environ.setdefault("JWT_SECRET", "test-secret-key-do-not-use-in-prod")
-os.environ.setdefault("ADMIN_USER", "admin")
-os.environ.setdefault("ADMIN_PASSWORD", "changeme123")
+os.environ.setdefault("INITIAL_ADMIN_USER", "admin")
+os.environ.setdefault("INITIAL_ADMIN_PASS", "changeme123")
 os.environ.setdefault("DB_URL", "sqlite:///:memory:")
 
 import pytest
@@ -151,7 +151,6 @@ def sample_agent(db_session):
 
     agent = Agent(
         id="agent-test-id",
-        name="Test Agent",
         base_url="http://agent:8100",
         status="online",
         approval_status="approved",
@@ -170,7 +169,6 @@ def pending_agent(db_session):
 
     agent = Agent(
         id="pending-agent-id",
-        name="Pending Agent",
         base_url="http://pending:8100",
         status="pending",
         approval_status="pending",

@@ -17,6 +17,7 @@ def run_migrations(engine: Engine) -> None:
     _ensure_agent_approval_column(engine)
     _ensure_agent_version_column(engine)
     _ensure_users_table(engine)
+    _drop_agent_name_column(engine)
 
 
 def _ensure_agent_approval_column(engine: Engine) -> None:
@@ -70,6 +71,19 @@ def _ensure_users_table(engine: Engine) -> None:
                         must_change_password BOOLEAN DEFAULT 0
                     )"""
                 )
+                conn.commit()
+        except Exception:
+            pass
+
+
+def _drop_agent_name_column(engine: Engine) -> None:
+    """Remove the ``name`` column from agents if it exists."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(agents)").fetchall()
+            columns = {row[1] for row in rows}
+            if "name" in columns:
+                conn.exec_driver_sql("ALTER TABLE agents DROP COLUMN name")
                 conn.commit()
         except Exception:
             pass

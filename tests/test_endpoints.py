@@ -82,7 +82,6 @@ def _seed_agent(client, agent_id="agent-1", approval="approved", status="online"
 
     agent = Agent(
         id=agent_id,
-        name=f"Agent {agent_id}",
         base_url="http://agent:8100",
         status=status,
         approval_status=approval,
@@ -376,7 +375,6 @@ class TestRegisterAgent:
     def test_register_new_agent(self, client):
         r = client.post("/api/v1/agents/register", json={
             "agent_id": "new-agent",
-            "name": "New Agent",
             "base_url": "http://new:8100",
             "capacity": 3,
         })
@@ -386,13 +384,11 @@ class TestRegisterAgent:
     def test_register_existing_agent_updates(self, client):
         client.post("/api/v1/agents/register", json={
             "agent_id": "same-agent",
-            "name": "Original",
             "base_url": "http://original:8100",
             "capacity": 5,
         })
         r = client.post("/api/v1/agents/register", json={
             "agent_id": "same-agent",
-            "name": "Updated",
             "base_url": "http://updated:8100",
             "capacity": 10,
         })

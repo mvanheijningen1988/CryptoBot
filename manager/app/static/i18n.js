@@ -28,7 +28,15 @@ const I18N = {
     th_actions: "Actions",
     btn_start: "Start",
     btn_stop: "Stop",
-    notifications_title: "Agent Notifications",
+    notifications_title: "Notifications",
+    ntab_trades: "Trades",
+    ntab_agents: "Agents",
+    th_trades: "Trades",
+    toast_trade: "Trade",
+    lbl_equity: "Equity",
+    equity_chart_title: "Budget Trend",
+    lbl_select_bot: "Select a bot…",
+    chart_no_data: "No data yet – start a bot to see the trend.",
     backtest_title: "Backtest (quick)",
     btn_run_backtest: "Run backtest on current form",
 
@@ -69,6 +77,7 @@ const I18N = {
     tip_skim_ratio: "The portion of profit set aside (e.g. 0.5 = 50% profit skimmed). Only active in 'skim' profit mode.",
     btn_create_bot: "Create bot",
     btn_cancel: "Cancel",
+    btn_confirm: "Confirm",
 
     // Grid profitability results
     grid_profitable: "Grid appears profitable",
@@ -84,17 +93,28 @@ const I18N = {
 
     // Agents tab
     agents_title: "Agents",
+    th_agent_id: "Agent ID",
+    th_address: "Address",
     th_bots: "Bots",
     th_version: "Version",
     th_approval: "Approval",
+    th_heartbeat: "Last Heartbeat",
+    th_market: "Market",
+    th_trades: "Trades",
+    th_quote_balance: "Quote (not invested)",
+    th_base_balance: "Base (invested)",
     btn_approve: "Approve",
     btn_reject: "Reject",
     btn_unapprove: "Unapprove",
     btn_open_logs: "Open logs",
+    btn_remove: "Remove",
+    lbl_running: "running",
+    lbl_stopped: "stopped",
+    confirm_remove_agent: "Are you sure you want to remove this agent?",
 
-    // Agent popup
-    popup_new_agent: "New agent discovered",
-    btn_close: "Close",
+    // Toast notifications
+    toast_agent_discovered: "New agent discovered",
+    toast_agent_dead: "Agent went offline",
 
     // Agent logs modal
     logs_title: "Agent Logs Stream",
@@ -108,6 +128,7 @@ const I18N = {
     logs_none: "No logs available yet.",
     logs_no_agent: "No agent selected.",
     logs_error: "Could not fetch logs",
+    btn_close: "Close",
 
     // Auth
     login_title: "Login",
@@ -147,7 +168,15 @@ const I18N = {
     th_actions: "Acties",
     btn_start: "Start",
     btn_stop: "Stop",
-    notifications_title: "Agent Notificaties",
+    notifications_title: "Meldingen",
+    ntab_trades: "Trades",
+    ntab_agents: "Agents",
+    th_trades: "Trades",
+    toast_trade: "Trade",
+    lbl_equity: "Vermogen",
+    equity_chart_title: "Budget Trend",
+    lbl_select_bot: "Selecteer een bot…",
+    chart_no_data: "Nog geen data – start een bot om de trend te zien.",
     backtest_title: "Backtest (snel)",
     btn_run_backtest: "Backtest uitvoeren op huidig formulier",
 
@@ -188,6 +217,7 @@ const I18N = {
     tip_skim_ratio: "Het deel van de winst dat apart wordt gezet (bijv. 0.5 = 50% winst afromen). Alleen actief bij profit mode 'skim'.",
     btn_create_bot: "Bot aanmaken",
     btn_cancel: "Annuleren",
+    btn_confirm: "Bevestigen",
 
     // Grid profitability results
     grid_profitable: "Grid lijkt winstgevend",
@@ -203,17 +233,28 @@ const I18N = {
 
     // Agents tab
     agents_title: "Agents",
+    th_agent_id: "Agent ID",
+    th_address: "Adres",
     th_bots: "Bots",
     th_version: "Versie",
     th_approval: "Goedkeuring",
+    th_heartbeat: "Laatste Heartbeat",
+    th_market: "Markt",
+    th_trades: "Trades",
+    th_quote_balance: "Quote (niet belegd)",
+    th_base_balance: "Base (belegd)",
     btn_approve: "Goedkeuren",
     btn_reject: "Afwijzen",
     btn_unapprove: "Intrekken",
     btn_open_logs: "Logs openen",
+    btn_remove: "Verwijderen",
+    lbl_running: "actief",
+    lbl_stopped: "gestopt",
+    confirm_remove_agent: "Weet je zeker dat je deze agent wilt verwijderen?",
 
-    // Agent popup
-    popup_new_agent: "Nieuwe agent ontdekt",
-    btn_close: "Sluiten",
+    // Toast notifications
+    toast_agent_discovered: "Nieuwe agent ontdekt",
+    toast_agent_dead: "Agent offline gegaan",
 
     // Agent logs modal
     logs_title: "Agent Logs Stream",
@@ -227,6 +268,7 @@ const I18N = {
     logs_none: "Nog geen logs beschikbaar.",
     logs_no_agent: "Geen agent geselecteerd.",
     logs_error: "Kon logs niet ophalen",
+    btn_close: "Sluiten",
 
     // Auth
     login_title: "Inloggen",

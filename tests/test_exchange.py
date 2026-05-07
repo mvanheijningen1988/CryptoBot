@@ -38,22 +38,26 @@ def _sell(amount: float = 100.0) -> TradeSignal:
 class TestSimulatedInit:
 
     def test_initial_balances(self):
-        ex = SimulatedExchange(_budget(500.0, 2.0))
+        ex = SimulatedExchange(_budget(500.0, 2.0), fee_rate=0)
         assert ex.quote_balance == pytest.approx(500.0)
         assert ex.base_balance == pytest.approx(2.0)
 
     def test_initial_price(self):
-        ex = SimulatedExchange(_budget(), start_price=42.0)
+        ex = SimulatedExchange(_budget(), start_price=42.0, fee_rate=0)
         assert ex.price == pytest.approx(42.0)
 
     def test_default_start_price(self):
-        ex = SimulatedExchange(_budget())
+        ex = SimulatedExchange(_budget(), fee_rate=0)
         assert ex.price == pytest.approx(100.0)
 
     def test_zero_budgets(self):
-        ex = SimulatedExchange(_budget(0.0, 0.0))
+        ex = SimulatedExchange(_budget(0.0, 0.0), fee_rate=0)
         assert ex.quote_balance == pytest.approx(0.0)
         assert ex.base_balance == pytest.approx(0.0)
+
+    def test_default_fee_rate(self):
+        ex = SimulatedExchange(_budget())
+        assert ex.fee_rate == pytest.approx(0.0025)
 
 
 # ===================================================================
@@ -92,64 +96,69 @@ class TestSimulatedGetPrice:
 class TestSimulatedBuy:
 
     def test_basic_buy(self):
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=50.0)
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=50.0, fee_rate=0)
         result = ex.execute(_buy(100.0), price=50.0)
         assert result is True
         assert ex.quote_balance == pytest.approx(900.0)
         assert ex.base_balance == pytest.approx(2.0)  # 100 / 50
 
     def test_buy_entire_balance(self):
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0)
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
         result = ex.execute(_buy(1000.0), price=100.0)
         assert result is True
         assert ex.quote_balance == pytest.approx(0.0)
         assert ex.base_balance == pytest.approx(10.0)
 
-    def test_buy_insufficient_balance(self):
-        ex = SimulatedExchange(_budget(50.0, 0.0), start_price=100.0)
+    def test_buy_beyond_balance_virtual_budget(self):
+        """Simulation allows buying beyond available balance (virtual budget)."""
+        ex = SimulatedExchange(_budget(50.0, 0.0), start_price=100.0, fee_rate=0)
         result = ex.execute(_buy(100.0), price=100.0)
-        assert result is False
-        # Balances unchanged
-        assert ex.quote_balance == pytest.approx(50.0)
-        assert ex.base_balance == pytest.approx(0.0)
+        assert result is True
+        assert ex.quote_balance == pytest.approx(-50.0)
+        assert ex.base_balance == pytest.approx(1.0)
 
     def test_buy_exact_balance(self):
         """Buy exactly what's available should succeed."""
-        ex = SimulatedExchange(_budget(100.0, 0.0), start_price=50.0)
+        ex = SimulatedExchange(_budget(100.0, 0.0), start_price=50.0, fee_rate=0)
         result = ex.execute(_buy(100.0), price=50.0)
         assert result is True
         assert ex.quote_balance == pytest.approx(0.0)
 
     def test_buy_uses_provided_price(self):
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=999.0)
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=999.0, fee_rate=0)
         ex.execute(_buy(200.0), price=25.0)
         assert ex.base_balance == pytest.approx(8.0)  # 200 / 25
 
     def test_buy_uses_internal_price_when_none(self):
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=50.0)
-        # price=None → uses ex.price (50)
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=50.0, fee_rate=0)
         ex.execute(_buy(100.0), price=None)
-        # Won't be exact because get_price isn't called, but ex.price=50
         assert ex.base_balance == pytest.approx(2.0)
 
     def test_buy_very_small_amount(self):
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0)
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
         result = ex.execute(_buy(0.01), price=100.0)
         assert result is True
         assert ex.base_balance == pytest.approx(0.0001)
 
     def test_buy_at_very_high_price(self):
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=1_000_000.0)
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=1_000_000.0, fee_rate=0)
         result = ex.execute(_buy(1000.0), price=1_000_000.0)
         assert result is True
         assert ex.base_balance == pytest.approx(0.001)
 
     def test_multiple_buys(self):
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0)
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
         ex.execute(_buy(200.0), price=100.0)
         ex.execute(_buy(300.0), price=100.0)
         assert ex.quote_balance == pytest.approx(500.0)
         assert ex.base_balance == pytest.approx(5.0)
+
+    def test_buy_with_fee(self):
+        """Fee reduces the base received."""
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0.01)
+        ex.execute(_buy(100.0), price=100.0)
+        assert ex.quote_balance == pytest.approx(900.0)
+        assert ex.base_balance == pytest.approx(0.99)  # 1.0 * 0.99
 
 
 # ===================================================================
@@ -159,46 +168,52 @@ class TestSimulatedBuy:
 class TestSimulatedSell:
 
     def test_basic_sell(self):
-        ex = SimulatedExchange(_budget(0.0, 10.0), start_price=50.0)
+        ex = SimulatedExchange(_budget(0.0, 10.0), start_price=50.0, fee_rate=0)
         result = ex.execute(_sell(100.0), price=50.0)
         assert result is True
-        # sell 100 quote / 50 price = 2 base sold
         assert ex.base_balance == pytest.approx(8.0)
         assert ex.quote_balance == pytest.approx(100.0)
 
     def test_sell_all_base(self):
-        ex = SimulatedExchange(_budget(0.0, 5.0), start_price=100.0)
-        result = ex.execute(_sell(500.0), price=100.0)  # 500/100 = 5 base
+        ex = SimulatedExchange(_budget(0.0, 5.0), start_price=100.0, fee_rate=0)
+        result = ex.execute(_sell(500.0), price=100.0)
         assert result is True
         assert ex.base_balance == pytest.approx(0.0)
         assert ex.quote_balance == pytest.approx(500.0)
 
-    def test_sell_insufficient_base(self):
-        ex = SimulatedExchange(_budget(0.0, 1.0), start_price=100.0)
-        result = ex.execute(_sell(200.0), price=100.0)  # needs 2 base, only have 1
-        assert result is False
-        assert ex.base_balance == pytest.approx(1.0)
-        assert ex.quote_balance == pytest.approx(0.0)
+    def test_sell_beyond_base_virtual_budget(self):
+        """Simulation allows selling beyond available base (virtual budget)."""
+        ex = SimulatedExchange(_budget(0.0, 1.0), start_price=100.0, fee_rate=0)
+        result = ex.execute(_sell(200.0), price=100.0)  # needs 2 base, have 1
+        assert result is True
+        assert ex.base_balance == pytest.approx(-1.0)
+        assert ex.quote_balance == pytest.approx(200.0)
 
     def test_sell_uses_provided_price(self):
-        ex = SimulatedExchange(_budget(0.0, 10.0), start_price=999.0)
+        ex = SimulatedExchange(_budget(0.0, 10.0), start_price=999.0, fee_rate=0)
         ex.execute(_sell(50.0), price=25.0)
-        # sells 50/25 = 2 base
         assert ex.base_balance == pytest.approx(8.0)
         assert ex.quote_balance == pytest.approx(50.0)
 
     def test_sell_very_small_amount(self):
-        ex = SimulatedExchange(_budget(0.0, 10.0), start_price=100.0)
+        ex = SimulatedExchange(_budget(0.0, 10.0), start_price=100.0, fee_rate=0)
         result = ex.execute(_sell(0.01), price=100.0)
         assert result is True
         assert ex.base_balance == pytest.approx(10.0 - 0.0001)
 
     def test_multiple_sells(self):
-        ex = SimulatedExchange(_budget(0.0, 10.0), start_price=100.0)
+        ex = SimulatedExchange(_budget(0.0, 10.0), start_price=100.0, fee_rate=0)
         ex.execute(_sell(200.0), price=100.0)
         ex.execute(_sell(300.0), price=100.0)
         assert ex.base_balance == pytest.approx(5.0)
         assert ex.quote_balance == pytest.approx(500.0)
+
+    def test_sell_with_fee(self):
+        """Fee reduces the quote received."""
+        ex = SimulatedExchange(_budget(0.0, 10.0), start_price=100.0, fee_rate=0.01)
+        ex.execute(_sell(100.0), price=100.0)
+        assert ex.base_balance == pytest.approx(9.0)
+        assert ex.quote_balance == pytest.approx(99.0)  # 100 * 0.99
 
 
 # ===================================================================
@@ -208,8 +223,8 @@ class TestSimulatedSell:
 class TestSimulatedRoundTrip:
 
     def test_buy_and_sell_at_same_price(self):
-        """Round-trip at same price returns to original balances."""
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0)
+        """Round-trip at same price returns to original balances (no fee)."""
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
         ex.execute(_buy(500.0), price=100.0)
         ex.execute(_sell(500.0), price=100.0)
         assert ex.quote_balance == pytest.approx(1000.0)
@@ -217,20 +232,28 @@ class TestSimulatedRoundTrip:
 
     def test_buy_low_sell_high_profit(self):
         """Buy at low price, sell at higher price → quote increases."""
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0)
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
         ex.execute(_buy(500.0), price=50.0)    # buy 10 base
         ex.execute(_sell(1000.0), price=100.0)  # sell 10 base → 1000 quote
         assert ex.quote_balance == pytest.approx(1500.0)
         assert ex.base_balance == pytest.approx(0.0)
 
     def test_buy_high_sell_low_loss(self):
-        """Buy at high price, sell at lower price → quote decreases."""
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0)
+        """Buy at high price, sell at lower → negative balance (virtual budget)."""
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
         ex.execute(_buy(500.0), price=100.0)   # buy 5 base
-        # sell at price 50: sells quote_amount/price = 500/50 = 10 base → only have 5
-        # this should fail
-        result = ex.execute(_sell(500.0), price=50.0)  # needs 10 base
-        assert result is False
+        # sell at price 50: needs 500/50 = 10 base, have 5 → goes to -5 base
+        result = ex.execute(_sell(500.0), price=50.0)
+        assert result is True
+        assert ex.base_balance == pytest.approx(-5.0)
+
+    def test_round_trip_with_fees(self):
+        """Round-trip with fees results in a small loss."""
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0.01)
+        ex.execute(_buy(500.0), price=100.0)  # gets 4.95 base
+        # sell 4.95 base at 100 → 495 * 0.99 = 490.05
+        ex.execute(TradeSignal(side="sell", quote_amount=495.0), price=100.0)
+        assert ex.quote_balance < 1000.0  # lost money to fees
 
 
 # ===================================================================
@@ -240,13 +263,13 @@ class TestSimulatedRoundTrip:
 class TestSimulatedBalances:
 
     def test_get_balances_returns_tuple(self):
-        ex = SimulatedExchange(_budget(100.0, 5.0))
+        ex = SimulatedExchange(_budget(100.0, 5.0), fee_rate=0)
         q, b = ex.get_balances()
         assert q == pytest.approx(100.0)
         assert b == pytest.approx(5.0)
 
     def test_get_balances_after_trade(self):
-        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0)
+        ex = SimulatedExchange(_budget(1000.0, 0.0), start_price=100.0, fee_rate=0)
         ex.execute(_buy(200.0), price=100.0)
         q, b = ex.get_balances()
         assert q == pytest.approx(800.0)
@@ -275,7 +298,7 @@ class TestSimulatedStartStop:
 class TestSimulatedInvalidSignal:
 
     def test_unknown_side_returns_false(self):
-        ex = SimulatedExchange(_budget(1000.0, 10.0))
+        ex = SimulatedExchange(_budget(1000.0, 10.0), fee_rate=0)
         signal = TradeSignal(side="buy", quote_amount=100.0)
         # Monkey-patch to test the fallthrough
         signal.side = "hold"  # type: ignore[assignment]

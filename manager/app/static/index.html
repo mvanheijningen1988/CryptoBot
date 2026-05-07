@@ -42,15 +42,32 @@
                   <th data-i18n="th_status">Status</th>
                   <th data-i18n="th_equity">Equity</th>
                   <th data-i18n="th_pnl">PnL</th>
+                  <th data-i18n="th_trades">Trades</th>
                   <th data-i18n="th_actions">Actions</th>
                 </tr>
               </thead>
               <tbody id="bots_body"></tbody>
             </table>
           </section>
+          <section class="card notification-card">
+            <h2 data-i18n="notifications_title">Notifications</h2>
+            <div class="notification-tabs">
+              <button class="ntab-btn active" data-ntab="trade_events_list" data-i18n="ntab_trades">Trades</button>
+              <button class="ntab-btn" data-ntab="events_list" data-i18n="ntab_agents">Agents</button>
+            </div>
+            <div id="trade_events_list" class="events-list ntab-pane active"></div>
+            <div id="events_list" class="events-list ntab-pane"></div>
+          </section>
+        </div>
+        <div style="margin-top:12px">
           <section class="card">
-            <h2 data-i18n="notifications_title">Agent Notifications</h2>
-            <div id="events_list" class="events-list"></div>
+            <h2 data-i18n="equity_chart_title">Budget Trend</h2>
+            <div class="chart-controls">
+              <select id="equity_chart_bot">
+                <option value="" data-i18n="lbl_select_bot">Select a bot…</option>
+              </select>
+            </div>
+            <canvas id="equity_chart" width="800" height="220"></canvas>
           </section>
         </div>
         <div style="margin-top:12px">
@@ -69,10 +86,12 @@
           <table>
             <thead>
               <tr>
-                <th data-i18n="th_name">Name</th>
+                <th data-i18n="th_agent_id">Agent ID</th>
+                <th data-i18n="th_address">Address</th>
                 <th data-i18n="th_status">Status</th>
                 <th data-i18n="th_bots">Bots</th>
                 <th data-i18n="th_version">Version</th>
+                <th data-i18n="th_heartbeat">Last Heartbeat</th>
                 <th data-i18n="th_approval">Approval</th>
                 <th data-i18n="th_actions">Actions</th>
               </tr>
@@ -157,14 +176,8 @@
       </div>
     </dialog>
 
-    <!-- Agent discovery popup -->
-    <dialog id="popup_backdrop" class="popup-backdrop">
-      <div class="popup">
-        <h3 data-i18n="popup_new_agent">New agent discovered</h3>
-        <p id="popup_text"></p>
-        <button id="popup_close" data-i18n="btn_close">Close</button>
-      </div>
-    </dialog>
+    <!-- Toast container -->
+    <div id="toast_container" class="toast-container"></div>
 
     <!-- Agent logs modal -->
     <dialog id="agent_logs_modal" class="modal-backdrop">
@@ -196,6 +209,24 @@
           <div class="bot-actions">
             <button id="modal_refresh_agent_logs" class="secondary" data-i18n="btn_refresh">Refresh now</button>
             <button id="modal_close_agent_logs" data-i18n="btn_close">Close</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- Confirm modal -->
+    <dialog id="confirm_modal" class="modal-backdrop">
+      <div class="modal" style="width:min(400px,90vw);grid-template-rows:auto 1fr auto;">
+        <div class="modal-header">
+          <h3 class="modal-title" id="confirm_modal_title"></h3>
+        </div>
+        <div class="modal-body">
+          <p id="confirm_modal_message"></p>
+        </div>
+        <div class="modal-footer">
+          <div class="bot-actions">
+            <button id="confirm_modal_ok" data-i18n="btn_confirm">Confirm</button>
+            <button id="confirm_modal_cancel" class="secondary" data-i18n="btn_cancel">Cancel</button>
           </div>
         </div>
       </div>

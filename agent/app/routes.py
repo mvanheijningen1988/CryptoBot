@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi.routing import APIRouter
 
-from agent.app.config import AGENT_ID, AGENT_NAME, runner_manager
+from agent.app.config import AGENT_ID, runner_manager
 from agent.app.schemas import BudgetPayload, StartBotPayload, StopBotPayload
 from agent.app.version import __version__
 
@@ -82,6 +82,5 @@ def list_logs(limit: int = 200, bot_id: str | None = None, category: str | None 
     safe_limit = max(1, min(limit, 1000))
     return {
         "agent_id": AGENT_ID,
-        "agent_name": AGENT_NAME,
         "logs": runner_manager.get_logs(limit=safe_limit, bot_id=bot_id, category=category),
     }

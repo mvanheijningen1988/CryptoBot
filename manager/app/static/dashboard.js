@@ -170,6 +170,33 @@ function formatNumber(value, digits = 6) {
   return Number(value).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits });
 }
 
+/**
+ * Return a human-readable relative time string (e.g. "3 minutes ago").
+ *
+ * @param {Date} date - The date to format.
+ * @returns {string} Relative time string.
+ */
+function timeAgo(date) {
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < 0) return date.toLocaleString();
+  const intervals = [
+    { label: lang === "nl" ? "maand" : "month", plural: lang === "nl" ? "maanden" : "months", seconds: 2592000 },
+    { label: lang === "nl" ? "week" : "week", plural: lang === "nl" ? "weken" : "weeks", seconds: 604800 },
+    { label: lang === "nl" ? "dag" : "day", plural: lang === "nl" ? "dagen" : "days", seconds: 86400 },
+    { label: lang === "nl" ? "uur" : "hour", plural: lang === "nl" ? "uur" : "hours", seconds: 3600 },
+    { label: lang === "nl" ? "minuut" : "minute", plural: lang === "nl" ? "minuten" : "minutes", seconds: 60 },
+  ];
+  for (const i of intervals) {
+    const count = Math.floor(seconds / i.seconds);
+    if (count >= 1) {
+      const ago = lang === "nl" ? "geleden" : "ago";
+      return `${count} ${count === 1 ? i.label : i.plural} ${ago}`;
+    }
+  }
+  const ago = lang === "nl" ? "geleden" : "ago";
+  return `${seconds} ${seconds === 1 ? (lang === "nl" ? "seconde" : "second") : (lang === "nl" ? "seconden" : "seconds")} ${ago}`;
+}
+
 // ──────────────────────────────────────────────────────────────
 // Market summary (REST + WebSocket)
 // ──────────────────────────────────────────────────────────────
@@ -434,8 +461,24 @@ async function loadBots() {
   body.innerHTML = "";
   const isViewer = currentUser?.role === "viewer";
 
+  // Populate the equity chart bot selector
+  const chartSelect = document.getElementById("equity_chart_bot");
+  if (chartSelect) {
+    const currentVal = chartSelect.value;
+    chartSelect.innerHTML = `<option value="">${t("lbl_select_bot")}</option>`;
+    for (const bot of bots) {
+      const opt = document.createElement("option");
+      opt.value = bot.id;
+      opt.textContent = bot.name;
+      if (bot.id === currentVal) opt.selected = true;
+      chartSelect.appendChild(opt);
+    }
+  }
+
   for (const bot of bots) {
+    const m = bot.latest_metrics || {};
     const pnl = Number(m.unrealized_pnl_quote || 0);
+    const trades = Number(m.trade_count || 0);
     const tr = document.createElement("tr");
 
     // Viewers see no action buttons
@@ -443,7 +486,7 @@ async function loadBots() {
       ? "<td>-</td>"
       : `<td><div class="bot-actions"><button data-start="${bot.id}">${t("btn_start")}</button><button class="secondary" data-stop="${bot.id}">${t("btn_stop")}</button></div></td>`;
 
-    tr.innerHTML = `<td>${bot.name}</td><td>${bot.status}</td><td>${Number(m.total_equity_quote || 0).toFixed(2)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${pnl.toFixed(2)}</td>${acts}`;
+    tr.innerHTML = `<td>${bot.name}</td><td>${bot.status}</td><td>${Number(m.total_equity_quote || 0).toFixed(2)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${pnl.toFixed(2)}</td><td>${trades}</td>${acts}`;
     body.appendChild(tr);
   }
 
@@ -459,17 +502,31 @@ async function loadBots() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Agent popup (discovery notification)
+// Toast notifications
 // ──────────────────────────────────────────────────────────────
 
 /**
- * Display a popup notification with the given message text.
+ * Display a toast notification that auto-dismisses after a delay.
  *
- * @param {string} message - The message to show.
+ * @param {string} title   - Bold heading text.
+ * @param {string} message - Body text.
+ * @param {"info"|"warn"} [type="info"] - Visual style.
+ * @param {number} [duration=5000]      - Time in ms before removal.
+ * @param {Function} [onclick]          - Optional click handler.
  */
-function showPopup(message) {
-  document.getElementById("popup_text").textContent = message;
-  document.getElementById("popup_backdrop").showModal();
+function showToast(title, message, type = "info", duration = 5000, onclick = null) {
+  const container = document.getElementById("toast_container");
+  const el = document.createElement("div");
+  el.className = `toast toast-${type}`;
+  el.innerHTML = `<strong>${title}</strong><span>${message}</span>`;
+  if (onclick) {
+    el.style.cursor = "pointer";
+    el.onclick = () => { onclick(); el.remove(); };
+  }
+  el.style.animationDuration = "0.3s, 0.4s";
+  el.style.animationDelay = `0s, ${duration - 400}ms`;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), duration);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -489,25 +546,78 @@ async function loadAgents() {
 
   for (const agent of agents) {
     const tr = document.createElement("tr");
+    const isDead = agent.status === "offline";
+    const isRunning = agent.status === "online" && agent.approval_status === "approved" && (agent.bot_count ?? 0) > 0;
+    const isStopped = agent.status === "stopped";
+    let displayStatus;
+    if (isDead) {
+      displayStatus = '<span style="color:#ef4444">dead</span>';
+    } else if (isStopped) {
+      displayStatus = `online (<span style="color:#ef4444">${t("lbl_stopped")}</span>)`;
+    } else if (isRunning) {
+      displayStatus = `online (<span style="color:#10b981">${t("lbl_running")}</span>)`;
+    } else if (agent.status === "online") {
+      displayStatus = 'online';
+    } else {
+      displayStatus = agent.status;
+    }
     let ah = "<span>-</span>";
 
-    if (isViewer) {
+    if (isDead) {
+      // Dead agents can only be removed
+      if (!isViewer)
+        ah = `<div class="bot-actions"><button class="icon-btn icon-remove" data-agent-remove="${agent.id}" title="${t("btn_remove")}"><span class="remove-x">✕</span></button></div>`;
+    } else if (isViewer) {
       // Viewers can only open logs for approved agents
       if (agent.approval_status === "approved")
-        ah = `<button data-logs="${agent.id}">${t("btn_open_logs")}</button>`;
+        ah = `<button class="icon-btn" data-logs="${agent.id}" title="${t("btn_open_logs")}">📋</button>`;
     } else if (agent.approval_status === "pending") {
-      ah = `<div class="bot-actions"><button data-approve="${agent.id}">${t("btn_approve")}</button><button class="secondary" data-reject="${agent.id}">${t("btn_reject")}</button></div>`;
+      ah = `<div class="bot-actions"><button class="btn-approve" data-approve="${agent.id}">${t("btn_approve")}</button><button class="btn-reject" data-reject="${agent.id}">${t("btn_reject")}</button></div>`;
     } else if (agent.approval_status === "approved") {
-      ah = `<div class="bot-actions"><button data-logs="${agent.id}">${t("btn_open_logs")}</button><button class="secondary" data-unapprove="${agent.id}">${t("btn_unapprove")}</button></div>`;
+      const isOnline = agent.status === "online" || agent.status === "stopped";
+      const isStopped = agent.status === "stopped";
+      ah = `<div class="bot-actions">`
+        + (isStopped ? `<button class="icon-btn icon-start" data-agent-start="${agent.id}" title="${t("btn_start")}">▶</button>`
+                     : `<button class="icon-btn icon-stop" data-agent-stop="${agent.id}" title="${t("btn_stop")}">⏹</button>`)
+        + `<button class="icon-btn" data-logs="${agent.id}" title="${t("btn_open_logs")}">📋</button>`
+        + `<button class="icon-btn icon-remove" data-agent-remove="${agent.id}" title="${t("btn_remove")}"><span class="remove-x">✕</span></button>`
+        + `</div>`;
     } else if (agent.approval_status === "rejected") {
-      ah = `<button data-approve="${agent.id}">${t("btn_approve")}</button>`;
+      ah = `<button class="btn-approve" data-approve="${agent.id}">${t("btn_approve")}</button>`;
     }
 
-    const displayStatus = agent.status === "offline" ? "dead" : agent.status;
     const botCount = agent.bot_count ?? 0;
     const version = agent.version || "-";
-    tr.innerHTML = `<td>${agent.name}</td><td>${displayStatus}</td><td>${botCount}</td><td>${version}</td><td>${agent.approval_status}</td><td>${ah}</td>`;
+    const address = agent.base_url ? agent.base_url.replace(/^https?:\/\//, "") : "-";
+    const heartbeat = agent.last_heartbeat ? timeAgo(new Date(agent.last_heartbeat)) : "-";
+    const heartbeatAttr = agent.last_heartbeat ? ` data-heartbeat="${agent.last_heartbeat}"` : "";
+    const hasExpand = botCount > 0;
+    const classes = [hasExpand ? "expandable-row" : "", isDead ? "dead-row" : ""].filter(Boolean).join(" ");
+    tr.className = classes;
+    tr.innerHTML = `<td>${hasExpand ? '<span class="expand-arrow">▶</span> ' : ""}${agent.id}</td><td>${address}</td><td>${displayStatus}</td><td>${botCount}</td><td>${version}</td><td${heartbeatAttr}>${heartbeat}</td><td>${agent.approval_status}</td><td>${ah}</td>`;
     body.appendChild(tr);
+
+    if (hasExpand) {
+      const detailTr = document.createElement("tr");
+      detailTr.className = "bot-detail-row";
+      detailTr.style.display = "none";
+      const colSpan = 8;
+      let botTable = `<table class="sub-table"><thead><tr><th>${t("th_name")}</th><th>${t("th_market")}</th><th>${t("th_status")}</th><th>${t("th_trades")}</th><th>${t("th_quote_balance")}</th><th>${t("th_base_balance")}</th></tr></thead><tbody>`;
+      for (const bot of agent.bots) {
+        botTable += `<tr><td>${bot.name}</td><td>${bot.market}</td><td>${bot.status}</td><td>${bot.trade_count}</td><td>${formatNumber(bot.quote_balance, 2)}</td><td>${formatNumber(bot.base_balance, 6)}</td></tr>`;
+      }
+      botTable += `</tbody></table>`;
+      detailTr.innerHTML = `<td colspan="${colSpan}">${botTable}</td>`;
+      body.appendChild(detailTr);
+
+      tr.onclick = (e) => {
+        if (e.target.closest("button")) return;
+        const arrow = tr.querySelector(".expand-arrow");
+        const open = detailTr.style.display !== "none";
+        detailTr.style.display = open ? "none" : "table-row";
+        arrow.textContent = open ? "▶" : "▼";
+      };
+    }
   }
 
   // Wire up all action buttons
@@ -517,11 +627,17 @@ async function loadAgents() {
   body.querySelectorAll("button[data-reject]").forEach((b) => {
     b.onclick = async () => { await api(`/api/v1/agents/${b.dataset.reject}/reject`, { method: "POST" }); await loadAgents(); await loadEvents(); };
   });
-  body.querySelectorAll("button[data-unapprove]").forEach((b) => {
+  body.querySelectorAll("button[data-agent-start]").forEach((b) => {
+    b.onclick = async () => { await api(`/api/v1/agents/${b.dataset.agentStart}/approve`, { method: "POST" }); await loadAgents(); await loadEvents(); };
+  });
+  body.querySelectorAll("button[data-agent-stop]").forEach((b) => {
+    b.onclick = async () => { await api(`/api/v1/agents/${b.dataset.agentStop}/stop`, { method: "POST" }); await loadAgents(); await loadEvents(); };
+  });
+  body.querySelectorAll("button[data-agent-remove]").forEach((b) => {
     b.onclick = async () => {
-      await api(`/api/v1/agents/${b.dataset.unapprove}/unapprove`, { method: "POST" });
-      // If the unapproved agent was selected in the logs modal, close it
-      if (selectedAgentId === b.dataset.unapprove) { selectedAgentId = null; closeLogsModal(); }
+      if (!await showConfirm(t("confirm_remove_agent"))) return;
+      await api(`/api/v1/agents/${b.dataset.agentRemove}`, { method: "DELETE" });
+      if (selectedAgentId === b.dataset.agentRemove) { selectedAgentId = null; closeLogsModal(); }
       await loadAgents(); await loadEvents();
     };
   });
@@ -569,6 +685,9 @@ async function loadAgentLogs() {
     const logs = payload.logs || [];
     if (!logs.length) { list.innerHTML = `<div class="log-item">${t("logs_none")}</div>`; return; }
 
+    // Preserve scroll position if user has scrolled up
+    const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+
     list.innerHTML = "";
     // Reverse so newest is at the bottom (natural scroll direction)
     for (const log of [...logs].reverse()) {
@@ -576,10 +695,10 @@ async function loadAgentLogs() {
       item.className = "log-item";
       const timeLabel = new Date(log.timestamp).toLocaleString();
       const botLabel = log.bot_id ? ` | bot ${log.bot_id}` : "";
-      item.innerHTML = `<div><strong>[${log.event_type}]</strong> <span class="log-category">(${log.category || "system"})</span>${botLabel}</div><div>${log.message}</div><div class="event-time">${timeLabel}</div>`;
+      item.textContent = `${timeLabel}  [${log.event_type}]${botLabel}  ${log.message}`;
       list.appendChild(item);
     }
-    list.scrollTop = list.scrollHeight;
+    if (atBottom) list.scrollTop = list.scrollHeight;
   } catch (err) {
     list.innerHTML = `<div class="log-item">${t("logs_error")}: ${String(err.message || err)}</div>`;
   }
@@ -599,18 +718,209 @@ async function loadEvents() {
   list.innerHTML = "";
 
   for (const event of events) {
-    // Show a popup for each newly discovered agent (only once)
-    if (event.event_type === "discovered" && !seenEventIds.has(event.id)) {
+    // Show a toast for newly discovered or dead agents (only once)
+    if (!seenEventIds.has(event.id)) {
       seenEventIds.add(event.id);
-      showPopup(event.message);
+      if (event.event_type === "discovered") {
+        showToast(t("toast_agent_discovered"), event.message, "info", 5000, switchToAgentsTab);
+      } else if (event.event_type === "offline") {
+        showToast(t("toast_agent_dead"), event.message, "warn", 5000, switchToAgentsTab);
+      }
     }
     const item = document.createElement("div");
     item.className = "event-item";
     const timeLabel = new Date(event.timestamp).toLocaleString();
-    item.innerHTML = `<div><strong>[${event.event_type}]</strong> <strong>[${event.agent_name || "unknown"}]</strong> ${event.message}</div><div class="event-time">${timeLabel}</div>`;
+    item.innerHTML = `<div><strong>[${event.event_type}]</strong> <strong>[${event.agent_id}]</strong> ${event.message}</div><div class="event-time">${timeLabel}</div>`;
     list.appendChild(item);
   }
 }
+
+// ──────────────────────────────────────────────────────────────
+// Trade events
+// ──────────────────────────────────────────────────────────────
+
+/** Set of trade event IDs already shown as toasts. */
+const seenTradeIds = new Set();
+
+/**
+ * Fetch trade events from the API and render them into the
+ * trade notifications panel. New trades trigger a toast.
+ */
+async function loadTradeEvents() {
+  const events = await api("/api/v1/trade-events");
+  const list = document.getElementById("trade_events_list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  for (const ev of events) {
+    // Toast for new trades
+    if (!seenTradeIds.has(ev.id)) {
+      seenTradeIds.add(ev.id);
+      const pnlStr = ev.trade_pnl >= 0 ? `+${ev.trade_pnl.toFixed(4)}` : ev.trade_pnl.toFixed(4);
+      showToast(
+        `${t("toast_trade")} #${ev.trade_number}`,
+        `${ev.bot_name} @ ${ev.price.toFixed(2)} | PnL: ${pnlStr}`,
+        ev.trade_pnl >= 0 ? "info" : "warn",
+        4000,
+      );
+    }
+
+    const item = document.createElement("div");
+    const sideClass = ev.side === "buy" ? "trade-buy" : ev.side === "sell" ? "trade-sell" : "";
+    const pnlClass = ev.trade_pnl >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
+    const pnlStr = ev.trade_pnl >= 0 ? `+${ev.trade_pnl.toFixed(4)}` : ev.trade_pnl.toFixed(4);
+    const timeLabel = new Date(ev.timestamp).toLocaleString();
+    item.className = `event-item ${sideClass}`;
+    item.innerHTML = `<div><strong>#${ev.trade_number}</strong> ${ev.bot_name} @ ${ev.price.toFixed(2)} &mdash; <span class="${pnlClass}">${pnlStr}</span> | ${t("lbl_equity")}: ${ev.total_equity.toFixed(2)}</div><div class="event-time">${timeLabel}</div>`;
+    list.appendChild(item);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Notification tabs
+// ──────────────────────────────────────────────────────────────
+
+document.querySelectorAll(".ntab-btn").forEach((btn) => {
+  btn.onclick = () => {
+    document.querySelectorAll(".ntab-btn").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".ntab-pane").forEach((p) => p.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById(btn.dataset.ntab)?.classList.add("active");
+  };
+});
+
+// ──────────────────────────────────────────────────────────────
+// Equity trend chart (pure Canvas 2D)
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Draw a line chart of equity over time on the canvas element.
+ *
+ * @param {Array<{t: string, v: number}>} data - Equity data-points.
+ */
+function drawEquityChart(data) {
+  const canvas = document.getElementById("equity_chart");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+
+  // Size canvas to CSS size at device pixel ratio
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width;
+  const H = rect.height;
+
+  ctx.clearRect(0, 0, W, H);
+
+  if (!data || data.length < 2) {
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(t("chart_no_data"), W / 2, H / 2);
+    return;
+  }
+
+  const pad = { top: 20, right: 20, bottom: 30, left: 60 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  const values = data.map((d) => d.v);
+  const minV = Math.min(...values);
+  const maxV = Math.max(...values);
+  const range = maxV - minV || 1;
+
+  // Map data to pixel coordinates
+  const points = data.map((d, i) => ({
+    x: pad.left + (i / (data.length - 1)) * plotW,
+    y: pad.top + plotH - ((d.v - minV) / range) * plotH,
+  }));
+
+  // Draw axes
+  ctx.strokeStyle = "#334155";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, pad.top);
+  ctx.lineTo(pad.left, pad.top + plotH);
+  ctx.lineTo(pad.left + plotW, pad.top + plotH);
+  ctx.stroke();
+
+  // Y-axis labels
+  ctx.fillStyle = "#94a3b8";
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "right";
+  for (let i = 0; i <= 4; i++) {
+    const v = minV + (range * i) / 4;
+    const y = pad.top + plotH - (i / 4) * plotH;
+    ctx.fillText(v.toFixed(2), pad.left - 6, y + 4);
+    if (i > 0 && i < 4) {
+      ctx.save();
+      ctx.strokeStyle = "#1e293b";
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(pad.left, y);
+      ctx.lineTo(pad.left + plotW, y);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // X-axis labels (first, middle, last)
+  ctx.textAlign = "center";
+  const timestamps = data.map((d) => new Date(d.t));
+  const timeFmt = (d) => d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  ctx.fillText(timeFmt(timestamps[0]), points[0].x, pad.top + plotH + 18);
+  const mid = Math.floor(data.length / 2);
+  ctx.fillText(timeFmt(timestamps[mid]), points[mid].x, pad.top + plotH + 18);
+  ctx.fillText(timeFmt(timestamps[timestamps.length - 1]), points[points.length - 1].x, pad.top + plotH + 18);
+
+  // Draw gradient fill
+  const gradient = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+  gradient.addColorStop(0, "rgba(59, 130, 246, 0.25)");
+  gradient.addColorStop(1, "rgba(59, 130, 246, 0.02)");
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, pad.top + plotH);
+  for (const p of points) ctx.lineTo(p.x, p.y);
+  ctx.lineTo(points[points.length - 1].x, pad.top + plotH);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  // Draw line
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  ctx.strokeStyle = "#3b82f6";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Draw dots at endpoints
+  for (const p of [points[0], points[points.length - 1]]) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = "#3b82f6";
+    ctx.fill();
+  }
+}
+
+/** Fetch equity history for the selected bot and redraw the chart. */
+async function loadEquityChart() {
+  const botId = document.getElementById("equity_chart_bot")?.value;
+  if (!botId) {
+    drawEquityChart([]);
+    return;
+  }
+  try {
+    const data = await api(`/api/v1/bots/${botId}/equity-history`);
+    drawEquityChart(data);
+  } catch {
+    drawEquityChart([]);
+  }
+}
+
+// Redraw chart when the bot selector changes
+document.getElementById("equity_chart_bot")?.addEventListener("change", loadEquityChart);
 
 // ──────────────────────────────────────────────────────────────
 // Event handlers
@@ -620,12 +930,47 @@ async function loadEvents() {
 document.getElementById("create").onclick = async () => {
   await checkGridProfitability();
   if (lastGridPreview && !lastGridPreview.is_profitable) {
-    if (!globalThis.confirm(t("grid_confirm_unprofitable"))) return;
+    if (!await showConfirm(t("grid_confirm_unprofitable"))) return;
   }
   await api("/api/v1/bots", { method: "POST", body: JSON.stringify({ name: document.getElementById("name").value, config: currentConfig() }) });
   await loadBots();
   document.getElementById("create_bot_modal").close();
 };
+
+/**
+ * Show a styled confirm modal and return a promise that resolves to true/false.
+ *
+ * @param {string} message - The confirmation message to display.
+ * @param {string} [title] - Optional title for the modal header.
+ * @returns {Promise<boolean>} True if confirmed, false if cancelled.
+ */
+function showConfirm(message, title = "") {
+  return new Promise((resolve) => {
+    const dialog = document.getElementById("confirm_modal");
+    document.getElementById("confirm_modal_title").textContent = title || t("btn_confirm");
+    document.getElementById("confirm_modal_message").textContent = message;
+    const okBtn = document.getElementById("confirm_modal_ok");
+    const cancelBtn = document.getElementById("confirm_modal_cancel");
+    function cleanup(result) {
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      dialog.close();
+      resolve(result);
+    }
+    okBtn.onclick = () => cleanup(true);
+    cancelBtn.onclick = () => cleanup(false);
+    dialog.showModal();
+  });
+}
+
+/** Switch to the Agents tab programmatically. */
+function switchToAgentsTab() {
+  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+  document.querySelectorAll(".tab-pane").forEach((p) => p.classList.remove("active"));
+  const agentsBtn = document.querySelector('.tab-btn[data-tab="tab_agents"]');
+  if (agentsBtn) agentsBtn.classList.add("active");
+  document.getElementById("tab_agents")?.classList.add("active");
+}
 
 /** Tab switching: toggle active class on both buttons and panes. */
 document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -651,8 +996,6 @@ document.getElementById("backtest").onclick = async () => {
   const result = await api("/api/v1/backtest", { method: "POST", body: JSON.stringify({ config: currentConfig() }) });
   document.getElementById("backtest_result").textContent = JSON.stringify(result, null, 2);
 };
-
-document.getElementById("popup_close").onclick = () => { document.getElementById("popup_backdrop").close(); };
 
 /** When the market dropdown changes, reconnect WebSocket + refresh balances. */
 document.getElementById("market").addEventListener("change", () => { startMarketRealtime(); loadBalances(); });
@@ -751,14 +1094,16 @@ document.getElementById("btn_logout").onclick = () => {
   await loadBots();
   await loadAgents();
   await loadEvents();
+  await loadTradeEvents();
+  await loadEquityChart();
 })();
 
 // ──────────────────────────────────────────────────────────────
 // Polling intervals
 // ──────────────────────────────────────────────────────────────
 
-/** Refresh bots, agents, and events every 5 seconds. */
-setInterval(async () => { await loadBots(); await loadAgents(); await loadEvents(); if (logsModalOpen) await loadAgentLogs(); }, 5000);
+/** Refresh bots, agents, events, and trades every 5 seconds. */
+setInterval(async () => { await loadBots(); await loadAgents(); await loadEvents(); await loadTradeEvents(); await loadEquityChart(); if (logsModalOpen) await loadAgentLogs(); }, 5000);
 
 /** Refresh market summary from REST every 60 seconds (WebSocket handles real-time). */
 setInterval(async () => { await loadMarketSummary(); }, 60000);
@@ -782,6 +1127,11 @@ setInterval(async () => { if (logsModalOpen) await loadAgentLogs(); }, 2000);
     if (!trigger) return;
     const text = trigger.dataset.tip;
     if (!text) return;
+
+    // Move tooltip into the open dialog (top-layer) so it renders above it
+    const openDialog = trigger.closest("dialog[open]");
+    const tipParent = openDialog || document.body;
+    if (tipEl.parentNode !== tipParent) tipParent.appendChild(tipEl);
 
     tipEl.textContent = text;
     tipEl.style.display = "block";

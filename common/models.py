@@ -42,7 +42,7 @@ class BotConfig(BaseModel):
     quote_currency: str
     mode: Literal["simulation", "live"] = "simulation"
     strategy: Literal["static_grid"] = "static_grid"
-    start_price: float = Field(default=100.0, gt=0)
+    start_price: float = Field(default=0.0, ge=0)
     grid: GridConfig
     budget: BudgetConfig
 
@@ -67,4 +67,5 @@ class BotSnapshot(BaseModel):
     realized_pnl_quote: float
     unrealized_pnl_quote: float
     skimmed_quote: float
+    trade_count: int = 0
     status: str
