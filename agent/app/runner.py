@@ -126,6 +126,43 @@ class BotRunner:
         self.trade_count = 0
         self._pending_trade_events: list[dict] = []
 
+    def _wait_for_initial_price(self) -> bool:
+        """Block until the exchange provides the first usable price."""
+        wait_timeout = 15.0 if self.config.mode == "live" else 5.0
+        while self.running:
+            try:
+                price = self.exchange.wait_for_price_update(self.price or None, timeout_seconds=wait_timeout)
+                if price and price > 0:
+                    self.price = price
+                    return True
+            except Exception as exc:
+                self.log_store.add(
+                    "price_wait_error",
+                    f"Waiting for initial price failed for bot {self.bot_id}: {exc}",
+                    bot_id=self.bot_id,
+                    category="system",
+                )
+            time.sleep(0.5)
+        return False
+
+    def _build_snapshot(self, status: str) -> BotSnapshot:
+        """Create a snapshot for the current bot state."""
+        total_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+        return BotSnapshot(
+            bot_id=self.bot_id,
+            timestamp=datetime.now(timezone.utc),
+            price=self.price,
+            quote_balance=self.exchange.quote_balance,
+            base_balance=self.exchange.base_balance,
+            base_value_in_quote=self.exchange.base_balance * self.price,
+            total_equity_quote=total_equity,
+            realized_pnl_quote=self.realized_pnl,
+            unrealized_pnl_quote=total_equity - self.initial_equity,
+            skimmed_quote=self.skimmed_quote,
+            trade_count=self.trade_count,
+            status=status,
+        )
+
     def _build_exchange(self, config: BotConfig) -> Exchange:
         """
         Create the appropriate exchange adapter based on config.mode.
@@ -184,22 +221,18 @@ class BotRunner:
                 self.exchange.quote_balance = quote_balance
                 self.exchange.base_balance = base_balance
 
-            for _ in range(20):
-                if not self.running:
-                    return
-                try:
-                    self.price = self.exchange.get_price(self.price)
-                    break
-                except Exception:
-                    time.sleep(0.5)
+            if not self._wait_for_initial_price():
+                return
 
             if not restored:
                 self.strategy.on_price(self.price, self.state)
                 self.initial_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+                self._place_all_limit_orders("initial")
             elif not self.state.open_orders:
                 # Restored but no open orders (e.g. crash during fill) — reinitialize grid
                 self.state.level_index = None
                 self.strategy.on_price(self.price, self.state)
+                self._place_all_limit_orders("initial")
 
             label = "resumed" if restored else "started"
             self.log_store.add("bot_start", f"Bot {self.bot_id} {label}.", bot_id=self.bot_id, category="system")
@@ -221,8 +254,7 @@ class BotRunner:
                     category="system",
                 )
 
-            # Place limit orders for all open orders on the exchange
-            self._place_all_limit_orders("initial")
+            self._push_snapshot(self._build_snapshot("running"))
 
             self._loop()
         except Exception:
@@ -338,7 +370,7 @@ class BotRunner:
         if side is None:
             return
         limit_price = self.strategy.levels[level_idx]
-        order_id = f"lvl_{level_idx}"
+        order_id = f"{self.bot_id}-{level_idx}-{uuid.uuid4().hex[:12]}"
         success = self.exchange.place_limit_order(
             order_id=order_id,
             side=side,
@@ -356,6 +388,7 @@ class BotRunner:
             )
             self._pending_trade_events.append({
                 "event_type": "order_placed",
+                "order_id": order_id,
                 "side": side,
                 "quote_amount": self.config.grid.order_size_quote,
                 "price": limit_price,
@@ -455,6 +488,7 @@ class BotRunner:
                     )
                     self._pending_trade_events.append({
                         "event_type": "order_filled",
+                        "order_id": fill.get("order_id"),
                         "side": side,
                         "quote_amount": fill["quote_amount"],
                         "price": fill_price,
@@ -472,20 +506,7 @@ class BotRunner:
             self._apply_profit_mode(total_equity)
             total_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
 
-            snapshot = BotSnapshot(
-                bot_id=self.bot_id,
-                timestamp=datetime.now(timezone.utc),
-                price=self.price,
-                quote_balance=self.exchange.quote_balance,
-                base_balance=self.exchange.base_balance,
-                base_value_in_quote=self.exchange.base_balance * self.price,
-                total_equity_quote=total_equity,
-                realized_pnl_quote=self.realized_pnl,
-                unrealized_pnl_quote=total_equity - self.initial_equity,
-                skimmed_quote=self.skimmed_quote,
-                trade_count=self.trade_count,
-                status="running",
-            )
+            snapshot = self._build_snapshot("running")
             self._push_snapshot(snapshot)
 
 

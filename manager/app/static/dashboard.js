@@ -600,11 +600,19 @@ async function loadBots() {
     const trades = Number(m.trade_count || 0);
     const lastPrice = Number(m.price || 0);
     const market = bot.config?.market || "-";
+    const lowerPrice = Number(bot.config?.grid?.lower_price || 0);
+    const upperPrice = Number(bot.config?.grid?.upper_price || 0);
+    const isOutsideGrid = lastPrice > 0 && lowerPrice > 0 && upperPrice > 0 && (lastPrice < lowerPrice || lastPrice > upperPrice);
+    const nameHtml = isOutsideGrid
+      ? `<span class="bot-name-cell">${bot.name}<span class="bot-grid-warning" title="${t("bot_grid_warning")}">&#9888;</span></span>`
+      : bot.name;
 
     const modeLabel = bot.mode === "live" ? "Live" : "Sim";
     const priceStr = lastPrice > 0 ? formatNumber(lastPrice) : "-";
     let statusHtml;
-    if (bot.status === "running") {
+    if (bot.status === "initializing") {
+      statusHtml = `<span class="status-badge status-initializing">${t("lbl_initializing")}</span>`;
+    } else if (bot.status === "running") {
       statusHtml = `<span class="status-badge status-running">${t("lbl_running")}</span>`;
     } else if (bot.status === "queued") {
       statusHtml = `<span class="status-badge status-queued">${t("lbl_queued")}</span>`;
@@ -619,7 +627,7 @@ async function loadBots() {
     if (tr) {
       // Update existing row cells in-place (skip actions column to preserve dropdown state)
       const cells = tr.children;
-      cells[0].textContent = bot.name;
+      cells[0].innerHTML = nameHtml;
       cells[1].textContent = market;
       cells[2].innerHTML = modeLabel;
       cells[3].innerHTML = statusHtml;
@@ -638,7 +646,7 @@ async function loadBots() {
       const acts = isViewer
         ? "<td>-</td>"
         : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
-      tr.innerHTML = `<td>${bot.name}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${bot.assigned_agent_id || ''}">${agentLabel}</td><td>${priceStr}</td><td>${formatNumber(m.total_equity_quote || 0)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${formatNumber(pnl)}</td><td>${trades}</td>${acts}`;
+      tr.innerHTML = `<td>${nameHtml}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${bot.assigned_agent_id || ''}">${agentLabel}</td><td>${priceStr}</td><td>${formatNumber(m.total_equity_quote || 0)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${formatNumber(pnl)}</td><td>${trades}</td>${acts}`;
       body.appendChild(tr);
       _wireUpBotRow(tr, bots);
     }
@@ -1333,6 +1341,21 @@ async function openOrderDetail(eventId) {
     html += `<div class="od-row"><span class="od-label">${t("th_level")}</span><span>${ev.level_index != null ? ev.level_index : "-"}</span></div>`;
     html += `</div>`;
 
+    if (ev.pair_metrics) {
+      const pm = ev.pair_metrics;
+      const pairPnlClass = pm.realized_pnl_quote > 0 ? "pnl-positive" : pm.realized_pnl_quote < 0 ? "pnl-negative" : "";
+      const pairPnlStr = `${pm.realized_pnl_quote >= 0 ? "+" : ""}${formatNumber(pm.realized_pnl_quote)}`;
+      const grossProfitStr = `${pm.gross_profit_quote >= 0 ? "+" : ""}${formatNumber(pm.gross_profit_quote)}`;
+      html += `<h4 style="margin:14px 0 6px;">${t("lbl_realized_pair_pnl")}</h4>`;
+      html += `<div class="order-detail-grid">`;
+      html += `<div class="od-row"><span class="od-label">${t("lbl_realized_pair_pnl")}</span><span class="${pairPnlClass}">${pairPnlStr}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("lbl_gross_profit")}</span><span>${grossProfitStr}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("lbl_total_fees")}</span><span>${formatNumber(pm.total_fees_quote)}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("lbl_quantity")}</span><span>${formatNumber(pm.quantity_base)}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("lbl_fee_rate")}</span><span>${(pm.fee_rate * 100).toFixed(2)}%</span></div>`;
+      html += `</div>`;
+    }
+
     // Linked order section
     if (ev.linked_order) {
       const lo = ev.linked_order;
@@ -1583,20 +1606,22 @@ function drawTradeChart(history, trades, grid) {
   ctx.setLineDash([]);
   ctx.stroke();
 
-  // Draw trade markers
+  // Draw trade level lines
   for (const tr of trades) {
-    const x = toX(tr.timestamp);
     const y = toY(tr.price);
-    if (x < pad.left || x > pad.left + plotW) continue;
+    if (y < pad.top || y > pad.top + plotH) continue;
     const isBuy = tr.side === "buy" || tr.trade_pnl < 0;
+    const lineColor = isBuy ? "rgba(34,197,94,0.9)" : "rgba(239,68,68,0.9)";
+    ctx.save();
+    ctx.setLineDash([8, 5]);
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(x, y, 5, 0, Math.PI * 2);
-    ctx.fillStyle = isBuy ? "#22c55e" : "#ef4444";
-    ctx.fill();
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 1.5;
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + plotW, y);
     ctx.stroke();
-    _tradeChartMarkers.push({ x, y, trade: tr });
+    ctx.restore();
+    _tradeChartMarkers.push({ x1: pad.left, x2: pad.left + plotW, y, trade: tr });
   }
 }
 
@@ -1610,7 +1635,9 @@ document.getElementById("trade_chart_canvas")?.addEventListener("mousemove", (e)
 
   let hit = null;
   for (const m of _tradeChartMarkers) {
-    if (Math.hypot(mx - m.x, my - m.y) <= 8) { hit = m; break; }
+    const withinX = mx >= m.x1 && mx <= m.x2;
+    const withinY = Math.abs(my - m.y) <= 6;
+    if (withinX && withinY) { hit = m; break; }
   }
   if (hit) {
     const tr = hit.trade;
@@ -1619,7 +1646,7 @@ document.getElementById("trade_chart_canvas")?.addEventListener("mousemove", (e)
     const pnlCls = pnl >= 0 ? "color:#22c55e" : "color:#ef4444";
     tip.innerHTML = `<div><strong>#${tr.trade_number}</strong> @ ${formatNumber(tr.price)}</div><div>${time}</div><div style="${pnlCls}">PnL: ${pnl >= 0 ? "+" : ""}${formatNumber(pnl)}</div><div>Equity: ${formatNumber(tr.total_equity)}</div>`;
     tip.style.display = "block";
-    tip.style.left = Math.min(hit.x + 12, canvas.clientWidth - 180) + "px";
+    tip.style.left = Math.min(mx + 12, canvas.clientWidth - 180) + "px";
     tip.style.top = (hit.y - 10) + "px";
   } else {
     tip.style.display = "none";

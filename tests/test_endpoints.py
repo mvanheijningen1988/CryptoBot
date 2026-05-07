@@ -545,6 +545,9 @@ class TestStartBot:
         _seed_bot(client, "start-bot", agent_id="start-agent")
         r = client.post("/api/v1/bots/start-bot/start", json={"agent_id": "start-agent"})
         assert r.status_code == 200
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "start-bot").first()
+        assert bot.status == "initializing"
 
     def test_start_nonexistent_bot(self, client):
         r = client.post("/api/v1/bots/ghost/start", json={})
@@ -633,6 +636,9 @@ class TestPushMetrics:
             },
         )
         assert r.status_code == 200
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "met-bot").first()
+        assert bot.status == "running"
 
     def test_push_metrics_nonexistent_bot(self, client):
         _seed_agent(client, "met2-agent")
@@ -655,6 +661,256 @@ class TestPushMetrics:
             },
         )
         assert r.status_code == 404
+
+    def test_push_metrics_links_sell_to_previous_buy_level(self, client):
+        _seed_agent(client, "met3-agent")
+        _seed_bot(client, "met3-bot", agent_id="met3-agent")
+        from manager.app.main import SessionLocal as TestSessionLocal
+
+        with patch("manager.app.events.SessionLocal", TestSessionLocal), patch("manager.app.database.SessionLocal", TestSessionLocal):
+            buy_resp = client.post(
+                "/api/v1/agents/met3-agent/bots/met3-bot/metrics",
+                json={
+                    "snapshot": {
+                        "bot_id": "met3-bot",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "price": 1.0,
+                        "quote_balance": 900.0,
+                        "base_balance": 100.0,
+                        "base_value_in_quote": 100.0,
+                        "total_equity_quote": 1000.0,
+                        "realized_pnl_quote": 0.0,
+                        "unrealized_pnl_quote": 0.0,
+                        "skimmed_quote": 0.0,
+                        "trade_count": 1,
+                        "status": "running"
+                    },
+                    "trade_events": [
+                        {
+                            "event_type": "order_filled",
+                            "side": "buy",
+                            "quote_amount": 100.0,
+                            "price": 1.0,
+                            "level_index": 1,
+                            "trade_pnl": 0.0,
+                            "total_equity": 1000.0,
+                            "trade_number": 1
+                        }
+                    ]
+                },
+            )
+            assert buy_resp.status_code == 200
+
+            sell_resp = client.post(
+                "/api/v1/agents/met3-agent/bots/met3-bot/metrics",
+                json={
+                    "snapshot": {
+                        "bot_id": "met3-bot",
+                        "timestamp": "2026-01-01T00:00:01Z",
+                        "price": 2.0,
+                        "quote_balance": 900.0,
+                        "base_balance": 100.0,
+                        "base_value_in_quote": 200.0,
+                        "total_equity_quote": 1100.0,
+                        "realized_pnl_quote": 0.0,
+                        "unrealized_pnl_quote": 100.0,
+                        "skimmed_quote": 0.0,
+                        "trade_count": 1,
+                        "status": "running"
+                    },
+                    "trade_events": [
+                        {
+                            "event_type": "order_placed",
+                            "side": "sell",
+                            "quote_amount": 100.0,
+                            "price": 2.0,
+                            "level_index": 2,
+                            "trade_pnl": 0.0,
+                            "total_equity": 1100.0,
+                            "trade_number": 1
+                        }
+                    ]
+                },
+            )
+            assert sell_resp.status_code == 200
+
+            events = client.get("/api/v1/trade-events?bot_id=met3-bot")
+            assert events.status_code == 200
+            sell_event = next(ev for ev in events.json() if ev["event_type"] == "order_placed" and ev["side"] == "sell")
+
+            detail = client.get(f"/api/v1/trade-events/{sell_event['id']}")
+            assert detail.status_code == 200
+            body = detail.json()
+            assert body["linked_order"] is not None
+            assert body["linked_order"]["side"] == "buy"
+            assert body["linked_order"]["level_index"] == 1
+
+    def test_trade_event_detail_includes_realized_pair_pnl(self, client):
+        _seed_agent(client, "met4-agent")
+        _seed_bot(client, "met4-bot", agent_id="met4-agent")
+        from manager.app.main import SessionLocal as TestSessionLocal
+
+        with patch("manager.app.events.SessionLocal", TestSessionLocal), patch("manager.app.database.SessionLocal", TestSessionLocal):
+            buy_resp = client.post(
+                "/api/v1/agents/met4-agent/bots/met4-bot/metrics",
+                json={
+                    "snapshot": {
+                        "bot_id": "met4-bot",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "price": 1.0,
+                        "quote_balance": 900.0,
+                        "base_balance": 100.0,
+                        "base_value_in_quote": 100.0,
+                        "total_equity_quote": 1000.0,
+                        "realized_pnl_quote": 0.0,
+                        "unrealized_pnl_quote": 0.0,
+                        "skimmed_quote": 0.0,
+                        "trade_count": 1,
+                        "status": "running"
+                    },
+                    "trade_events": [
+                        {
+                            "event_type": "order_filled",
+                            "side": "buy",
+                            "quote_amount": 100.0,
+                            "price": 1.0,
+                            "level_index": 1,
+                            "trade_pnl": 0.0,
+                            "total_equity": 1000.0,
+                            "trade_number": 1
+                        }
+                    ]
+                },
+            )
+            assert buy_resp.status_code == 200
+
+            sell_resp = client.post(
+                "/api/v1/agents/met4-agent/bots/met4-bot/metrics",
+                json={
+                    "snapshot": {
+                        "bot_id": "met4-bot",
+                        "timestamp": "2026-01-01T00:00:01Z",
+                        "price": 1.2,
+                        "quote_balance": 1020.0,
+                        "base_balance": 0.0,
+                        "base_value_in_quote": 0.0,
+                        "total_equity_quote": 1020.0,
+                        "realized_pnl_quote": 19.45,
+                        "unrealized_pnl_quote": 0.0,
+                        "skimmed_quote": 0.0,
+                        "trade_count": 2,
+                        "status": "running"
+                    },
+                    "trade_events": [
+                        {
+                            "event_type": "order_filled",
+                            "side": "sell",
+                            "quote_amount": 100.0,
+                            "price": 1.2,
+                            "level_index": 2,
+                            "trade_pnl": 19.45,
+                            "total_equity": 1020.0,
+                            "trade_number": 2
+                        }
+                    ]
+                },
+            )
+            assert sell_resp.status_code == 200
+
+            events = client.get("/api/v1/trade-events?bot_id=met4-bot")
+            assert events.status_code == 200
+            sell_event = next(ev for ev in events.json() if ev["event_type"] == "order_filled" and ev["side"] == "sell")
+
+            detail = client.get(f"/api/v1/trade-events/{sell_event['id']}")
+            assert detail.status_code == 200
+            body = detail.json()
+            assert body["pair_metrics"] is not None
+            assert body["pair_metrics"]["quantity_base"] == pytest.approx(100.0)
+            assert body["pair_metrics"]["gross_profit_quote"] == pytest.approx(20.0)
+            assert body["pair_metrics"]["total_fees_quote"] == pytest.approx(0.55)
+            assert body["pair_metrics"]["realized_pnl_quote"] == pytest.approx(19.45)
+            assert body["pair_metrics"]["fee_rate"] == pytest.approx(0.0025)
+
+    def test_order_fill_updates_existing_order_line_by_order_id(self, client):
+        _seed_agent(client, "met5-agent")
+        _seed_bot(client, "met5-bot", agent_id="met5-agent")
+        from manager.app.main import SessionLocal as TestSessionLocal
+
+        with patch("manager.app.events.SessionLocal", TestSessionLocal), patch("manager.app.database.SessionLocal", TestSessionLocal):
+            placed_resp = client.post(
+                "/api/v1/agents/met5-agent/bots/met5-bot/metrics",
+                json={
+                    "snapshot": {
+                        "bot_id": "met5-bot",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "price": 1.0,
+                        "quote_balance": 900.0,
+                        "base_balance": 100.0,
+                        "base_value_in_quote": 100.0,
+                        "total_equity_quote": 1000.0,
+                        "realized_pnl_quote": 0.0,
+                        "unrealized_pnl_quote": 0.0,
+                        "skimmed_quote": 0.0,
+                        "trade_count": 1,
+                        "status": "running"
+                    },
+                    "trade_events": [
+                        {
+                            "event_type": "order_placed",
+                            "order_id": "ord-abc",
+                            "side": "buy",
+                            "quote_amount": 100.0,
+                            "price": 1.0,
+                            "level_index": 1,
+                            "trade_pnl": 0.0,
+                            "total_equity": 1000.0,
+                            "trade_number": 1
+                        }
+                    ]
+                },
+            )
+            assert placed_resp.status_code == 200
+
+            filled_resp = client.post(
+                "/api/v1/agents/met5-agent/bots/met5-bot/metrics",
+                json={
+                    "snapshot": {
+                        "bot_id": "met5-bot",
+                        "timestamp": "2026-01-01T00:00:01Z",
+                        "price": 1.1,
+                        "quote_balance": 910.0,
+                        "base_balance": 90.0,
+                        "base_value_in_quote": 99.0,
+                        "total_equity_quote": 1009.0,
+                        "realized_pnl_quote": 9.0,
+                        "unrealized_pnl_quote": 0.0,
+                        "skimmed_quote": 0.0,
+                        "trade_count": 2,
+                        "status": "running"
+                    },
+                    "trade_events": [
+                        {
+                            "event_type": "order_filled",
+                            "order_id": "ord-abc",
+                            "side": "buy",
+                            "quote_amount": 100.0,
+                            "price": 1.0,
+                            "level_index": 1,
+                            "trade_pnl": 9.0,
+                            "total_equity": 1009.0,
+                            "trade_number": 2
+                        }
+                    ]
+                },
+            )
+            assert filled_resp.status_code == 200
+
+            events = client.get("/api/v1/trade-events?bot_id=met5-bot")
+            assert events.status_code == 200
+            rows = events.json()
+            assert len(rows) == 1
+            assert rows[0]["event_type"] == "order_filled"
+            assert rows[0]["order_id"] == "ord-abc"
 
 
 # ── Backtest ─────────────────────────────────────────────────────────

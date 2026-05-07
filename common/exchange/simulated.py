@@ -21,6 +21,7 @@ import json
 import logging
 import threading
 import time
+import uuid
 
 import requests as _requests
 import websocket as _ws
@@ -287,6 +288,8 @@ class SimulatedExchange(Exchange):
         """
         self._pending_orders[order_id] = {
             "order_id": order_id,
+            "exchange_order_id": str(uuid.uuid4()),
+            "status": "new",
             "side": side,
             "quote_amount": quote_amount,
             "limit_price": limit_price,
@@ -327,6 +330,8 @@ class SimulatedExchange(Exchange):
 
             filled.append({
                 "order_id": order_id,
+                "exchange_order_id": order.get("exchange_order_id"),
+                "status": "filled",
                 "side": side,
                 "quote_amount": order["quote_amount"],
                 "fill_price": limit_price,

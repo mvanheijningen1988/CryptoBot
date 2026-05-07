@@ -5,8 +5,8 @@ single pending buy order at the level directly below the current
 price.  Order lifecycle is two-phase:
 
 1. **on_price** detects which open orders have been hit and returns
-   ``TradeSignal`` objects, but does **not** yet place consequent
-   orders (sells after buys, cascade buys).
+    ``TradeSignal`` objects, but does **not** yet place consequent
+    orders.
 2. **confirm_fill** is called by the runner *after the exchange has
    executed the trade*.  Only then are the follow-up orders placed.
 
@@ -100,8 +100,8 @@ class StaticGridStrategy(Strategy):
         """Place follow-up orders after the exchange confirms a fill.
 
         Called by the runner for each signal that was successfully
-        executed on the exchange.  This is where sells, cascade buys,
-        and bookkeeping happen — never speculatively.
+        executed on the exchange. This is where follow-up orders and
+        bookkeeping happen — never speculatively.
 
         :param signal: The confirmed trade signal (must have level_index set).
         :param state: Current strategy state to mutate.
@@ -116,10 +116,6 @@ class StaticGridStrategy(Strategy):
             sell_idx = idx + 1
             if sell_idx < len(self.levels) and sell_idx not in state.open_orders:
                 state.open_orders[sell_idx] = "sell"
-            # Cascade: place a buy one level below (if not already filled)
-            next_buy = idx - 1
-            if next_buy >= 0 and next_buy not in state.open_orders and next_buy not in state.filled_buys:
-                state.open_orders[next_buy] = "buy"
         else:  # sell confirmed
             buy_origin = idx - 1
             if buy_origin >= 0:

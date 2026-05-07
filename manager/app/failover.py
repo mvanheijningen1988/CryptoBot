@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_TIMEOUT_SECONDS = int(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "30"))
 FAILOVER_INTERVAL_SECONDS = int(os.getenv("FAILOVER_INTERVAL_SECONDS", "10"))
+ACTIVE_BOT_STATUSES = ("initializing", "running")
 
 
 def detach_bots_for_agent(agent: Agent, db: Session) -> None:
@@ -34,7 +35,7 @@ def detach_bots_for_agent(agent: Agent, db: Session) -> None:
     """
     bots = db.query(Bot).filter(Bot.assigned_agent_id == agent.id).all()
     for bot in bots:
-        if bot.status == "running":
+        if bot.status in ACTIVE_BOT_STATUSES:
             post_json(f"{agent.base_url}/agent/bots/{bot.id}/stop", {"bot_id": bot.id})
         bot.status = "stopped"
         bot.assigned_agent_id = None
@@ -67,7 +68,7 @@ def try_failover_for_bot(bot: Bot, failed_agent: Agent, db: Session) -> bool:
 
     counts = dict(
         db.query(Bot.assigned_agent_id, func.count(Bot.id))
-        .filter(Bot.status == "running", Bot.assigned_agent_id.isnot(None))
+        .filter(Bot.status.in_(ACTIVE_BOT_STATUSES), Bot.assigned_agent_id.isnot(None))
         .group_by(Bot.assigned_agent_id)
         .all()
     )
@@ -166,7 +167,7 @@ def _try_reassign_bot(bot: Bot, db: Session) -> bool:
         return False
 
     bot.assigned_agent_id = target.id
-    bot.status = "running"
+    bot.status = "initializing"
     bot.updated_at = datetime.now(UTC)
     add_agent_event(
         target.id,
@@ -182,7 +183,7 @@ def verify_running_bots(db: Session) -> None:
     If the agent doesn't have the bot, the bot is set to 'queued' and
     the manager will attempt to move it to another available agent.
     """
-    running_bots = db.query(Bot).filter(Bot.status == "running").all()
+    running_bots = db.query(Bot).filter(Bot.status.in_(ACTIVE_BOT_STATUSES)).all()
     for bot in running_bots:
         if not bot.assigned_agent_id:
             # Running but no agent — queue it
@@ -273,7 +274,7 @@ def failover_maintenance_loop(session_factory: sessionmaker) -> None:
             for offline_agent in offline_agents:
                 running_bots = (
                     db.query(Bot)
-                    .filter(Bot.assigned_agent_id == offline_agent.id, Bot.status == "running")
+                    .filter(Bot.assigned_agent_id == offline_agent.id, Bot.status.in_(ACTIVE_BOT_STATUSES))
                     .all()
                 )
                 for bot in running_bots:

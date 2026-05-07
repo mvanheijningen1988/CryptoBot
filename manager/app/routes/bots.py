@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -37,6 +38,52 @@ DbSession = Annotated[Session, Depends(get_db)]
 _BOT_NOT_FOUND = "Bot not found"
 _AGENT_NOT_FOUND = "Agent not found"
 _AGENT_NOT_APPROVED = "Agent is not approved"
+_ACTIVE_BOT_STATUSES = ("initializing", "running")
+
+
+def _resolve_fee_rate_for_bot(bot: Bot) -> float:
+    """Return the configured fee rate for the bot mode."""
+    if bot.mode == "simulation":
+        return float(os.getenv("SIM_FEE_RATE", "0.0025"))
+    return float(os.getenv("LIVE_FEE_RATE", os.getenv("SIM_FEE_RATE", "0.0025")))
+
+
+def _build_pair_metrics(bot: Bot, event: object, linked: object | None) -> dict | None:
+    """Compute realized grid PnL for a linked buy/sell fill pair."""
+    if linked is None:
+        return None
+    if getattr(event, "event_type", None) != "order_filled" or getattr(linked, "event_type", None) != "order_filled":
+        return None
+
+    if getattr(event, "side", None) == "buy" and getattr(linked, "side", None) == "sell":
+        buy_event, sell_event = event, linked
+    elif getattr(event, "side", None) == "sell" and getattr(linked, "side", None) == "buy":
+        buy_event, sell_event = linked, event
+    else:
+        return None
+
+    buy_price = float(getattr(buy_event, "price", 0) or 0)
+    sell_price = float(getattr(sell_event, "price", 0) or 0)
+    quote_spent = float(getattr(buy_event, "quote_amount", 0) or 0)
+    if buy_price <= 0 or sell_price <= 0 or quote_spent <= 0:
+        return None
+
+    fee_rate = _resolve_fee_rate_for_bot(bot)
+    quantity_base = quote_spent / buy_price
+    gross_profit = (sell_price - buy_price) * quantity_base
+    quote_received_before_fees = quote_spent * (sell_price / buy_price)
+    buy_fee = quote_spent * fee_rate
+    sell_fee = quote_received_before_fees * fee_rate
+    total_fees = buy_fee + sell_fee
+    realized_pnl = gross_profit - total_fees
+
+    return {
+        "quantity_base": round(quantity_base, 8),
+        "gross_profit_quote": round(gross_profit, 6),
+        "total_fees_quote": round(total_fees, 6),
+        "realized_pnl_quote": round(realized_pnl, 6),
+        "fee_rate": fee_rate,
+    }
 
 
 def _select_least_loaded_agent(db: Session) -> Agent | None:
@@ -62,7 +109,7 @@ def _select_least_loaded_agent(db: Session) -> Agent | None:
     # Count running bots per agent
     counts = dict(
         db.query(Bot.assigned_agent_id, func.count(Bot.id))
-        .filter(Bot.status == "running", Bot.assigned_agent_id.isnot(None))
+        .filter(Bot.status.in_(_ACTIVE_BOT_STATUSES), Bot.assigned_agent_id.isnot(None))
         .group_by(Bot.assigned_agent_id)
         .all()
     )
@@ -199,10 +246,10 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
         raise HTTPException(status_code=502, detail=f"Agent start failed: {message}")
 
     bot.assigned_agent_id = agent_id
-    bot.status = "running"
+    bot.status = "initializing"
     bot.updated_at = datetime.now(UTC)
     db.commit()
-    logger.info("Bot %s now running on agent %s", bot.id, agent_id)
+    logger.info("Bot %s now initializing on agent %s", bot.id, agent_id)
     return {"ok": True}
 
 
@@ -264,8 +311,8 @@ def delete_bot(bot_id: str, db: DbSession) -> dict:
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
         raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
-    if bot.status == "running":
-        raise HTTPException(status_code=409, detail="Cannot delete a running bot – stop it first")
+    if bot.status in _ACTIVE_BOT_STATUSES:
+        raise HTTPException(status_code=409, detail="Cannot delete an active bot – stop it first")
     # Clean up trade events and equity history
     delete_trade_events_for_bot(bot_id)
     from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
@@ -300,7 +347,7 @@ def update_budget(bot_id: str, payload: UpdateBudgetRequest, db: DbSession) -> d
     bot.config_json = json.dumps(cfg)
     bot.updated_at = datetime.now(UTC)
 
-    if bot.assigned_agent_id and bot.status == "running":
+    if bot.assigned_agent_id and bot.status in _ACTIVE_BOT_STATUSES:
         agent_url = resolve_agent_url(bot.assigned_agent_id, db)
         ok, message = post_json(
             f"{agent_url}/agent/bots/{bot.id}/budget",
@@ -366,6 +413,7 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                 event_type=ev.get("event_type", "trade"),
                 level_index=ev.get("level_index"),
                 market=market,
+                order_id=ev.get("order_id"),
             )
     else:
         # Fallback: infer from trade_count change
@@ -388,6 +436,7 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                     market=market,
                 )
 
+    bot.status = snapshot.status
     bot.latest_metrics_json = snapshot.model_dump_json()
     if payload.runner_state:
         bot.state_json = payload.runner_state.model_dump_json()
@@ -414,11 +463,13 @@ def get_single_trade_event(event_id: str) -> dict:
             raise HTTPException(status_code=404, detail="Trade event not found")
         result = {
             "id": ev.id,
+            "order_id": ev.order_id,
             "timestamp": ev.timestamp.isoformat() + "Z" if ev.timestamp else "",
             "bot_id": ev.bot_id,
             "bot_name": ev.bot_name,
             "market": ev.market or "",
             "event_type": ev.event_type,
+            "order_id": ev.order_id,
             "side": ev.side,
             "quote_amount": ev.quote_amount,
             "price": ev.price,
@@ -428,12 +479,14 @@ def get_single_trade_event(event_id: str) -> dict:
             "level_index": ev.level_index,
             "linked_order_id": ev.linked_order_id,
             "linked_order": None,
+            "pair_metrics": None,
         }
         if ev.linked_order_id:
             linked = db.query(TE).filter(TE.id == ev.linked_order_id).first()
             if linked:
                 result["linked_order"] = {
                     "id": linked.id,
+                    "order_id": linked.order_id,
                     "timestamp": linked.timestamp.isoformat() + "Z" if linked.timestamp else "",
                     "event_type": linked.event_type,
                     "side": linked.side,
@@ -442,6 +495,9 @@ def get_single_trade_event(event_id: str) -> dict:
                     "trade_pnl": linked.trade_pnl,
                     "level_index": linked.level_index,
                 }
+                bot = db.query(Bot).filter(Bot.id == ev.bot_id).first()
+                if bot:
+                    result["pair_metrics"] = _build_pair_metrics(bot, ev, linked)
         return result
     finally:
         db.close()

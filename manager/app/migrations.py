@@ -119,6 +119,7 @@ def _ensure_trade_events_table(engine: Engine) -> None:
                 conn.exec_driver_sql(
                     """CREATE TABLE trade_events (
                         id VARCHAR(64) PRIMARY KEY,
+                        order_id VARCHAR(128),
                         bot_id VARCHAR(64) NOT NULL,
                         bot_name VARCHAR(128) NOT NULL,
                         timestamp DATETIME,
@@ -134,6 +135,9 @@ def _ensure_trade_events_table(engine: Engine) -> None:
                 )
                 conn.exec_driver_sql(
                     "CREATE INDEX idx_trade_events_bot_id ON trade_events(bot_id)"
+                )
+                conn.exec_driver_sql(
+                    "CREATE INDEX idx_trade_events_order_id ON trade_events(order_id)"
                 )
                 conn.commit()
         except Exception:
@@ -156,11 +160,18 @@ def _ensure_agent_uptime_column(engine: Engine) -> None:
 
 
 def _add_trade_event_columns(engine: Engine) -> None:
-    """Add ``market`` and ``linked_order_id`` columns to trade_events if missing."""
+    """Add evolving trade_events columns if missing."""
     with engine.connect() as conn:
         try:
             rows = conn.exec_driver_sql("PRAGMA table_info(trade_events)").fetchall()
             columns = {row[1] for row in rows}
+            if "order_id" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE trade_events ADD COLUMN order_id VARCHAR(128) DEFAULT NULL"
+                )
+                conn.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS idx_trade_events_order_id ON trade_events(order_id)"
+                )
             if "market" not in columns:
                 conn.exec_driver_sql(
                     "ALTER TABLE trade_events ADD COLUMN market VARCHAR(32) DEFAULT ''"

@@ -46,57 +46,93 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
                     price: float, trade_pnl: float, total_equity: float,
                     trade_number: int, event_type: str = "trade",
                     level_index: int | None = None,
-                    market: str = "") -> str:
+                    market: str = "",
+                    order_id: str | None = None) -> str:
     """Persist a trade-related event to the database. Returns the event ID.
 
-    For order_filled sell events, automatically links to the most recent
-    order_filled buy at the same level for the same bot.
+    Buy/sell events are linked per grid step:
+    * buy fill at level ``N`` links to sell at level ``N + 1``
+    * sell event at level ``N`` links to buy fill at level ``N - 1``
+
+    This keeps order details navigable even when events are persisted
+    in a different order (e.g. sell placement logged before buy fill).
     """
     event_id = str(uuid.uuid4())
     linked_order_id = None
 
-    # Link sell fills to their buy counterpart at the same level
-    if event_type == "order_filled" and side == "sell" and level_index is not None:
-        db = SessionLocal()
-        try:
+    db = SessionLocal()
+    try:
+        row = None
+        if order_id:
+            row = (
+                db.query(TradeEvent)
+                .filter(TradeEvent.bot_id == bot_id, TradeEvent.order_id == order_id)
+                .first()
+            )
+
+        if row is None:
+            row = TradeEvent(id=event_id, bot_id=bot_id, bot_name=bot_name)
+            db.add(row)
+        else:
+            event_id = row.id
+
+        row.order_id = order_id
+        row.bot_name = bot_name
+        row.timestamp = datetime.now(UTC)
+        row.event_type = event_type
+        row.side = side
+        row.quote_amount = quote_amount
+        row.price = price
+        row.trade_pnl = trade_pnl
+        row.total_equity = total_equity
+        row.trade_number = trade_number
+        row.level_index = level_index
+        row.market = market
+
+        # Link sell events to the originating confirmed buy fill (N-1).
+        if side == "sell" and level_index is not None and level_index > 0:
+            linked_buy_level = level_index - 1
             buy = (
                 db.query(TradeEvent)
                 .filter(
                     TradeEvent.bot_id == bot_id,
                     TradeEvent.event_type == "order_filled",
                     TradeEvent.side == "buy",
-                    TradeEvent.level_index == level_index,
+                    TradeEvent.level_index == linked_buy_level,
+                    TradeEvent.linked_order_id.is_(None),
                 )
                 .order_by(TradeEvent.timestamp.desc())
                 .first()
             )
             if buy:
                 linked_order_id = buy.id
-                # Back-link the buy to this sell
-                buy.linked_order_id = event_id
-                db.commit()
-        finally:
-            db.close()
+                if not buy.linked_order_id:
+                    buy.linked_order_id = event_id
 
-    row = TradeEvent(
-        id=event_id,
-        bot_id=bot_id,
-        bot_name=bot_name,
-        timestamp=datetime.now(UTC),
-        event_type=event_type,
-        side=side,
-        quote_amount=quote_amount,
-        price=price,
-        trade_pnl=trade_pnl,
-        total_equity=total_equity,
-        trade_number=trade_number,
-        level_index=level_index,
-        market=market,
-        linked_order_id=linked_order_id,
-    )
-    db = SessionLocal()
-    try:
-        db.add(row)
+        # Link buy fills to the sell event one level above (N+1), even if
+        # that sell placement was persisted before this buy fill.
+        if event_type == "order_filled" and side == "buy" and level_index is not None:
+            linked_sell_level = level_index + 1
+            sell = (
+                db.query(TradeEvent)
+                .filter(
+                    TradeEvent.bot_id == bot_id,
+                    TradeEvent.side == "sell",
+                    TradeEvent.level_index == linked_sell_level,
+                    TradeEvent.event_type.in_(["order_placed", "order_filled"]),
+                    TradeEvent.linked_order_id.is_(None),
+                )
+                .order_by(TradeEvent.timestamp.desc())
+                .first()
+            )
+            if sell:
+                linked_order_id = sell.id
+                if not sell.linked_order_id:
+                    sell.linked_order_id = event_id
+
+        if linked_order_id is not None:
+            row.linked_order_id = linked_order_id
+
         db.commit()
     finally:
         db.close()
@@ -114,6 +150,7 @@ def get_trade_events(bot_id: str | None = None, limit: int = 200) -> list[dict]:
         return [
             {
                 "id": r.id,
+                "order_id": r.order_id,
                 "timestamp": r.timestamp.isoformat() + "Z" if r.timestamp else "",
                 "bot_id": r.bot_id,
                 "bot_name": r.bot_name,

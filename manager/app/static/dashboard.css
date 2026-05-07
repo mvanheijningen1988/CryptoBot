@@ -164,9 +164,19 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 .pnl-positive { color: var(--good); }
 .pnl-negative { color: var(--bad); }
 .status-badge { padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; }
+.status-initializing { background: rgba(249, 115, 22, 0.16); color: #fb923c; }
 .status-running { background: rgba(16,185,129,0.15); color: #10b981; }
 .status-queued  { background: rgba(251,191,36,0.15); color: #fbbf24; }
 .status-stopped { background: rgba(100,116,139,0.15); color: #94a3b8; }
+.bot-name-cell { display: inline-flex; align-items: center; gap: 8px; }
+.bot-grid-warning {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fbbf24;
+  font-size: 0.95rem;
+  line-height: 1;
+}
 .bot-actions { display: flex; gap: 8px; align-items: center; }
 
 /* ── Custom action dropdown ── */
