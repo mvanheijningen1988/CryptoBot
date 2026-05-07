@@ -24,6 +24,7 @@ from common import (
     SimulatedExchange,
     StrategyState,
     StaticGridStrategy,
+    TradeSignal,
 )
 
 
@@ -195,6 +196,10 @@ class BotRunner:
             if not restored:
                 self.strategy.on_price(self.price, self.state)
                 self.initial_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+            elif not self.state.open_orders:
+                # Restored but no open orders (e.g. crash during fill) — reinitialize grid
+                self.state.level_index = None
+                self.strategy.on_price(self.price, self.state)
 
             label = "resumed" if restored else "started"
             self.log_store.add("bot_start", f"Bot {self.bot_id} {label}.", bot_id=self.bot_id, category="system")

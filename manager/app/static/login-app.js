@@ -40,6 +40,11 @@ function applyLang() {
   document.getElementById("lbl_confirm_pw").textContent = t("lbl_confirm_password");
   document.getElementById("btn_change_pw").textContent = t("btn_change_pw");
 
+  // Password rules text
+  document.querySelectorAll("[data-i18n-rule]").forEach((el) => {
+    el.textContent = t(el.dataset.i18nRule);
+  });
+
   // Highlight the active language link
   document.querySelectorAll(".lang-switch a").forEach((a) => {
     a.classList.toggle("active", a.dataset.lang === lang);
@@ -86,6 +91,12 @@ document.getElementById("btn_login").onclick = async () => {
     authToken = data.token;
     localStorage.setItem("cryptobot_token", data.token);
 
+    // Store session timing for auto-logout
+    if (data.session_max_seconds) {
+      localStorage.setItem("cryptobot_session_start", String(Date.now()));
+      localStorage.setItem("cryptobot_session_max", String(data.session_max_seconds));
+    }
+
     // Adopt server-side locale if it differs from the current selection
     if (data.user.locale && data.user.locale !== lang) {
       lang = data.user.locale;
@@ -114,6 +125,28 @@ document.getElementById("password").addEventListener("keydown", (e) => {
 // Password change overlay
 // ──────────────────────────────────────────────────────────────
 
+/** Validate password rules and update the checklist UI. Returns true if all pass. */
+function validatePasswordRules(pw) {
+  const rules = [
+    { id: "pw_rule_length", pass: pw.length >= 8 },
+    { id: "pw_rule_digit", pass: /\d/.test(pw) },
+    { id: "pw_rule_special", pass: /[^A-Za-z0-9]/.test(pw) },
+  ];
+  let allPass = true;
+  for (const r of rules) {
+    const li = document.getElementById(r.id);
+    if (!li) continue;
+    li.className = r.pass ? "rule-pass" : "rule-fail";
+    li.querySelector(".pw-rule-icon").textContent = r.pass ? "✓" : "✗";
+    if (!r.pass) allPass = false;
+  }
+  return allPass;
+}
+
+document.getElementById("new_password").addEventListener("input", (e) => {
+  validatePasswordRules(e.target.value);
+});
+
 document.getElementById("btn_change_pw").onclick = async () => {
   const newPw = document.getElementById("new_password").value;
   const confirmPw = document.getElementById("confirm_password").value;
@@ -121,8 +154,8 @@ document.getElementById("btn_change_pw").onclick = async () => {
   errEl.style.display = "none";
 
   // Client-side validation
-  if (newPw.length < 6) {
-    errEl.textContent = t("pw_too_short");
+  if (!validatePasswordRules(newPw)) {
+    errEl.textContent = t("pw_requirements_not_met");
     errEl.style.display = "block";
     return;
   }

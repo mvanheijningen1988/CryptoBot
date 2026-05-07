@@ -192,7 +192,14 @@ def verify_running_bots(db: Session) -> None:
             continue
 
         agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
-        if not agent or agent.status != "online":
+        if not agent:
+            # Agent record gone (e.g. re-registered with new ID) — queue the bot
+            bot.status = "queued"
+            bot.assigned_agent_id = None
+            bot.updated_at = datetime.now(UTC)
+            logger.warning("Bot %s assigned to unknown agent %s — queued", bot.name, bot.assigned_agent_id)
+            continue
+        if agent.status != "online":
             continue  # Handled by heartbeat failover logic
 
         # Ask the agent if it actually has this bot running

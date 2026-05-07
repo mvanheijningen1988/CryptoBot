@@ -174,9 +174,23 @@ function currentConfig() {
  * @param {number} [digits=6]       - Maximum fraction digits.
  * @returns {string} Formatted number or "-" for invalid input.
  */
-function formatNumber(value, digits = 6) {
+function formatNumber(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
-  return Number(value).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits });
+  const n = Number(value);
+  // Show all significant decimals — no rounding
+  const s = n.toString();
+  return s;
+}
+
+/** Format seconds into human-readable uptime string. */
+function formatUptime(seconds) {
+  if (!seconds || seconds <= 0) return "-";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
 }
 
 /**
@@ -331,11 +345,11 @@ async function loadBalances() {
       api(`/api/v1/balance?symbol=${encodeURIComponent(quoteSym)}`),
     ]);
     const availQuote = Number(quoteData.available);
-    baseEl.textContent = `${Number(baseData.available).toFixed(8)} ${baseSym}`;
-    quoteEl.textContent = `${availQuote.toFixed(2)} ${quoteSym}`;
+    baseEl.textContent = `${formatNumber(Number(baseData.available))} ${baseSym}`;
+    quoteEl.textContent = `${formatNumber(availQuote)} ${quoteSym}`;
 
     // Pre-fill budget with full available balance
-    document.getElementById("quote_budget").value = availQuote.toFixed(2);
+    document.getElementById("quote_budget").value = formatNumber(availQuote);
   } catch (err) {
     console.error("Failed to load balances", err);
     quoteEl.textContent = "n/a";
@@ -474,10 +488,10 @@ function openGridPreviewModal(r, skipShowModal = false) {
 
   summary.innerHTML = `
     <div class="${cls}"><strong>${txt}</strong></div>
-    <div>${t("grid_step_size")}: ${r.step_size.toFixed(6)} (${r.step_percent.toFixed(3)}%)</div>
-    <div>${t("grid_profit_per_trade")} ${r.profit_per_trade_quote_min.toFixed(6)}, ${t("grid_avg")} ${r.profit_per_trade_quote_avg.toFixed(6)}, ${t("grid_max")} ${r.profit_per_trade_quote_max.toFixed(6)}</div>
+    <div>${t("grid_step_size")}: ${formatNumber(r.step_size)} (${formatNumber(r.step_percent)}%)</div>
+    <div>${t("grid_profit_per_trade")} ${formatNumber(r.profit_per_trade_quote_min)}, ${t("grid_avg")} ${formatNumber(r.profit_per_trade_quote_avg)}, ${t("grid_max")} ${formatNumber(r.profit_per_trade_quote_max)}</div>
     <div>${t("grid_profitable_paths")}: ${r.profitable_trades}/${r.total_trade_paths}</div>
-    <div>${t("grid_used_fee")}: ${(r.fee_rate * 100).toFixed(3)}%</div>
+    <div>${t("grid_used_fee")}: ${formatNumber(r.fee_rate * 100)}%</div>
   `;
 
   tbody.innerHTML = "";
@@ -485,7 +499,7 @@ function openGridPreviewModal(r, skipShowModal = false) {
     const row = document.createElement("tr");
     const pcls = tr.profitable ? "grid-trade-ok" : "grid-trade-bad";
     const icon = tr.profitable ? "✓" : "✗";
-    row.innerHTML = `<td>${tr.level}</td><td>${tr.buy_price.toFixed(2)}</td><td>${tr.sell_price.toFixed(2)}</td><td>${tr.order_size_quote.toFixed(2)}</td><td class="${pcls}">${tr.net_profit.toFixed(6)}</td><td class="${pcls}">${icon}</td>`;
+    row.innerHTML = `<td>${tr.level}</td><td>${formatNumber(tr.buy_price)}</td><td>${formatNumber(tr.sell_price)}</td><td>${formatNumber(tr.order_size_quote)}</td><td class="${pcls}">${formatNumber(tr.net_profit)}</td><td class="${pcls}">${icon}</td>`;
     tbody.appendChild(row);
   }
 
@@ -517,25 +531,25 @@ function syncBudgetAndOrderSize(source) {
     _budgetCalcSource = "budget";
     const budget = Number(budgetEl.value) || 0;
     if (budget > 0 && levels > 0) {
-      sizeEl.value = (budget / levels).toFixed(2);
+      sizeEl.value = formatNumber(budget / levels);
     }
   } else if (source === "size") {
     _budgetCalcSource = "size";
     const size = Number(sizeEl.value) || 0;
     if (size > 0 && levels > 0) {
-      budgetEl.value = (size * levels).toFixed(2);
+      budgetEl.value = formatNumber(size * levels);
     }
   } else if (source === "levels") {
     // Recalculate based on whichever the user last touched
     if (_budgetCalcSource === "budget") {
       const budget = Number(budgetEl.value) || 0;
       if (budget > 0 && levels > 0) {
-        sizeEl.value = (budget / levels).toFixed(2);
+        sizeEl.value = formatNumber(budget / levels);
       }
     } else if (_budgetCalcSource === "size") {
       const size = Number(sizeEl.value) || 0;
       if (size > 0 && levels > 0) {
-        budgetEl.value = (size * levels).toFixed(2);
+        budgetEl.value = formatNumber(size * levels);
       }
     }
   }
@@ -556,14 +570,13 @@ document.getElementById("levels").addEventListener("input", () => syncBudgetAndO
 async function loadBots() {
   const bots = await api("/api/v1/bots");
   const body = document.getElementById("bots_body");
-  body.innerHTML = "";
   const isViewer = currentUser?.role === "viewer";
 
-  // Populate the equity chart bot selector
+  // Populate the equity chart bot selector (preserve selection)
   const chartSelect = document.getElementById("equity_chart_bot");
   if (chartSelect) {
     const currentVal = chartSelect.value;
-    chartSelect.innerHTML = `<option value="">${t("lbl_select_bot")}</option>`;
+    chartSelect.innerHTML = `<option value="">${t("lbl_select_bot")}</option><option value="__total__"${currentVal === "__total__" ? " selected" : ""}>${t("lbl_total_all_bots")}</option>`;
     for (const bot of bots) {
       const opt = document.createElement("option");
       opt.value = bot.id;
@@ -573,21 +586,23 @@ async function loadBots() {
     }
   }
 
+  // Track which bot IDs are in the new data
+  const newBotIds = new Set(bots.map((b) => b.id));
+
+  // Remove rows for bots that no longer exist
+  body.querySelectorAll("tr[data-bot-id]").forEach((tr) => {
+    if (!newBotIds.has(tr.dataset.botId)) tr.remove();
+  });
+
   for (const bot of bots) {
     const m = bot.latest_metrics || {};
     const pnl = Number(m.unrealized_pnl_quote || 0);
     const trades = Number(m.trade_count || 0);
     const lastPrice = Number(m.price || 0);
     const market = bot.config?.market || "-";
-    const tr = document.createElement("tr");
 
-    // Viewers see no action dropdown
-    const acts = isViewer
-      ? "<td>-</td>"
-      : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
-
-    const modeLabel = bot.mode === "live" ? "🟢 Live" : "🔵 Sim";
-    const priceStr = lastPrice > 0 ? formatNumber(lastPrice, 6) : "-";
+    const modeLabel = bot.mode === "live" ? "Live" : "Sim";
+    const priceStr = lastPrice > 0 ? formatNumber(lastPrice) : "-";
     let statusHtml;
     if (bot.status === "running") {
       statusHtml = `<span class="status-badge status-running">${t("lbl_running")}</span>`;
@@ -599,63 +614,89 @@ async function loadBots() {
       statusHtml = bot.status;
     }
     const agentLabel = bot.assigned_agent_id ? bot.assigned_agent_id.slice(0, 8) : "-";
-    tr.innerHTML = `<td>${bot.name}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${bot.assigned_agent_id || ''}">${agentLabel}</td><td>${priceStr}</td><td>${Number(m.total_equity_quote || 0).toFixed(2)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${pnl.toFixed(2)}</td><td>${trades}</td>${acts}`;
-    body.appendChild(tr);
-  }
 
-  // Wire up custom action dropdowns (only present for non-viewers)
-  if (!isViewer) {
-    // Toggle menu open/close
-    body.querySelectorAll(".action-toggle").forEach((btn) => {
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        const menu = btn.nextElementSibling;
-        // Close all other open menus first
-        document.querySelectorAll(".action-menu.open").forEach((m) => {
-          if (m !== menu) m.classList.remove("open");
-        });
-        menu.classList.toggle("open");
-      };
-    });
-    // Handle action clicks
-    body.querySelectorAll(".action-menu button").forEach((btn) => {
-      btn.onclick = async (e) => {
-        e.stopPropagation();
-        const action = btn.dataset.action;
-        const dropdown = btn.closest(".action-dropdown");
-        const botId = dropdown.dataset.botId;
-        const bot = bots.find((x) => x.id === botId);
-        // Close the menu
-        btn.closest(".action-menu").classList.remove("open");
-        if (!action || !bot) return;
-
-        try {
-          if (action === "start") {
-            await api(`/api/v1/bots/${botId}/start`, { method: "POST", body: JSON.stringify({}) });
-          } else if (action === "stop") {
-            await api(`/api/v1/bots/${botId}/stop`, { method: "POST" });
-          } else if (action === "chart") {
-            openTradeChart(bot);
-            return;
-          } else if (action === "orders") {
-            openOrdersModal(bot);
-            return;
-          } else if (action === "delete") {
-            if (!await showConfirm(t("confirm_delete_bot"))) return;
-            await api(`/api/v1/bots/${botId}`, { method: "DELETE" });
-          }
-        } catch (err) {
-          showToast(t("btn_" + action) || action, err.message || String(err), "warn", 5000);
-        }
-        await loadBots();
-      };
-    });
-    // Close menus on outside click
-    document.addEventListener("click", () => {
-      document.querySelectorAll(".action-menu.open").forEach((m) => m.classList.remove("open"));
-    });
+    let tr = body.querySelector(`tr[data-bot-id="${bot.id}"]`);
+    if (tr) {
+      // Update existing row cells in-place (skip actions column to preserve dropdown state)
+      const cells = tr.children;
+      cells[0].textContent = bot.name;
+      cells[1].textContent = market;
+      cells[2].innerHTML = modeLabel;
+      cells[3].innerHTML = statusHtml;
+      cells[4].textContent = agentLabel;
+      cells[4].title = bot.assigned_agent_id || "";
+      cells[5].textContent = priceStr;
+      cells[6].textContent = formatNumber(m.total_equity_quote || 0);
+      cells[7].className = pnl >= 0 ? "pnl-positive" : "pnl-negative";
+      cells[7].textContent = formatNumber(pnl);
+      cells[8].textContent = trades;
+      // cells[9] is the actions dropdown — leave it untouched
+    } else {
+      // Create new row
+      tr = document.createElement("tr");
+      tr.dataset.botId = bot.id;
+      const acts = isViewer
+        ? "<td>-</td>"
+        : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
+      tr.innerHTML = `<td>${bot.name}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${bot.assigned_agent_id || ''}">${agentLabel}</td><td>${priceStr}</td><td>${formatNumber(m.total_equity_quote || 0)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${formatNumber(pnl)}</td><td>${trades}</td>${acts}`;
+      body.appendChild(tr);
+      _wireUpBotRow(tr, bots);
+    }
   }
 }
+
+/** Wire action dropdown handlers for a single bot row. */
+function _wireUpBotRow(tr, bots) {
+  const isViewer = currentUser?.role === "viewer";
+  if (isViewer) return;
+
+  tr.querySelectorAll(".action-toggle").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const menu = btn.nextElementSibling;
+      document.querySelectorAll(".action-menu.open").forEach((m) => {
+        if (m !== menu) m.classList.remove("open");
+      });
+      menu.classList.toggle("open");
+    };
+  });
+  tr.querySelectorAll(".action-menu button").forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.action;
+      const dropdown = btn.closest(".action-dropdown");
+      const botId = dropdown.dataset.botId;
+      const bot = bots.find((x) => x.id === botId);
+      btn.closest(".action-menu").classList.remove("open");
+      if (!action || !bot) return;
+
+      try {
+        if (action === "start") {
+          await api(`/api/v1/bots/${botId}/start`, { method: "POST", body: JSON.stringify({}) });
+        } else if (action === "stop") {
+          await api(`/api/v1/bots/${botId}/stop`, { method: "POST" });
+        } else if (action === "chart") {
+          openTradeChart(bot);
+          return;
+        } else if (action === "orders") {
+          openOrdersModal(bot);
+          return;
+        } else if (action === "delete") {
+          if (!await showConfirm(t("confirm_delete_bot"))) return;
+          await api(`/api/v1/bots/${botId}`, { method: "DELETE" });
+        }
+      } catch (err) {
+        showToast(t("btn_" + action) || action, err.message || String(err), "warn", 5000);
+      }
+      await loadBots();
+    };
+  });
+}
+
+// Close menus on outside click (register once)
+document.addEventListener("click", () => {
+  document.querySelectorAll(".action-menu.open").forEach((m) => m.classList.remove("open"));
+});
 
 // ──────────────────────────────────────────────────────────────
 // Toast notifications
@@ -697,11 +738,31 @@ function showToast(title, message, type = "info", duration = 5000, onclick = nul
 async function loadAgents() {
   const agents = await api("/api/v1/agents");
   const body = document.getElementById("agents_body");
-  body.innerHTML = "";
   const isViewer = currentUser?.role === "viewer";
 
+  // Remember which agents are expanded
+  const expandedIds = new Set();
+  body.querySelectorAll("tr.expandable-row").forEach((tr) => {
+    const detailRow = tr.nextElementSibling;
+    if (detailRow && detailRow.classList.contains("bot-detail-row") && detailRow.style.display !== "none") {
+      expandedIds.add(tr.dataset.agentId);
+    }
+  });
+
+  // Track new agent IDs
+  const newAgentIds = new Set(agents.map((a) => a.id));
+
+  // Remove rows for agents no longer present
+  body.querySelectorAll("tr[data-agent-id]").forEach((tr) => {
+    if (!newAgentIds.has(tr.dataset.agentId)) {
+      // Also remove the detail row if present
+      const next = tr.nextElementSibling;
+      if (next && next.classList.contains("bot-detail-row")) next.remove();
+      tr.remove();
+    }
+  });
+
   for (const agent of agents) {
-    const tr = document.createElement("tr");
     const isDead = agent.status === "offline";
     const isRunning = agent.status === "online" && agent.approval_status === "approved" && (agent.bot_count ?? 0) > 0;
     const isStopped = agent.status === "stopped";
@@ -717,21 +778,17 @@ async function loadAgents() {
     } else {
       displayStatus = agent.status;
     }
-    let ah = "<span>-</span>";
 
+    let ah = "<span>-</span>";
     if (isDead) {
-      // Dead agents can only be removed
       if (!isViewer)
         ah = `<div class="bot-actions"><button class="icon-btn icon-remove" data-agent-remove="${agent.id}" title="${t("btn_remove")}"><span class="remove-x">✕</span></button></div>`;
     } else if (isViewer) {
-      // Viewers can only open logs for approved agents
       if (agent.approval_status === "approved")
         ah = `<button class="icon-btn" data-logs="${agent.id}" title="${t("btn_open_logs")}">📋</button>`;
     } else if (agent.approval_status === "pending") {
       ah = `<div class="bot-actions"><button class="btn-approve" data-approve="${agent.id}">${t("btn_approve")}</button><button class="btn-reject" data-reject="${agent.id}">${t("btn_reject")}</button></div>`;
     } else if (agent.approval_status === "approved") {
-      const isOnline = agent.status === "online" || agent.status === "stopped";
-      const isStopped = agent.status === "stopped";
       ah = `<div class="bot-actions">`
         + (isStopped ? `<button class="icon-btn icon-start" data-agent-start="${agent.id}" title="${t("btn_start")}">▶</button>`
                      : `<button class="icon-btn icon-stop" data-agent-stop="${agent.id}" title="${t("btn_stop")}">⏹</button>`)
@@ -745,51 +802,107 @@ async function loadAgents() {
     const botCount = agent.bot_count ?? 0;
     const version = agent.version || "-";
     const address = agent.base_url ? agent.base_url.replace(/^https?:\/\//, "") : "-";
+    const uptime = formatUptime(agent.uptime_seconds || 0);
     const heartbeat = agent.last_heartbeat ? timeAgo(new Date(agent.last_heartbeat)) : "-";
     const heartbeatAttr = agent.last_heartbeat ? ` data-heartbeat="${agent.last_heartbeat}"` : "";
     const hasExpand = botCount > 0;
-    const classes = [hasExpand ? "expandable-row" : "", isDead ? "dead-row" : ""].filter(Boolean).join(" ");
-    tr.className = classes;
-    tr.innerHTML = `<td>${hasExpand ? '<span class="expand-arrow">▶</span> ' : ""}${agent.id}</td><td>${address}</td><td>${displayStatus}</td><td>${botCount}</td><td>${version}</td><td${heartbeatAttr}>${heartbeat}</td><td>${agent.approval_status}</td><td>${ah}</td>`;
-    body.appendChild(tr);
 
-    if (hasExpand) {
-      const detailTr = document.createElement("tr");
-      detailTr.className = "bot-detail-row";
-      detailTr.style.display = "none";
-      const colSpan = 8;
-      let botTable = `<table class="sub-table"><thead><tr><th>${t("th_name")}</th><th>${t("th_market")}</th><th>${t("th_status")}</th><th>${t("th_trades")}</th><th>${t("th_quote_balance")}</th><th>${t("th_base_balance")}</th></tr></thead><tbody>`;
-      for (const bot of agent.bots) {
-        botTable += `<tr><td>${bot.name}</td><td>${bot.market}</td><td>${bot.status}</td><td>${bot.trade_count}</td><td>${formatNumber(bot.quote_balance, 2)}</td><td>${formatNumber(bot.base_balance, 6)}</td></tr>`;
+    let tr = body.querySelector(`tr[data-agent-id="${agent.id}"]`);
+    let detailTr = tr ? tr.nextElementSibling : null;
+    if (detailTr && !detailTr.classList.contains("bot-detail-row")) detailTr = null;
+
+    const wasExpanded = expandedIds.has(agent.id);
+
+    if (tr) {
+      // Update cells in-place
+      const classes = [hasExpand ? "expandable-row" : "", isDead ? "dead-row" : ""].filter(Boolean).join(" ");
+      tr.className = classes;
+      const cells = tr.children;
+      cells[0].innerHTML = `${hasExpand ? '<span class="expand-arrow">' + (wasExpanded ? '▼' : '▶') + '</span> ' : ""}${agent.id}`;
+      cells[1].textContent = address;
+      cells[2].innerHTML = displayStatus;
+      cells[3].textContent = botCount;
+      cells[4].textContent = version;
+      cells[5].textContent = uptime;
+      cells[6].textContent = heartbeat;
+      if (agent.last_heartbeat) cells[6].dataset.heartbeat = agent.last_heartbeat;
+      cells[7].textContent = agent.approval_status;
+      cells[8].innerHTML = ah;
+
+      // Update detail row content
+      if (hasExpand) {
+        if (!detailTr) {
+          detailTr = document.createElement("tr");
+          detailTr.className = "bot-detail-row";
+          detailTr.style.display = wasExpanded ? "table-row" : "none";
+          tr.after(detailTr);
+        }
+        detailTr.innerHTML = `<td colspan="9">${_buildAgentBotTable(agent)}</td>`;
+        detailTr.style.display = wasExpanded ? "table-row" : "none";
+      } else if (detailTr) {
+        detailTr.remove();
+        detailTr = null;
       }
-      botTable += `</tbody></table>`;
-      detailTr.innerHTML = `<td colspan="${colSpan}">${botTable}</td>`;
-      body.appendChild(detailTr);
+    } else {
+      // Create new row
+      tr = document.createElement("tr");
+      tr.dataset.agentId = agent.id;
+      const classes = [hasExpand ? "expandable-row" : "", isDead ? "dead-row" : ""].filter(Boolean).join(" ");
+      tr.className = classes;
+      tr.innerHTML = `<td>${hasExpand ? '<span class="expand-arrow">▶</span> ' : ""}${agent.id}</td><td>${address}</td><td>${displayStatus}</td><td>${botCount}</td><td>${version}</td><td>${uptime}</td><td${heartbeatAttr}>${heartbeat}</td><td>${agent.approval_status}</td><td>${ah}</td>`;
+      body.appendChild(tr);
 
+      if (hasExpand) {
+        detailTr = document.createElement("tr");
+        detailTr.className = "bot-detail-row";
+        detailTr.style.display = "none";
+        detailTr.innerHTML = `<td colspan="9">${_buildAgentBotTable(agent)}</td>`;
+        body.appendChild(detailTr);
+      }
+    }
+
+    // Wire expand toggle
+    if (hasExpand && tr && detailTr) {
+      const finalDetailTr = detailTr;
       tr.onclick = (e) => {
         if (e.target.closest("button")) return;
         const arrow = tr.querySelector(".expand-arrow");
-        const open = detailTr.style.display !== "none";
-        detailTr.style.display = open ? "none" : "table-row";
+        const open = finalDetailTr.style.display !== "none";
+        finalDetailTr.style.display = open ? "none" : "table-row";
         arrow.textContent = open ? "▶" : "▼";
       };
     }
-  }
 
-  // Wire up all action buttons
-  body.querySelectorAll("button[data-approve]").forEach((b) => {
+    // Wire action buttons for this row
+    _wireUpAgentRow(tr, agent);
+  }
+}
+
+/** Build the sub-table HTML for bots under an agent. */
+function _buildAgentBotTable(agent) {
+  let html = `<table class="sub-table"><thead><tr><th>${t("th_name")}</th><th>${t("th_market")}</th><th>${t("th_status")}</th><th>${t("th_trades")}</th><th>${t("th_quote_balance")}</th><th>${t("th_base_balance")}</th></tr></thead><tbody>`;
+  for (const bot of agent.bots) {
+    html += `<tr><td>${bot.name}</td><td>${bot.market}</td><td>${bot.status}</td><td>${bot.trade_count}</td><td>${formatNumber(bot.quote_balance)}</td><td>${formatNumber(bot.base_balance)}</td></tr>`;
+  }
+  html += `</tbody></table>`;
+  return html;
+}
+
+/** Wire action button handlers for a single agent row. */
+function _wireUpAgentRow(tr, agent) {
+  tr.querySelectorAll("button[data-approve]").forEach((b) => {
     b.onclick = async () => { await api(`/api/v1/agents/${b.dataset.approve}/approve`, { method: "POST" }); await loadAgents(); await loadEvents(); };
   });
-  body.querySelectorAll("button[data-reject]").forEach((b) => {
+  tr.querySelectorAll("button[data-reject]").forEach((b) => {
     b.onclick = async () => { await api(`/api/v1/agents/${b.dataset.reject}/reject`, { method: "POST" }); await loadAgents(); await loadEvents(); };
   });
-  body.querySelectorAll("button[data-agent-start]").forEach((b) => {
+  tr.querySelectorAll("button[data-agent-start]").forEach((b) => {
     b.onclick = async () => { await api(`/api/v1/agents/${b.dataset.agentStart}/approve`, { method: "POST" }); await loadAgents(); await loadEvents(); };
   });
-  body.querySelectorAll("button[data-agent-stop]").forEach((b) => {
+  tr.querySelectorAll("button[data-agent-stop]").forEach((b) => {
     b.onclick = async () => { await api(`/api/v1/agents/${b.dataset.agentStop}/stop`, { method: "POST" }); await loadAgents(); await loadEvents(); };
   });
-  body.querySelectorAll("button[data-agent-remove]").forEach((b) => {
+  tr.querySelectorAll("button[data-agent-remove]").forEach((b) => {
     b.onclick = async () => {
       if (!await showConfirm(t("confirm_remove_agent"))) return;
       await api(`/api/v1/agents/${b.dataset.agentRemove}`, { method: "DELETE" });
@@ -797,7 +910,7 @@ async function loadAgents() {
       await loadAgents(); await loadEvents();
     };
   });
-  body.querySelectorAll("button[data-logs]").forEach((b) => {
+  tr.querySelectorAll("button[data-logs]").forEach((b) => {
     b.onclick = async () => { selectedAgentId = b.dataset.logs; openLogsModal(selectedAgentId); await loadAgentLogs(); };
   });
 }
@@ -897,6 +1010,8 @@ async function loadEvents() {
 
 /** Set of trade event IDs already shown as toasts. */
 const seenTradeIds = new Set();
+/** Whether the initial trade-event load has completed (suppress toasts on first load). */
+let _tradeEventsInitialised = false;
 
 /**
  * Fetch trade events from the API and render them into the
@@ -907,6 +1022,12 @@ async function loadTradeEvents() {
   const list = document.getElementById("trade_events_list");
   if (!list) return;
   list.innerHTML = "";
+
+  // On first load, seed the seen-set without firing toasts
+  if (!_tradeEventsInitialised) {
+    for (const ev of events) seenTradeIds.add(ev.id);
+    _tradeEventsInitialised = true;
+  }
 
   for (const ev of events) {
     const evType = ev.event_type || "trade";
@@ -919,15 +1040,15 @@ async function loadTradeEvents() {
       if (isPlacement) {
         showToast(
           t("toast_order_placed"),
-          `${ev.bot_name} ${ev.side.toUpperCase()} ${ev.quote_amount.toFixed(2)} @ ${ev.price.toFixed(2)}`,
+          `${ev.bot_name} ${ev.side.toUpperCase()} ${formatNumber(ev.quote_amount)} @ ${formatNumber(ev.price)}`,
           "info",
           3000,
         );
       } else {
-        const pnlStr = ev.trade_pnl >= 0 ? `+${ev.trade_pnl.toFixed(4)}` : ev.trade_pnl.toFixed(4);
+        const pnlStr = ev.trade_pnl >= 0 ? `+${formatNumber(ev.trade_pnl)}` : formatNumber(ev.trade_pnl);
         showToast(
           isFill ? t("toast_order_filled") : `${t("toast_trade")} #${ev.trade_number}`,
-          `${ev.bot_name} ${ev.side.toUpperCase()} @ ${ev.price.toFixed(2)} | PnL: ${pnlStr}`,
+          `${ev.bot_name} ${ev.side.toUpperCase()} @ ${formatNumber(ev.price)} | PnL: ${pnlStr}`,
           ev.trade_pnl >= 0 ? "info" : "warn",
           4000,
         );
@@ -941,14 +1062,14 @@ async function loadTradeEvents() {
     if (isPlacement) {
       const levelStr = ev.level_index != null ? ` L${ev.level_index}` : "";
       item.className = `event-item ${sideClass} event-placement`;
-      item.innerHTML = `<div><strong>📋 ${ev.side.toUpperCase()}</strong>${levelStr} ${ev.bot_name} — ${ev.quote_amount.toFixed(2)} @ ${ev.price.toFixed(2)}</div><div class="event-time">${timeLabel}</div>`;
+      item.innerHTML = `<div><strong>📋 ${ev.side.toUpperCase()}</strong>${levelStr} ${ev.bot_name} — ${formatNumber(ev.quote_amount)} @ ${formatNumber(ev.price)}</div><div class="event-time">${timeLabel}</div>`;
     } else {
       const pnlClass = ev.trade_pnl >= 0 ? "trade-pnl-pos" : "trade-pnl-neg";
-      const pnlStr = ev.trade_pnl >= 0 ? `+${ev.trade_pnl.toFixed(4)}` : ev.trade_pnl.toFixed(4);
+      const pnlStr = ev.trade_pnl >= 0 ? `+${formatNumber(ev.trade_pnl)}` : formatNumber(ev.trade_pnl);
       const icon = isFill ? "✅" : "🔄";
       const label = isFill ? t("toast_order_filled") : `#${ev.trade_number}`;
       item.className = `event-item ${sideClass}`;
-      item.innerHTML = `<div><strong>${icon} ${label}</strong> ${ev.bot_name} ${ev.side.toUpperCase()} @ ${ev.price.toFixed(2)} &mdash; <span class="${pnlClass}">${pnlStr}</span> | ${t("lbl_equity")}: ${ev.total_equity.toFixed(2)}</div><div class="event-time">${timeLabel}</div>`;
+      item.innerHTML = `<div><strong>${icon} ${label}</strong> ${ev.bot_name} ${ev.side.toUpperCase()} @ ${formatNumber(ev.price)} &mdash; <span class="${pnlClass}">${pnlStr}</span> | ${t("lbl_equity")}: ${formatNumber(ev.total_equity)}</div><div class="event-time">${timeLabel}</div>`;
     }
     list.appendChild(item);
   }
@@ -975,8 +1096,9 @@ document.querySelectorAll(".ntab-btn").forEach((btn) => {
  * Draw a line chart of equity over time on the canvas element.
  *
  * @param {Array<{t: string, v: number}>} data - Equity data-points.
+ * @param {number} [startingBudget] - Base budget to draw as reference line.
  */
-function drawEquityChart(data) {
+function drawEquityChart(data, startingBudget) {
   const canvas = document.getElementById("equity_chart");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -1005,8 +1127,12 @@ function drawEquityChart(data) {
   const plotH = H - pad.top - pad.bottom;
 
   const values = data.map((d) => d.v);
-  const minV = Math.min(...values);
-  const maxV = Math.max(...values);
+  let minV = Math.min(...values);
+  let maxV = Math.max(...values);
+  if (startingBudget != null) {
+    minV = Math.min(minV, startingBudget);
+    maxV = Math.max(maxV, startingBudget);
+  }
   const range = maxV - minV || 1;
 
   // Map data to pixel coordinates
@@ -1031,7 +1157,7 @@ function drawEquityChart(data) {
   for (let i = 0; i <= 4; i++) {
     const v = minV + (range * i) / 4;
     const y = pad.top + plotH - (i / 4) * plotH;
-    ctx.fillText(v.toFixed(2), pad.left - 6, y + 4);
+    ctx.fillText(formatNumber(v), pad.left - 6, y + 4);
     if (i > 0 && i < 4) {
       ctx.save();
       ctx.strokeStyle = "#1e293b";
@@ -1073,6 +1199,20 @@ function drawEquityChart(data) {
   ctx.lineWidth = 2;
   ctx.stroke();
 
+  // Draw starting budget reference line (green dotted)
+  if (startingBudget != null) {
+    const budgetY = pad.top + plotH - ((startingBudget - minV) / range) * plotH;
+    ctx.save();
+    ctx.strokeStyle = "#22c55e";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pad.left, budgetY);
+    ctx.lineTo(pad.left + plotW, budgetY);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // Draw dots at endpoints
   for (const p of [points[0], points[points.length - 1]]) {
     ctx.beginPath();
@@ -1085,20 +1225,136 @@ function drawEquityChart(data) {
 /** Fetch equity history for the selected bot and redraw the chart. */
 async function loadEquityChart() {
   const botId = document.getElementById("equity_chart_bot")?.value;
+  const infoDiv = document.getElementById("equity_chart_info");
   if (!botId) {
     drawEquityChart([]);
+    if (infoDiv) infoDiv.style.display = "none";
     return;
   }
   try {
-    const data = await api(`/api/v1/bots/${botId}/equity-history`);
-    drawEquityChart(data);
+    const url = botId === "__total__"
+      ? "/api/v1/bots/equity-history/total"
+      : `/api/v1/bots/${botId}/equity-history`;
+    const resp = await api(url);
+    const points = resp.points || [];
+    const startingBudget = resp.starting_budget || 0;
+    const pnl = resp.pnl || 0;
+    const totalEquity = resp.total_equity || 0;
+
+    // Update info labels above chart
+    if (infoDiv) {
+      infoDiv.style.display = "";
+      document.getElementById("equity_info_budget").textContent = formatNumber(startingBudget);
+      const pnlEl = document.getElementById("equity_info_pnl");
+      pnlEl.textContent = (pnl >= 0 ? "+" : "") + formatNumber(pnl);
+      pnlEl.className = pnl >= 0 ? "pnl-positive" : "pnl-negative";
+      document.getElementById("equity_info_total").textContent = formatNumber(totalEquity);
+    }
+
+    drawEquityChart(points, startingBudget);
   } catch {
     drawEquityChart([]);
+    if (infoDiv) infoDiv.style.display = "none";
   }
 }
 
 // Redraw chart when the bot selector changes
 document.getElementById("equity_chart_bot")?.addEventListener("change", loadEquityChart);
+
+// ──────────────────────────────────────────────────────────────
+// Orders overview table
+// ──────────────────────────────────────────────────────────────
+
+/** Load all order events into the Orders tab table. */
+async function loadOrders() {
+  const body = document.getElementById("orders_body");
+  if (!body) return;
+  try {
+    const events = await api("/api/v1/trade-events");
+    body.innerHTML = "";
+    for (const ev of events) {
+      const tr = document.createElement("tr");
+      tr.style.cursor = "pointer";
+      const ts = new Date(ev.timestamp).toLocaleString();
+      const typeClass = ev.event_type === "order_placed" ? "order-type-placed"
+        : ev.event_type === "order_filled" ? "order-type-filled"
+        : "order-type-cancelled";
+      const typeLabel = ev.event_type === "order_placed" ? `📋 ${t("lbl_placed")}`
+        : ev.event_type === "order_filled" ? `✅ ${t("lbl_filled")}`
+        : ev.event_type === "order_cancelled" ? `❌ ${t("lbl_cancelled")}`
+        : `🔄 ${t("toast_trade")}`;
+      const pnlStr = ev.trade_pnl !== 0 ? ((ev.trade_pnl >= 0 ? "+" : "") + formatNumber(ev.trade_pnl)) : "-";
+      const pnlClass = ev.trade_pnl > 0 ? "pnl-positive" : ev.trade_pnl < 0 ? "pnl-negative" : "";
+      const sideClass = ev.side === "buy" ? "order-buy" : ev.side === "sell" ? "order-sell" : "";
+      const marketLabel = ev.market || ev.bot_name || "-";
+      tr.innerHTML = `<td>${ts}</td><td>${marketLabel}</td><td class="${typeClass}">${typeLabel}</td><td class="${sideClass}">${ev.side.toUpperCase()}</td><td>${formatNumber(ev.price)}</td><td>${formatNumber(ev.quote_amount)}</td><td class="${pnlClass}">${pnlStr}</td>`;
+      tr.onclick = () => openOrderDetail(ev.id);
+      body.appendChild(tr);
+    }
+  } catch { /* ignore */ }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Order detail modal
+// ──────────────────────────────────────────────────────────────
+
+async function openOrderDetail(eventId) {
+  const modal = document.getElementById("order_detail_modal");
+  const content = document.getElementById("order_detail_content");
+  content.innerHTML = `<p>${t("loading")}</p>`;
+  modal.showModal();
+
+  try {
+    const ev = await api(`/api/v1/trade-events/${eventId}`);
+    const typeLabel = ev.event_type === "order_placed" ? `📋 ${t("lbl_placed")}`
+      : ev.event_type === "order_filled" ? `✅ ${t("lbl_filled")}`
+      : ev.event_type === "order_cancelled" ? `❌ ${t("lbl_cancelled")}`
+      : `🔄 ${t("toast_trade")}`;
+    const sideClass = ev.side === "buy" ? "order-buy" : "order-sell";
+    const pnlClass = ev.trade_pnl > 0 ? "pnl-positive" : ev.trade_pnl < 0 ? "pnl-negative" : "";
+    const pnlStr = ev.trade_pnl !== 0 ? ((ev.trade_pnl >= 0 ? "+" : "") + formatNumber(ev.trade_pnl)) : "-";
+
+    let html = `<div class="order-detail-grid">`;
+    html += `<div class="od-row"><span class="od-label">${t("th_type")}</span><span>${typeLabel}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("th_side")}</span><span class="${sideClass}">${ev.side.toUpperCase()}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("th_market")}</span><span>${ev.market || ev.bot_name || "-"}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(ev.price)}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("th_amount")}</span><span>${formatNumber(ev.quote_amount)}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("th_time")}</span><span>${new Date(ev.timestamp).toLocaleString()}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("lbl_pnl")}</span><span class="${pnlClass}">${pnlStr}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("lbl_equity")}</span><span>${formatNumber(ev.total_equity)}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("th_level")}</span><span>${ev.level_index != null ? ev.level_index : "-"}</span></div>`;
+    html += `</div>`;
+
+    // Linked order section
+    if (ev.linked_order) {
+      const lo = ev.linked_order;
+      const loSideClass = lo.side === "buy" ? "order-buy" : "order-sell";
+      const loTypeLabel = lo.event_type === "order_filled" ? `✅ ${t("lbl_filled")}` : lo.event_type;
+      const loPnlStr = lo.trade_pnl !== 0 ? ((lo.trade_pnl >= 0 ? "+" : "") + formatNumber(lo.trade_pnl)) : "-";
+      const linkedLabel = ev.side === "sell" ? t("lbl_linked_buy") : t("lbl_linked_sell");
+      html += `<h4 style="margin:14px 0 6px;">${linkedLabel}</h4>`;
+      html += `<div class="order-detail-grid">`;
+      html += `<div class="od-row"><span class="od-label">${t("th_type")}</span><span>${loTypeLabel}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("th_side")}</span><span class="${loSideClass}">${lo.side.toUpperCase()}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(lo.price)}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("th_amount")}</span><span>${formatNumber(lo.quote_amount)}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("th_time")}</span><span>${new Date(lo.timestamp).toLocaleString()}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("lbl_pnl")}</span><span>${loPnlStr}</span></div>`;
+      html += `</div>`;
+    } else {
+      html += `<p style="color:#94a3b8;margin-top:12px;font-size:0.9rem;">${t("lbl_no_linked_order")}</p>`;
+    }
+
+    content.innerHTML = html;
+  } catch (e) {
+    content.innerHTML = `<p style="color:#ef4444;">${e.message}</p>`;
+  }
+}
+
+document.getElementById("close_order_detail")?.addEventListener("click", () => {
+  document.getElementById("order_detail_modal").close();
+});
 
 // ──────────────────────────────────────────────────────────────
 // Trade levels chart (modal, per-bot)
@@ -1111,24 +1367,56 @@ document.getElementById("equity_chart_bot")?.addEventListener("change", loadEqui
 async function openOrdersModal(bot) {
   const modal = document.getElementById("orders_modal");
   document.getElementById("orders_title").textContent = `${t("orders_modal_title")} — ${bot.name}`;
-  const tbody = document.getElementById("orders_body");
-  tbody.innerHTML = `<tr><td colspan="4">${t("loading")}</td></tr>`;
+  const tbody = document.getElementById("modal_orders_body");
+  const gridBody = document.getElementById("grid_body");
+  tbody.innerHTML = `<tr><td colspan="5">${t("loading")}</td></tr>`;
+  gridBody.innerHTML = "";
   modal.showModal();
+
+  // Build full grid levels from config
+  const grid = bot.config?.grid || {};
+  const levels = [];
+  if (grid.lower_price && grid.upper_price && grid.levels > 1) {
+    const step = (grid.upper_price - grid.lower_price) / (grid.levels - 1);
+    for (let i = 0; i < grid.levels; i++) {
+      levels.push({ index: i, price: grid.lower_price + i * step });
+    }
+  }
+
   try {
     const data = await api(`/api/v1/bots/${bot.id}/open-orders`);
     const orders = data.orders || [];
     if (orders.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="4">${t("no_open_orders")}</td></tr>`;
-      return;
+      tbody.innerHTML = `<tr><td colspan="5">${t("no_open_orders")}</td></tr>`;
+    } else {
+      tbody.innerHTML = "";
+      for (const o of orders) {
+        const tr = document.createElement("tr");
+        const sideClass = o.side === "buy" ? "order-buy" : "order-sell";
+        const amt = formatNumber(o.quote_amount || 0);
+        const filled = formatNumber(o.filled_quote || 0);
+        tr.innerHTML = `<td>${o.level}</td><td>${formatNumber(o.price)}</td><td class="${sideClass}">${o.side.toUpperCase()}</td><td>${amt}</td><td>${filled}</td>`;
+        tbody.appendChild(tr);
+      }
     }
-    tbody.innerHTML = "";
-    for (const o of orders) {
+
+    // Build order lookup by level index
+    const orderMap = {};
+    for (const o of orders) orderMap[o.level] = o;
+
+    // Render full grid
+    for (const lv of levels) {
       const tr = document.createElement("tr");
-      const sideClass = o.side === "buy" ? "order-buy" : "order-sell";
-      const amt = Number(o.quote_amount || 0).toFixed(2);
-      const filled = Number(o.filled_quote || 0).toFixed(2);
-      tr.innerHTML = `<td>${o.level}</td><td>${o.price}</td><td class="${sideClass}">${o.side.toUpperCase()}</td><td>${amt}</td><td>${filled}</td>`;
-      tbody.appendChild(tr);
+      const order = orderMap[lv.index];
+      let statusHtml;
+      if (order) {
+        const cls = order.side === "buy" ? "order-buy" : "order-sell";
+        statusHtml = `<span class="${cls}">${order.side.toUpperCase()}</span>`;
+      } else {
+        statusHtml = `<span class="grid-idle">—</span>`;
+      }
+      tr.innerHTML = `<td>${lv.index}</td><td>${formatNumber(lv.price)}</td><td>${statusHtml}</td>`;
+      gridBody.appendChild(tr);
     }
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="5">${e.message}</td></tr>`;
@@ -1151,7 +1439,10 @@ async function openTradeChart(bot) {
 
   let history = [];
   let trades = [];
-  try { history = await api(`/api/v1/bots/${bot.id}/equity-history`); } catch {}
+  try {
+    const resp = await api(`/api/v1/bots/${bot.id}/equity-history`);
+    history = resp.points || [];
+  } catch {}
   try {
     const all = await api("/api/v1/trade-events");
     trades = all.filter((e) => e.bot_id === bot.id);
@@ -1240,7 +1531,7 @@ function drawTradeChart(history, trades, grid) {
   for (let i = 0; i <= 4; i++) {
     const v = minP + (rangeP * i) / 4;
     const y = pad.top + plotH - (i / 4) * plotH;
-    ctx.fillText(v.toFixed(4), pad.left - 6, y + 4);
+    ctx.fillText(formatNumber(v), pad.left - 6, y + 4);
   }
 
   // X-axis labels
@@ -1269,7 +1560,7 @@ function drawTradeChart(history, trades, grid) {
       // Label on right side
       ctx.fillStyle = "rgba(250,204,21,0.6)";
       ctx.textAlign = "left";
-      ctx.fillText(lvl.toFixed(4), pad.left + plotW + 2, y + 4);
+      ctx.fillText(formatNumber(lvl), pad.left + plotW + 2, y + 4);
     }
     ctx.restore();
   }
@@ -1319,7 +1610,7 @@ document.getElementById("trade_chart_canvas")?.addEventListener("mousemove", (e)
     const time = new Date(tr.timestamp).toLocaleString();
     const pnl = Number(tr.trade_pnl || 0);
     const pnlCls = pnl >= 0 ? "color:#22c55e" : "color:#ef4444";
-    tip.innerHTML = `<div><strong>#${tr.trade_number}</strong> @ ${Number(tr.price).toFixed(6)}</div><div>${time}</div><div style="${pnlCls}">PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(6)}</div><div>Equity: ${Number(tr.total_equity).toFixed(2)}</div>`;
+    tip.innerHTML = `<div><strong>#${tr.trade_number}</strong> @ ${formatNumber(tr.price)}</div><div>${time}</div><div style="${pnlCls}">PnL: ${pnl >= 0 ? "+" : ""}${formatNumber(pnl)}</div><div>Equity: ${formatNumber(tr.total_equity)}</div>`;
     tip.style.display = "block";
     tip.style.left = Math.min(hit.x + 12, canvas.clientWidth - 180) + "px";
     tip.style.top = (hit.y - 10) + "px";
@@ -1423,8 +1714,8 @@ document.getElementById("btn_suggest_range").onclick = async () => {
   btn.textContent = "…";
   try {
     const r = await api(`/api/v1/market/price-range?market=${encodeURIComponent(market)}&days=${days}`);
-    document.getElementById("lower_price").value = r.avg_low.toFixed(2);
-    document.getElementById("upper_price").value = r.avg_high.toFixed(2);
+    document.getElementById("lower_price").value = formatNumber(r.avg_low);
+    document.getElementById("upper_price").value = formatNumber(r.avg_high);
     syncBudgetAndOrderSize("levels");
   } catch (err) {
     showToast(t("grid_calc_error"), String(err.message || err), "warn", 4000);
@@ -1487,8 +1778,22 @@ document.querySelectorAll(".lang-flag").forEach((btn) => {
 
 document.getElementById("btn_logout").onclick = () => {
   localStorage.removeItem("cryptobot_token");
+  localStorage.removeItem("cryptobot_session_start");
+  localStorage.removeItem("cryptobot_session_max");
   globalThis.location.href = "/login";
 };
+
+/** Check if the session has expired and log out automatically. */
+function checkSessionExpiry() {
+  const start = Number(localStorage.getItem("cryptobot_session_start") || 0);
+  const max = Number(localStorage.getItem("cryptobot_session_max") || 0);
+  if (start && max && Date.now() > start + max * 1000) {
+    localStorage.removeItem("cryptobot_token");
+    localStorage.removeItem("cryptobot_session_start");
+    localStorage.removeItem("cryptobot_session_max");
+    globalThis.location.href = "/login";
+  }
+}
 
 // ──────────────────────────────────────────────────────────────
 // Initialisation
@@ -1497,6 +1802,9 @@ document.getElementById("btn_logout").onclick = () => {
 (async () => {
   // Redirect to login if there is no stored token
   if (!authToken) { globalThis.location.href = "/login"; return; }
+
+  // Check session expiry before doing anything else
+  checkSessionExpiry();
 
   // Validate the token and fetch the current user profile
   try {
@@ -1529,6 +1837,7 @@ document.getElementById("btn_logout").onclick = () => {
   await loadEvents();
   await loadTradeEvents();
   await loadEquityChart();
+  await loadOrders();
 })();
 
 // ──────────────────────────────────────────────────────────────
@@ -1536,7 +1845,7 @@ document.getElementById("btn_logout").onclick = () => {
 // ──────────────────────────────────────────────────────────────
 
 /** Refresh bots, agents, events, and trades every 5 seconds. */
-setInterval(async () => { await loadBots(); await loadAgents(); await loadEvents(); await loadTradeEvents(); await loadEquityChart(); if (logsModalOpen) await loadAgentLogs(); }, 5000);
+setInterval(async () => { checkSessionExpiry(); await loadBots(); await loadAgents(); await loadEvents(); await loadTradeEvents(); await loadEquityChart(); await loadOrders(); if (logsModalOpen) await loadAgentLogs(); }, 5000);
 
 /** Refresh market summary from REST every 60 seconds (WebSocket handles real-time). */
 setInterval(async () => { await loadMarketSummary(); }, 60000);

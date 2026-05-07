@@ -33,8 +33,9 @@
           <button id="open_create_bot" style="width:auto;padding:8px 20px;" data-i18n="btn_new_bot">+ New Bot</button>
         </div>
         <div class="dashboard-grid">
-          <section class="card">
+          <section class="card bots-card">
             <h2 data-i18n="bots_title">Bots</h2>
+            <div class="bots-table-wrap">
             <table>
               <thead>
                 <tr>
@@ -52,14 +53,34 @@
               </thead>
               <tbody id="bots_body"></tbody>
             </table>
+            </div>
           </section>
+        </div>
+        <div style="margin-top:12px">
           <section class="card notification-card">
             <h2 data-i18n="notifications_title">Notifications</h2>
             <div class="notification-tabs">
               <button class="ntab-btn active" data-ntab="trade_events_list" data-i18n="ntab_trades">Trades</button>
+              <button class="ntab-btn" data-ntab="orders_list" data-i18n="ntab_orders">Orders</button>
               <button class="ntab-btn" data-ntab="events_list" data-i18n="ntab_agents">Agents</button>
             </div>
             <div id="trade_events_list" class="events-list ntab-pane active"></div>
+            <div id="orders_list" class="ntab-pane">
+              <table class="orders-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th_time">Time</th>
+                    <th data-i18n="th_market">Market</th>
+                    <th data-i18n="th_type">Type</th>
+                    <th data-i18n="th_side">Side</th>
+                    <th data-i18n="th_price">Price</th>
+                    <th data-i18n="th_amount">Amount</th>
+                    <th data-i18n="lbl_pnl">PnL</th>
+                  </tr>
+                </thead>
+                <tbody id="orders_body"></tbody>
+              </table>
+            </div>
             <div id="events_list" class="events-list ntab-pane"></div>
           </section>
         </div>
@@ -70,6 +91,11 @@
               <select id="equity_chart_bot">
                 <option value="" data-i18n="lbl_select_bot">Select a bot…</option>
               </select>
+            </div>
+            <div id="equity_chart_info" class="chart-info" style="display:none;">
+              <span><strong data-i18n="lbl_starting_budget">Budget</strong>: <span id="equity_info_budget">-</span></span>
+              <span><strong data-i18n="lbl_pnl">PnL</strong>: <span id="equity_info_pnl">-</span></span>
+              <span><strong data-i18n="lbl_total">Total</strong>: <span id="equity_info_total">-</span></span>
             </div>
             <canvas id="equity_chart" width="800" height="220"></canvas>
           </section>
@@ -95,6 +121,7 @@
                 <th data-i18n="th_status">Status</th>
                 <th data-i18n="th_bots">Bots</th>
                 <th data-i18n="th_version">Version</th>
+                <th data-i18n="th_uptime">Uptime</th>
                 <th data-i18n="th_heartbeat">Last Heartbeat</th>
                 <th data-i18n="th_approval">Approval</th>
                 <th data-i18n="th_actions">Actions</th>
@@ -272,11 +299,12 @@
 
     <!-- Open orders modal -->
     <dialog id="orders_modal" class="modal-backdrop">
-      <div class="modal" style="width:min(500px,90vw);grid-template-rows:auto 1fr auto;">
+      <div class="modal" style="width:min(560px,90vw);grid-template-rows:auto 1fr auto;">
         <div class="modal-header">
           <h3 class="modal-title" id="orders_title" data-i18n="orders_modal_title">Open Orders</h3>
         </div>
-        <div class="modal-body" style="padding:10px 14px;">
+        <div class="modal-body" style="padding:10px 14px;max-height:70vh;overflow-y:auto;">
+          <h4 style="margin:0 0 6px" data-i18n="lbl_open_orders">Open Orders</h4>
           <table class="orders-table" style="width:100%;border-collapse:collapse;">
             <thead>
               <tr>
@@ -287,12 +315,40 @@
                 <th data-i18n="th_filled">Filled</th>
               </tr>
             </thead>
-            <tbody id="orders_body"></tbody>
+            <tbody id="modal_orders_body"></tbody>
+          </table>
+          <h4 style="margin:14px 0 6px" data-i18n="lbl_grid_levels">Grid Levels</h4>
+          <table class="orders-table" style="width:100%;border-collapse:collapse;">
+            <thead>
+              <tr>
+                <th data-i18n="th_level">Level</th>
+                <th data-i18n="th_price">Price</th>
+                <th data-i18n="th_grid_status">Status</th>
+              </tr>
+            </thead>
+            <tbody id="grid_body"></tbody>
           </table>
         </div>
         <div class="modal-footer">
           <div class="bot-actions">
             <button id="close_orders_modal" data-i18n="btn_close">Close</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- Order detail modal -->
+    <dialog id="order_detail_modal" class="modal-backdrop">
+      <div class="modal" style="width:min(480px,90vw);grid-template-rows:auto 1fr auto;">
+        <div class="modal-header">
+          <h3 class="modal-title" id="order_detail_title" data-i18n="order_detail_title">Order Details</h3>
+        </div>
+        <div class="modal-body" style="padding:14px;max-height:70vh;overflow-y:auto;">
+          <div id="order_detail_content"></div>
+        </div>
+        <div class="modal-footer">
+          <div class="bot-actions">
+            <button id="close_order_detail" data-i18n="btn_close">Close</button>
           </div>
         </div>
       </div>

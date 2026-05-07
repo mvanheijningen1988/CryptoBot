@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from manager.app.database import Base
@@ -35,6 +35,7 @@ class Agent(Base):
     approval_status: Mapped[str] = mapped_column(String(32), default="pending")
     capacity: Mapped[int] = mapped_column(Integer, default=5)
     version: Mapped[str] = mapped_column(String(32), default="")
+    uptime_seconds: Mapped[int] = mapped_column(Integer, default=0)
     last_heartbeat: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
@@ -53,3 +54,23 @@ class Bot(Base):
     state_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class TradeEvent(Base):
+    """Persisted record of an order lifecycle event (placed, filled, cancelled)."""
+    __tablename__ = "trade_events"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    bot_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    bot_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    quote_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    price: Mapped[float] = mapped_column(Float, default=0.0)
+    trade_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    total_equity: Mapped[float] = mapped_column(Float, default=0.0)
+    trade_number: Mapped[int] = mapped_column(Integer, default=0)
+    level_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    market: Mapped[str] = mapped_column(String(32), default="")
+    linked_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

@@ -212,12 +212,12 @@ class TestChangePassword:
         _, _, header = _seed_admin(client)
         r = client.post(
             "/api/v1/auth/change-password",
-            json={"new_password": "newpass123"},  # NOSONAR
+            json={"new_password": "newpass1!"},  # NOSONAR
             headers=header,
         )
         assert r.status_code == 200
         # Verify new password works
-        r2 = client.post("/api/v1/auth/login", json={"username": "admin", "password": "newpass123"})  # NOSONAR
+        r2 = client.post("/api/v1/auth/login", json={"username": "admin", "password": "newpass1!"})  # NOSONAR
         assert r2.status_code == 200
 
     def test_short_password_rejected(self, client):
@@ -225,6 +225,24 @@ class TestChangePassword:
         r = client.post(
             "/api/v1/auth/change-password",
             json={"new_password": "ab"},  # NOSONAR
+            headers=header,
+        )
+        assert r.status_code == 400
+
+    def test_no_digit_rejected(self, client):
+        _, _, header = _seed_admin(client)
+        r = client.post(
+            "/api/v1/auth/change-password",
+            json={"new_password": "abcdefgh!"},  # NOSONAR
+            headers=header,
+        )
+        assert r.status_code == 400
+
+    def test_no_special_char_rejected(self, client):
+        _, _, header = _seed_admin(client)
+        r = client.post(
+            "/api/v1/auth/change-password",
+            json={"new_password": "abcdefg1"},  # NOSONAR
             headers=header,
         )
         assert r.status_code == 400
@@ -239,7 +257,7 @@ class TestChangePassword:
         assert r.status_code == 400
 
     def test_unauthenticated_rejected(self, client):
-        r = client.post("/api/v1/auth/change-password", json={"new_password": "newpass123"})  # NOSONAR
+        r = client.post("/api/v1/auth/change-password", json={"new_password": "newpass1!"})  # NOSONAR
         assert r.status_code == 401
 
 

@@ -25,7 +25,7 @@ from manager.app.models import User
 # app can start without explicit configuration (tokens won't survive restarts).
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-production-" + uuid.uuid4().hex)
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_HOURS = 24
+JWT_EXPIRE_HOURS = int(os.getenv("SESSION_MAX_HOURS", "24"))
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 

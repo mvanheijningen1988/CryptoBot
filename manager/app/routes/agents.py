@@ -89,6 +89,7 @@ def heartbeat(agent_id: str, payload: AgentHeartbeatRequest, db: DbSession) -> d
     agent.last_heartbeat = datetime.now(UTC)
     if payload.version:
         agent.version = payload.version
+    agent.uptime_seconds = payload.uptime_seconds
     if agent.approval_status == "approved" and agent.status != "stopped":
         agent.status = payload.status
     elif agent.approval_status == "rejected":
@@ -241,6 +242,7 @@ def list_agents(db: DbSession) -> list[dict]:
             "approval_status": a.approval_status,
             "capacity": a.capacity,
             "version": a.version,
+            "uptime_seconds": a.uptime_seconds,
             "last_heartbeat": a.last_heartbeat.isoformat() + "Z" if a.last_heartbeat else None,
             "bot_count": len(bots_by_agent.get(a.id, [])),
             "bots": bots_by_agent.get(a.id, []),

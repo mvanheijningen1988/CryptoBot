@@ -23,6 +23,7 @@ class AgentHeartbeatRequest(BaseModel):
 
     status: str = "online"
     version: str = ""
+    uptime_seconds: int = 0
 
 
 class BotCreateRequest(BaseModel):

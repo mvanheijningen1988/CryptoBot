@@ -29,6 +29,11 @@
         <p id="pw_msg">You must change your password before continuing.</p>
         <label id="lbl_new_pw" for="new_password">New password</label>
         <input id="new_password" type="password" autocomplete="new-password" />
+        <ul class="pw-rules" id="pw_rules">
+          <li id="pw_rule_length"><span class="pw-rule-icon">✗</span> <span data-i18n-rule="pw_rule_length">At least 8 characters</span></li>
+          <li id="pw_rule_digit"><span class="pw-rule-icon">✗</span> <span data-i18n-rule="pw_rule_digit">At least 1 digit</span></li>
+          <li id="pw_rule_special"><span class="pw-rule-icon">✗</span> <span data-i18n-rule="pw_rule_special">At least 1 special character</span></li>
+        </ul>
         <label id="lbl_confirm_pw" for="confirm_password">Confirm password</label>
         <input id="confirm_password" type="password" autocomplete="new-password" />
         <div id="pw_error" class="error"></div>

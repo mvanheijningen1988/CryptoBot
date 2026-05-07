@@ -84,3 +84,28 @@ button {
   width: min(400px, 92vw);
 }
 .pw-card p { color: #f59e0b; font-size: 0.85rem; margin: 0 0 12px; }
+
+/* ── Password-rules checklist ── */
+
+.pw-rules {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 4px;
+  font-size: 0.85rem;
+  color: #94a3b8;
+}
+.pw-rules li {
+  padding: 3px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pw-rules li .pw-rule-icon {
+  font-weight: 700;
+  width: 16px;
+  text-align: center;
+}
+.pw-rules li.rule-pass { color: #10b981; }
+.pw-rules li.rule-pass .pw-rule-icon { color: #10b981; }
+.pw-rules li.rule-fail { color: #94a3b8; }
+.pw-rules li.rule-fail .pw-rule-icon { color: #ef4444; }

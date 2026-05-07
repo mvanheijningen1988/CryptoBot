@@ -8,6 +8,7 @@ from fastapi.routing import APIRouter
 from sqlalchemy.orm import Session
 
 from manager.app.auth import (
+    JWT_EXPIRE_HOURS,
     create_token,
     get_current_user,
     hash_password,
@@ -16,10 +17,28 @@ from manager.app.auth import (
 from manager.app.database import get_db
 from manager.app.models import User
 
+import re
+
 router = APIRouter()
 
 DbSession = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+# Minimum password requirements
+_PW_MIN_LENGTH = 8
+_PW_DIGIT_RE = re.compile(r"\d")
+_PW_SPECIAL_RE = re.compile(r"[^A-Za-z0-9]")
+
+
+def _validate_password(pw: str) -> str | None:
+    """Return an error message if *pw* violates password rules, else None."""
+    if len(pw) < _PW_MIN_LENGTH:
+        return f"Password must be at least {_PW_MIN_LENGTH} characters"
+    if not _PW_DIGIT_RE.search(pw):
+        return "Password must contain at least 1 digit"
+    if not _PW_SPECIAL_RE.search(pw):
+        return "Password must contain at least 1 special character"
+    return None
 
 
 @router.post("/auth/login", responses={401: {"description": "Invalid credentials"}})
@@ -40,6 +59,7 @@ def auth_login(body: dict, db: DbSession) -> dict:
     token = create_token(user.id, user.role)
     return {
         "token": token,
+        "session_max_seconds": JWT_EXPIRE_HOURS * 3600,
         "user": {
             "id": user.id,
             "username": user.username,
@@ -76,11 +96,12 @@ def change_password(body: dict, user: CurrentUser, db: DbSession) -> dict:
     :param user: The authenticated user (injected).
     :param db: Database session (injected).
     :return: Dict with ok status.
-    :raises HTTPException: 400 if password is shorter than 6 characters.
+    :raises HTTPException: 400 if password does not meet requirements.
     """
     new_password = body.get("new_password", "")
-    if len(new_password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    error = _validate_password(new_password)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
     user.password_hash = hash_password(new_password)
     user.must_change_password = False
     db.commit()

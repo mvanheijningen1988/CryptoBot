@@ -47,7 +47,8 @@ class StaticGridStrategy(Strategy):
         **First call** — initialises the grid:
 
         * Sets ``level_index`` to the nearest grid level.
-        * Places a single pending buy at the level directly below.
+        * Places pending buy orders at **all** levels below the
+          current price so the grid is fully seeded from the start.
 
         **Subsequent calls** — scans open orders for fills:
 
@@ -66,12 +67,12 @@ class StaticGridStrategy(Strategy):
         signals: List[TradeSignal] = []
         current_idx = self._nearest_level_index(price)
 
-        # ── First tick: place one buy below current price ──────
+        # ── First tick: place buys at all levels with price below current ──
         if state.level_index is None:
             state.level_index = current_idx
-            buy_idx = current_idx - 1
-            if buy_idx >= 0:
-                state.open_orders[buy_idx] = "buy"
+            for idx in range(len(self.levels)):
+                if self.levels[idx] < price:
+                    state.open_orders[idx] = "buy"
             return signals
 
         # ── Detect filled orders ───────────────────────────────
@@ -115,9 +116,9 @@ class StaticGridStrategy(Strategy):
             sell_idx = idx + 1
             if sell_idx < len(self.levels) and sell_idx not in state.open_orders:
                 state.open_orders[sell_idx] = "sell"
-            # Cascade: place a buy one level below
+            # Cascade: place a buy one level below (if not already filled)
             next_buy = idx - 1
-            if next_buy >= 0 and next_buy not in state.open_orders:
+            if next_buy >= 0 and next_buy not in state.open_orders and next_buy not in state.filled_buys:
                 state.open_orders[next_buy] = "buy"
         else:  # sell confirmed
             buy_origin = idx - 1
@@ -125,7 +126,7 @@ class StaticGridStrategy(Strategy):
                 state.filled_buys.discard(buy_origin)
             # Place a buy order one level below
             buy_idx = idx - 1
-            if buy_idx >= 0 and buy_idx not in state.open_orders:
+            if buy_idx >= 0 and buy_idx not in state.open_orders and buy_idx not in state.filled_buys:
                 state.open_orders[buy_idx] = "buy"
 
     def get_open_orders(self, state: StrategyState) -> list[dict]:

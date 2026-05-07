@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 
 from manager.app.database import get_db
 from manager.app.events import (
-    TRADE_EVENTS,
-    TRADE_EVENTS_LOCK,
     add_equity_point,
     add_trade_event,
+    delete_trade_events_for_bot,
+    get_trade_events,
 )
 from manager.app.models import Agent, Bot
 from manager.app.schemas import (
@@ -266,6 +266,11 @@ def delete_bot(bot_id: str, db: DbSession) -> dict:
         raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
     if bot.status == "running":
         raise HTTPException(status_code=409, detail="Cannot delete a running bot – stop it first")
+    # Clean up trade events and equity history
+    delete_trade_events_for_bot(bot_id)
+    from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
+    with EQUITY_HISTORY_LOCK:
+        EQUITY_HISTORY.pop(bot_id, None)
     db.delete(bot)
     db.commit()
     logger.info("Bot %s deleted", bot_id)
@@ -344,6 +349,8 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
     )
 
     # ── Detect new trades and emit trade events ──
+    config = json.loads(bot.config_json or "{}")
+    market = config.get("market", "")
     if payload.trade_events:
         # Use detailed events from the agent
         for ev in payload.trade_events:
@@ -358,6 +365,7 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                 trade_number=ev.get("trade_number", snapshot.trade_count),
                 event_type=ev.get("event_type", "trade"),
                 level_index=ev.get("level_index"),
+                market=market,
             )
     else:
         # Fallback: infer from trade_count change
@@ -377,6 +385,7 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                     trade_pnl=trade_pnl,
                     total_equity=snapshot.total_equity_quote,
                     trade_number=prev_trade_count + i + 1,
+                    market=market,
                 )
 
     bot.latest_metrics_json = snapshot.model_dump_json()
@@ -388,23 +397,119 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
 
 
 @router.get("/trade-events")
-def list_trade_events() -> list[dict]:
-    """Return all trade events (most recent first)."""
-    with TRADE_EVENTS_LOCK:
-        return list(TRADE_EVENTS)
+def list_trade_events(bot_id: str | None = None) -> list[dict]:
+    """Return trade events from the database (most recent first)."""
+    return get_trade_events(bot_id=bot_id)
+
+
+@router.get("/trade-events/{event_id}")
+def get_single_trade_event(event_id: str) -> dict:
+    """Return a single trade event by ID, including linked order details."""
+    from manager.app.database import SessionLocal
+    from manager.app.models import TradeEvent as TE
+    db = SessionLocal()
+    try:
+        ev = db.query(TE).filter(TE.id == event_id).first()
+        if not ev:
+            raise HTTPException(status_code=404, detail="Trade event not found")
+        result = {
+            "id": ev.id,
+            "timestamp": ev.timestamp.isoformat() + "Z" if ev.timestamp else "",
+            "bot_id": ev.bot_id,
+            "bot_name": ev.bot_name,
+            "market": ev.market or "",
+            "event_type": ev.event_type,
+            "side": ev.side,
+            "quote_amount": ev.quote_amount,
+            "price": ev.price,
+            "trade_pnl": ev.trade_pnl,
+            "total_equity": ev.total_equity,
+            "trade_number": ev.trade_number,
+            "level_index": ev.level_index,
+            "linked_order_id": ev.linked_order_id,
+            "linked_order": None,
+        }
+        if ev.linked_order_id:
+            linked = db.query(TE).filter(TE.id == ev.linked_order_id).first()
+            if linked:
+                result["linked_order"] = {
+                    "id": linked.id,
+                    "timestamp": linked.timestamp.isoformat() + "Z" if linked.timestamp else "",
+                    "event_type": linked.event_type,
+                    "side": linked.side,
+                    "quote_amount": linked.quote_amount,
+                    "price": linked.price,
+                    "trade_pnl": linked.trade_pnl,
+                    "level_index": linked.level_index,
+                }
+        return result
+    finally:
+        db.close()
 
 
 @router.get("/bots/{bot_id}/equity-history")
-def get_equity_history(bot_id: str) -> list[dict]:
-    """Return equity data-points for a bot's budget trend chart.
+def get_equity_history(bot_id: str, db: DbSession) -> dict:
+    """Return equity data-points and budget info for the trend chart.
 
     :param bot_id: The bot to fetch history for.
-    :return: List of ``{t: ISO timestamp, v: equity}`` points.
+    :param db: Database session (injected).
+    :return: Dict with points list and budget metadata.
     """
     from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
 
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    config = json.loads(bot.config_json) if bot else {}
+    budget = config.get("budget", {})
+    starting_budget = budget.get("quote_budget", 0)
+    metrics = json.loads(bot.latest_metrics_json or "{}") if bot else {}
+
     with EQUITY_HISTORY_LOCK:
-        return EQUITY_HISTORY.get(bot_id, [])
+        points = EQUITY_HISTORY.get(bot_id, [])
+
+    return {
+        "points": points,
+        "starting_budget": starting_budget,
+        "total_equity": metrics.get("total_equity_quote", starting_budget),
+        "pnl": metrics.get("unrealized_pnl_quote", 0),
+    }
+
+
+@router.get("/bots/equity-history/total")
+def get_total_equity_history(db: DbSession) -> dict:
+    """Return combined equity data-points across all bots."""
+    from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
+
+    bots = db.query(Bot).all()
+    total_starting_budget = 0.0
+    total_equity = 0.0
+    total_pnl = 0.0
+
+    for bot in bots:
+        config = json.loads(bot.config_json) if bot else {}
+        budget = config.get("budget", {})
+        total_starting_budget += budget.get("quote_budget", 0)
+        metrics = json.loads(bot.latest_metrics_json or "{}") if bot else {}
+        total_equity += metrics.get("total_equity_quote", budget.get("quote_budget", 0))
+        total_pnl += metrics.get("unrealized_pnl_quote", 0)
+
+    # Merge all bot equity histories by timestamp
+    with EQUITY_HISTORY_LOCK:
+        all_series = {bid: list(pts) for bid, pts in EQUITY_HISTORY.items()}
+
+    # Build a combined timeline: for each timestamp sum the values
+    ts_map: dict[str, float] = {}
+    for pts in all_series.values():
+        for p in pts:
+            ts_map[p["t"]] = ts_map.get(p["t"], 0) + p["v"]
+
+    points = [{"t": t, "v": v, "p": 0} for t, v in sorted(ts_map.items())]
+
+    return {
+        "points": points,
+        "starting_budget": total_starting_budget,
+        "total_equity": total_equity,
+        "pnl": total_pnl,
+    }
 
 
 @router.get("/bots/{bot_id}/open-orders")

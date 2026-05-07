@@ -98,8 +98,13 @@ main { padding: 16px; }
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 16px;
+}
+
+.bots-table-wrap {
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 .card {
@@ -226,6 +231,7 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 .orders-table td { padding: 6px 10px; border-bottom: 1px solid #1e293b; }
 .order-buy { color: #22c55e; font-weight: 600; }
 .order-sell { color: #ef4444; font-weight: 600; }
+.grid-idle { color: #475569; }
 
 /* ── Expandable agent rows ── */
 
@@ -334,6 +340,7 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 }
 .ntab-btn:first-child { border-radius: 8px 0 0 8px; }
 .ntab-btn:last-child { border-radius: 0 8px 8px 0; }
+.ntab-btn + .ntab-btn { border-left: none; }
 .ntab-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .ntab-pane { display: none; }
 .ntab-pane.active { display: block; }
@@ -351,10 +358,30 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 .trade-pnl-pos { color: #10b981; font-weight: 600; }
 .trade-pnl-neg { color: #ef4444; font-weight: 600; }
 
+/* ── Orders table ── */
+
+.orders-table { width: 100%; font-size: 0.85rem; }
+.orders-table th { text-align: left; padding: 4px 6px; border-bottom: 1px solid #475569; color: #94a3b8; font-weight: 600; }
+.orders-table td { padding: 4px 6px; border-bottom: 1px solid #1e293b; }
+.orders-table .order-type-placed { color: #60a5fa; }
+.orders-table .order-type-filled { color: #10b981; }
+.orders-table .order-type-cancelled { color: #94a3b8; }
+#orders_list { height: 360px; overflow-y: auto; border: 1px solid #334155; border-radius: 10px; padding: 8px; }
+.orders-table tr { cursor: pointer; }
+.orders-table tr:hover { background: rgba(59, 130, 246, 0.08); }
+
+/* ── Order detail modal ── */
+
+.order-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
+.od-row { display: contents; }
+.od-label { color: #94a3b8; font-size: 0.85rem; font-weight: 600; }
+
 /* ── Equity chart ── */
 
 .chart-controls { margin-bottom: 8px; }
 .chart-controls select { width: auto; min-width: 200px; }
+.chart-info { display: flex; gap: 24px; margin-bottom: 8px; font-size: 0.9rem; color: #cbd5e1; }
+.chart-info strong { color: #e2e8f0; }
 #equity_chart {
   width: 100%; height: 220px;
   border: 1px solid #334155; border-radius: 10px;
@@ -460,5 +487,4 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 
 @media (max-width: 980px) {
   main { padding: 8px; }
-  .dashboard-grid { grid-template-columns: 1fr; }
 }

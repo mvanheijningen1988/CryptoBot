@@ -19,6 +19,9 @@ def run_migrations(engine: Engine) -> None:
     _ensure_users_table(engine)
     _drop_agent_name_column(engine)
     _ensure_bot_state_column(engine)
+    _ensure_trade_events_table(engine)
+    _ensure_agent_uptime_column(engine)
+    _add_trade_event_columns(engine)
 
 
 def _ensure_agent_approval_column(engine: Engine) -> None:
@@ -101,5 +104,71 @@ def _ensure_bot_state_column(engine: Engine) -> None:
                     "ALTER TABLE bots ADD COLUMN state_json TEXT DEFAULT '{}'"
                 )
                 conn.commit()
+        except Exception:
+            pass
+
+
+def _ensure_trade_events_table(engine: Engine) -> None:
+    """Create the ``trade_events`` table if it does not yet exist."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='trade_events'"
+            ).fetchall()
+            if not rows:
+                conn.exec_driver_sql(
+                    """CREATE TABLE trade_events (
+                        id VARCHAR(64) PRIMARY KEY,
+                        bot_id VARCHAR(64) NOT NULL,
+                        bot_name VARCHAR(128) NOT NULL,
+                        timestamp DATETIME,
+                        event_type VARCHAR(32) NOT NULL,
+                        side VARCHAR(8) NOT NULL,
+                        quote_amount FLOAT DEFAULT 0.0,
+                        price FLOAT DEFAULT 0.0,
+                        trade_pnl FLOAT DEFAULT 0.0,
+                        total_equity FLOAT DEFAULT 0.0,
+                        trade_number INTEGER DEFAULT 0,
+                        level_index INTEGER
+                    )"""
+                )
+                conn.exec_driver_sql(
+                    "CREATE INDEX idx_trade_events_bot_id ON trade_events(bot_id)"
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+
+def _ensure_agent_uptime_column(engine: Engine) -> None:
+    """Add ``uptime_seconds`` column to agents if missing."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(agents)").fetchall()
+            columns = {row[1] for row in rows}
+            if "uptime_seconds" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE agents ADD COLUMN uptime_seconds INTEGER DEFAULT 0"
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+
+def _add_trade_event_columns(engine: Engine) -> None:
+    """Add ``market`` and ``linked_order_id`` columns to trade_events if missing."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(trade_events)").fetchall()
+            columns = {row[1] for row in rows}
+            if "market" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE trade_events ADD COLUMN market VARCHAR(32) DEFAULT ''"
+                )
+            if "linked_order_id" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE trade_events ADD COLUMN linked_order_id VARCHAR(64) DEFAULT NULL"
+                )
+            conn.commit()
         except Exception:
             pass

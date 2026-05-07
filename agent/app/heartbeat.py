@@ -5,7 +5,7 @@ import time
 
 import requests
 
-from agent.app.config import AGENT_BASE_URL, AGENT_ID, MANAGER_URL, runner_manager
+from agent.app.config import AGENT_BASE_URL, AGENT_ID, AGENT_START_TIME, MANAGER_URL, runner_manager
 from agent.app.version import __version__
 
 
@@ -53,7 +53,11 @@ def heartbeat_loop() -> None:
         try:
             response = requests.post(
                 f"{MANAGER_URL}/api/v1/agents/{AGENT_ID}/heartbeat",
-                json={"status": "online", "version": __version__},
+                json={
+                    "status": "online",
+                    "version": __version__,
+                    "uptime_seconds": int(time.time() - AGENT_START_TIME),
+                },
                 timeout=5,
             )
             if response.status_code == 404:
