@@ -116,6 +116,10 @@ class StaticGridStrategy(Strategy):
             sell_idx = idx + 1
             if sell_idx < len(self.levels) and sell_idx not in state.open_orders:
                 state.open_orders[sell_idx] = "sell"
+            # Keep the grid ladder active by placing the next lower buy.
+            next_buy = idx - 1
+            if next_buy >= 0 and next_buy not in state.open_orders and next_buy not in state.filled_buys:
+                state.open_orders[next_buy] = "buy"
         else:  # sell confirmed
             buy_origin = idx - 1
             if buy_origin >= 0:

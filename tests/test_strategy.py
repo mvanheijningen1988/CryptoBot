@@ -271,12 +271,12 @@ class TestSingleLevelMovement:
         assert _sides(signals) == ["sell"]
         assert signals[0].quote_amount == pytest.approx(10.0)
 
-    def test_buy_fill_waits_for_sell_before_new_lower_buy(self):
+    def test_buy_fill_places_sell_and_new_lower_buy(self):
         s = StaticGridStrategy(_grid(100, 200, 11))
         state = StrategyState(open_orders={})
         s.confirm_fill(TradeSignal(side="buy", quote_amount=10.0, level_index=4), state)
         assert state.open_orders.get(5) == "sell"
-        assert 3 not in state.open_orders
+        assert state.open_orders.get(3) == "buy"
 
     def test_sell_without_prior_buy_impossible(self):
         """Price rising from init should not produce sell (no base currency)."""
