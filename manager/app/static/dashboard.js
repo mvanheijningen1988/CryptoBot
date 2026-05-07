@@ -138,7 +138,7 @@ function currentConfig() {
     quote_currency: marketInfo.quote || split[1] || "",
     mode: document.getElementById("mode").value,
     strategy: "static_grid",
-    start_price: Number(document.getElementById("start_price").value),
+    start_price: 0,
     grid: {
       lower_price: Number(document.getElementById("lower_price").value),
       upper_price: Number(document.getElementById("upper_price").value),
@@ -999,16 +999,6 @@ document.getElementById("backtest").onclick = async () => {
 
 /** When the market dropdown changes, reconnect WebSocket + refresh balances. */
 document.getElementById("market").addEventListener("change", () => { startMarketRealtime(); loadBalances(); });
-
-/**
- * Show/hide the "Start price" field based on mode.
- * Only simulation mode uses a custom start price.
- */
-function toggleStartPrice() {
-  document.getElementById("start_price_label").style.display = document.getElementById("mode").value === "simulation" ? "block" : "none";
-}
-document.getElementById("mode").addEventListener("change", toggleStartPrice);
-toggleStartPrice();
 
 /**
  * Show/hide the "Skim ratio" field based on profit mode.

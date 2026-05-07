@@ -20,7 +20,7 @@ def run_backtest(config: BotConfig, prices: list[float] | None = None) -> dict:
     """
     if not prices:
         prices = []
-        p = config.start_price
+        p = config.start_price or (config.grid.lower_price + config.grid.upper_price) / 2
         for _ in range(500):
             p = max(0.0001, p * (1 + random.uniform(-0.01, 0.01)))
             prices.append(p)
