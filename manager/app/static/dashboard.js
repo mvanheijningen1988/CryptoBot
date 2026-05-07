@@ -657,6 +657,10 @@ function _wireUpBotRow(tr, bots) {
       document.querySelectorAll(".action-menu.open").forEach((m) => {
         if (m !== menu) m.classList.remove("open");
       });
+      // Position the fixed menu below the toggle button
+      const rect = btn.getBoundingClientRect();
+      menu.style.top = (rect.bottom + 4) + "px";
+      menu.style.right = (window.innerWidth - rect.right) + "px";
       menu.classList.toggle("open");
     };
   });
@@ -689,6 +693,9 @@ function _wireUpBotRow(tr, bots) {
         showToast(t("btn_" + action) || action, err.message || String(err), "warn", 5000);
       }
       await loadBots();
+      await loadOrders();
+      await loadTradeEvents();
+      await loadEquityChart();
     };
   });
 }

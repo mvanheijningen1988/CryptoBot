@@ -20,7 +20,6 @@ def _bot_config(**overrides) -> BotConfig:
         "quote_currency": "EUR",
         "mode": "simulation",
         "strategy": "static_grid",
-        "start_price": 100.0,
         "grid": GridConfig(lower_price=90.0, upper_price=110.0, levels=5, order_size_quote=10.0),
         "budget": BudgetConfig(quote_budget=100.0, base_budget=0.0),
     }
@@ -104,7 +103,7 @@ class TestRunBacktest:
         assert result["trades_executed"] >= 0
 
     def test_extreme_price_swing(self):
-        cfg = _bot_config(start_price=100.0)
+        cfg = _bot_config()
         prices = [100.0, 50.0, 200.0, 50.0, 200.0]
         result = run_backtest(cfg, prices)
         assert isinstance(result["final_equity_quote"], float)

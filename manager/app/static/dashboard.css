@@ -103,8 +103,7 @@ main { padding: 16px; }
 }
 
 .bots-table-wrap {
-  max-height: 220px;
-  overflow-y: auto;
+  /* Auto-scales with number of bots — no fixed max-height */
 }
 
 .card {
@@ -190,15 +189,13 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 .action-toggle:hover { filter: brightness(1.15); }
 .action-menu {
   display: none;
-  position: absolute;
-  right: 0;
-  top: calc(100% + 4px);
+  position: fixed;
   min-width: 140px;
   background: var(--panel);
   border: 1px solid #475569;
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0,0,0,.4);
-  z-index: 100;
+  z-index: 10000;
   overflow: hidden;
 }
 .action-menu.open { display: flex; flex-direction: column; }

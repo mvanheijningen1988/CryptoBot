@@ -199,7 +199,7 @@ def sample_bot(db_session, sample_agent):
             "quote_currency": "EUR",
             "mode": "simulation",
             "strategy": "static_grid",
-            "start_price": 50000.0,
+            # removed start_price
             "grid": {
                 "lower_price": 48000.0,
                 "upper_price": 52000.0,

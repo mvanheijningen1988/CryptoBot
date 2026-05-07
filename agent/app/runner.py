@@ -119,7 +119,7 @@ class BotRunner:
         self.strategy = StaticGridStrategy(config.grid)
         self.state = StrategyState()
 
-        self.price = config.start_price or 0.0
+        self.price = getattr(self.exchange, 'price', 0.0)
         self.initial_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
         self.realized_pnl = 0.0
         self.skimmed_quote = 0.0
@@ -152,9 +152,9 @@ class BotRunner:
                 quote_currency=config.quote_currency,
             )
 
+        # Always use SimulatedExchange with market, which will fetch price from Bitvavo
         return SimulatedExchange(
             config.budget,
-            start_price=config.start_price or 100.0,
             market=config.market,
             fee_rate=float(os.getenv("SIM_FEE_RATE", "0.0025")),
         )

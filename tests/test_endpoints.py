@@ -112,7 +112,7 @@ def _seed_bot(client, bot_id="bot-1", agent_id=None, status="stopped"):
             "quote_currency": "EUR",
             "mode": "simulation",
             "strategy": "static_grid",
-            "start_price": 50000.0,
+            # removed start_price
             "grid": {
                 "lower_price": 48000.0,
                 "upper_price": 52000.0,
@@ -502,7 +502,7 @@ class TestCreateBot:
                 "quote_currency": "EUR",
                 "mode": "simulation",
                 "strategy": "static_grid",
-                "start_price": 50000.0,
+                # removed start_price
                 "grid": {
                     "lower_price": 48000.0,
                     "upper_price": 52000.0,
@@ -669,7 +669,7 @@ class TestBacktest:
                 "quote_currency": "EUR",
                 "mode": "simulation",
                 "strategy": "static_grid",
-                "start_price": 100.0,
+                # removed start_price
                 "grid": {
                     "lower_price": 90.0,
                     "upper_price": 110.0,
@@ -698,7 +698,7 @@ class TestBacktest:
                 "quote_currency": "EUR",
                 "mode": "simulation",
                 "strategy": "static_grid",
-                "start_price": 100.0,
+                # removed start_price
                 "grid": {
                     "lower_price": 90.0,
                     "upper_price": 110.0,
