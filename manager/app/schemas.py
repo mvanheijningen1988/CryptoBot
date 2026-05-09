@@ -31,6 +31,7 @@ class BotCreateRequest(BaseModel):
 
     name: str
     config: BotConfig
+    assigned_agent_id: str | None = None
 
 
 class BotResponse(BaseModel):

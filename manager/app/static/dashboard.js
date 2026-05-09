@@ -652,8 +652,11 @@ function renderMinimumOrderHint(config = currentConfig()) {
   const values = {
     required: formatNumber(limits.requiredQuote),
     quote: limits.quoteCurrency,
+    current: "-",
   };
-  const currentOrderSize = Number(config.grid?.order_size_quote || 0);
+  const orderSizeInput = document.getElementById("order_size_quote");
+  const currentOrderSize = Number(orderSizeInput?.value ?? config.grid?.order_size_quote ?? 0);
+  values.current = formatNumber(currentOrderSize);
   const isValid = currentOrderSize + 1e-12 >= limits.requiredQuote;
 
   hintEl.textContent = fillTemplate(
@@ -1150,7 +1153,7 @@ bindMaxDecimalInput("skim_ratio");
 function buildAgentCellHtml(bot, candidateAgents, isViewer) {
   const assignedId = bot.assigned_agent_id || "";
   const label = assignedId ? assignedId.slice(0, 8) : "-";
-  if (isViewer || candidateAgents.length <= 1 || !assignedId) {
+  if (isViewer || candidateAgents.length === 0) {
     return label;
   }
   const options = candidateAgents
@@ -1204,6 +1207,7 @@ async function loadBots() {
     const m = bot.latest_metrics || {};
     const pnl = Number(m.dashboard_pnl_quote ?? m.realized_pnl_quote ?? 0);
     const trades = Number(m.trade_count || 0);
+    const runtime = formatUptime(m.runtime_seconds || 0);
     const lastPrice = Number(m.price || 0);
     const market = bot.config?.market || "-";
     const lowerPrice = Number(bot.config?.grid?.lower_price || 0);
@@ -1245,7 +1249,8 @@ async function loadBots() {
       cells[7].className = pnl >= 0 ? "pnl-positive" : "pnl-negative";
       cells[7].textContent = formatNumber(pnl);
       cells[8].textContent = trades;
-      // cells[9] is the actions dropdown — leave it untouched
+      cells[9].textContent = runtime;
+      // cells[10] is the actions dropdown — leave it untouched
     } else {
       // Create new row
       tr = document.createElement("tr");
@@ -1253,7 +1258,7 @@ async function loadBots() {
       const acts = isViewer
         ? "<td>-</td>"
         : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="bot_logs">${t("btn_bot_log")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
-      tr.innerHTML = `<td>${nameHtml}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${agentTitle}">${agentHtml}</td><td>${priceStr}</td><td>${formatNumber(m.total_equity_quote || 0)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${formatNumber(pnl)}</td><td>${trades}</td>${acts}`;
+      tr.innerHTML = `<td>${nameHtml}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${agentTitle}">${agentHtml}</td><td>${priceStr}</td><td>${formatNumber(m.total_equity_quote || 0)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${formatNumber(pnl)}</td><td>${trades}</td><td>${runtime}</td>${acts}`;
       body.appendChild(tr);
       _wireUpBotRow(tr, bots);
     }
@@ -1565,9 +1570,10 @@ async function loadAgents() {
 
 /** Build the sub-table HTML for bots under an agent. */
 function _buildAgentBotTable(agent) {
-  let html = `<table class="sub-table"><thead><tr><th>${t("th_name")}</th><th>${t("th_market")}</th><th>${t("th_status")}</th><th>${t("th_trades")}</th><th>${t("th_quote_balance")}</th><th>${t("th_base_balance")}</th></tr></thead><tbody>`;
+  let html = `<table class="sub-table"><thead><tr><th>${t("th_name")}</th><th>${t("th_market")}</th><th>${t("th_status")}</th><th>${t("th_trades")}</th><th>Runtime</th><th>${t("th_quote_balance")}</th><th>${t("th_base_balance")}</th></tr></thead><tbody>`;
   for (const bot of agent.bots) {
-    html += `<tr><td>${bot.name}</td><td>${bot.market}</td><td>${bot.status}</td><td>${bot.trade_count}</td><td>${formatNumber(bot.quote_balance)}</td><td>${formatNumber(bot.base_balance)}</td></tr>`;
+    const runtime = formatUptime(bot.latest_metrics?.runtime_seconds ?? 0);
+    html += `<tr><td>${bot.name}</td><td>${bot.market}</td><td>${bot.status}</td><td>${bot.trade_count}</td><td>${runtime}</td><td>${formatNumber(bot.quote_balance)}</td><td>${formatNumber(bot.base_balance)}</td></tr>`;
   }
   html += `</tbody></table>`;
   return html;
@@ -1787,7 +1793,7 @@ async function loadTradeEvents() {
       const label = isFill ? t("toast_order_filled") : `#${ev.trade_number}`;
       const fillParts = isFill && Number(ev.fill_count || 0) > 0 ? ` | ${t("lbl_fill_parts")}: ${Number(ev.fill_count)}` : "";
       item.className = `event-item ${sideClass}`;
-      item.innerHTML = `<div><strong>${icon} ${label}</strong> ${ev.bot_name} ${ev.side.toUpperCase()} @ ${formatNumber(ev.price)} &mdash; <span class="${pnlClass}">${pnlStr}</span> | ${t("lbl_equity")}: ${formatNumber(ev.total_equity)}${fillParts}</div><div class="event-time">${timeLabel}</div>`;
+      item.innerHTML = `<div><strong>${icon} ${label}</strong> ${ev.bot_name} ${ev.side.toUpperCase()} @ ${formatNumber(ev.price)} &mdash; <span class="${pnlClass}">${pnlStr}</span>${fillParts}</div><div class="event-time">${timeLabel}</div>`;
     }
     list.appendChild(item);
   }
@@ -2047,7 +2053,6 @@ async function openOrderDetail(eventId) {
     if (ev.side !== "buy") {
       html += `<div class="od-row"><span class="od-label">${t("lbl_pnl")}</span><span class="${pnlClass}">${pnlStr}</span></div>`;
     }
-    html += `<div class="od-row"><span class="od-label">${t("lbl_equity")}</span><span>${formatNumber(ev.total_equity)}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_level")}</span><span>${ev.level_index != null ? ev.level_index : "-"}</span></div>`;
     html += `</div>`;
 
@@ -2171,6 +2176,7 @@ async function openOrdersModal(bot) {
 
 /** Cached pixel points and trade markers for tooltip hit-testing. */
 let _tradeChartMarkers = [];
+let _tradeChartGridMarkers = [];
 let _tradeChartBot = null;
 
 /**
@@ -2185,6 +2191,9 @@ async function openTradeChart(bot) {
 
   let history = [];
   let trades = [];
+  let openOrders = [];
+  const grid = bot.config?.grid || {};
+  const fallbackPrice = Number(bot.latest_metrics?.price || grid.lower_price || grid.upper_price || 0) || 0;
   try {
     const resp = await api(`/api/v1/bots/${bot.id}/equity-history`);
     history = resp.points || [];
@@ -2193,9 +2202,12 @@ async function openTradeChart(bot) {
     const all = await api("/api/v1/trade-events");
     trades = all.filter((e) => e.bot_id === bot.id);
   } catch {}
+  try {
+    const resp = await api(`/api/v1/bots/${bot.id}/open-orders`);
+    openOrders = resp.orders || [];
+  } catch {}
 
-  const grid = bot.config?.grid || {};
-  drawTradeChart(history, trades, grid);
+  drawTradeChart(history, trades, grid, openOrders, fallbackPrice);
 }
 
 document.getElementById("close_trade_chart")?.addEventListener("click", () => {
@@ -2213,8 +2225,10 @@ document.getElementById("close_orders_modal")?.addEventListener("click", () => {
  * @param {Array<{t:string,v:number,p:number}>} history - equity/price points
  * @param {Array} trades - trade events for this bot
  * @param {{lower_price:number,upper_price:number,levels:number}} grid
+ * @param {Array<{level:number,price:number,side:string}>} openOrders
+ * @param {number} fallbackPrice
  */
-function drawTradeChart(history, trades, grid) {
+function drawTradeChart(history, trades, grid, openOrders = [], fallbackPrice = 0) {
   const canvas = document.getElementById("trade_chart_canvas");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -2228,9 +2242,32 @@ function drawTradeChart(history, trades, grid) {
   ctx.clearRect(0, 0, W, H);
 
   _tradeChartMarkers = [];
+  _tradeChartGridMarkers = [];
 
-  // Filter to points that have a price
-  const priceData = history.filter((d) => d.p && d.p > 0);
+  // Filter to points that have a price. If the bot has no history yet,
+  // synthesize a short flat series so the grid and hover still render.
+  let priceData = history.filter((d) => d.p && d.p > 0);
+  if (priceData.length === 0) {
+    const derivedFallback = fallbackPrice > 0
+      ? fallbackPrice
+      : (grid.lower_price > 0 && grid.upper_price > 0)
+        ? (grid.lower_price + grid.upper_price) / 2
+        : (grid.lower_price > 0 || grid.upper_price > 0)
+          ? (grid.lower_price || grid.upper_price)
+          : 1;
+    const now = new Date();
+    priceData = [
+      { t: new Date(now.getTime() - 1000).toISOString(), p: derivedFallback },
+      { t: now.toISOString(), p: derivedFallback },
+    ];
+  } else if (priceData.length === 1) {
+    const single = priceData[0];
+    priceData = [
+      { t: new Date(new Date(single.t).getTime() - 1000).toISOString(), p: single.p },
+      { t: single.t, p: single.p },
+    ];
+  }
+
   if (priceData.length < 2) {
     ctx.fillStyle = "#94a3b8";
     ctx.font = "14px sans-serif";
@@ -2257,6 +2294,13 @@ function drawTradeChart(history, trades, grid) {
   const tMin = new Date(priceData[0].t).getTime();
   const tMax = new Date(priceData[priceData.length - 1].t).getTime();
   const tRange = tMax - tMin || 1;
+  const currentPrice = priceData[priceData.length - 1].p || 0;
+  const openOrderMap = new Map();
+  for (const order of openOrders || []) {
+    if (order && Number.isInteger(Number(order.level))) {
+      openOrderMap.set(Number(order.level), order);
+    }
+  }
 
   const toX = (ts) => pad.left + ((new Date(ts).getTime() - tMin) / tRange) * plotW;
   const toY = (p) => pad.top + plotH - ((p - minP) / rangeP) * plotH;
@@ -2288,7 +2332,8 @@ function drawTradeChart(history, trades, grid) {
   ctx.fillText(timeFmt(new Date(priceData[midIdx].t)), toX(priceData[midIdx].t), pad.top + plotH + 18);
   ctx.fillText(timeFmt(new Date(priceData[priceData.length - 1].t)), toX(priceData[priceData.length - 1].t), pad.top + plotH + 18);
 
-  // Draw grid levels as dashed horizontal lines
+  // Draw grid levels using order state: open buys green, open sells red,
+  // and future sells above the current price as dark red.
   if (grid.lower_price && grid.upper_price && grid.levels >= 2) {
     const step = (grid.upper_price - grid.lower_price) / (grid.levels - 1);
     ctx.save();
@@ -2298,15 +2343,41 @@ function drawTradeChart(history, trades, grid) {
       const lvl = grid.lower_price + i * step;
       const y = toY(lvl);
       if (y < pad.top || y > pad.top + plotH) continue;
-      ctx.strokeStyle = "rgba(250,204,21,0.35)";
+      const order = openOrderMap.get(i);
+      let strokeStyle = "rgba(250,204,21,0.35)";
+      let fillStyle = "rgba(250,204,21,0.55)";
+      if (order?.side === "buy") {
+        strokeStyle = "rgba(34,197,94,0.95)";
+        fillStyle = "rgba(34,197,94,0.9)";
+      } else if (order?.side === "sell") {
+        strokeStyle = "rgba(239,68,68,0.95)";
+        fillStyle = "rgba(239,68,68,0.9)";
+      } else if (currentPrice > 0 && lvl > currentPrice) {
+        strokeStyle = "rgba(127,29,29,0.95)";
+        fillStyle = "rgba(127,29,29,0.75)";
+      }
+      ctx.strokeStyle = strokeStyle;
       ctx.beginPath();
       ctx.moveTo(pad.left, y);
       ctx.lineTo(pad.left + plotW, y);
       ctx.stroke();
-      // Label on right side
-      ctx.fillStyle = "rgba(250,204,21,0.6)";
-      ctx.textAlign = "left";
-      ctx.fillText(formatNumber(lvl), pad.left + plotW + 2, y + 4);
+
+      const isOpenBuy = order?.side === "buy";
+      const isOpenSell = order?.side === "sell";
+      const isFutureSell = !order && currentPrice > 0 && lvl > currentPrice;
+      const expectedPnl = isOpenSell && i > 0 ? lvl - (grid.lower_price + (i - 1) * step) : null;
+      _tradeChartGridMarkers.push({
+        x1: pad.left,
+        x2: pad.left + plotW,
+        y,
+        level: i,
+        price: lvl,
+        side: order?.side || (isFutureSell ? "sell" : "buy"),
+        isOpenBuy,
+        isOpenSell,
+        isFutureSell,
+        expectedPnl,
+      });
     }
     ctx.restore();
   }
@@ -2341,32 +2412,53 @@ function drawTradeChart(history, trades, grid) {
   }
 }
 
-// Tooltip on hover over trade markers
+function _updateTradeChartTooltip(marker, canvas, mx) {
+  const tip = document.getElementById("trade_chart_tooltip");
+  if (!tip || !marker) return;
+
+  if (marker.trade) {
+    const tr = marker.trade;
+    const time = new Date(tr.timestamp).toLocaleString();
+    const pnl = Number(tr.trade_pnl || 0);
+    const pnlCls = pnl >= 0 ? "color:#22c55e" : "color:#ef4444";
+    tip.innerHTML = `<div><strong>#${tr.trade_number}</strong> @ ${formatNumber(tr.price)}</div><div>${time}</div><div style="${pnlCls}">PnL: ${pnl >= 0 ? "+" : ""}${formatNumber(pnl)}</div>`;
+  } else {
+    const parts = [];
+    const sideLabel = marker.isOpenBuy ? "Open buy order" : marker.isOpenSell ? "Open sell order" : marker.isFutureSell ? "Future sell order" : marker.side === "buy" ? "Buy level" : "Sell level";
+    parts.push(`<div><strong>${sideLabel}</strong> #${marker.level + 1}</div>`);
+    parts.push(`<div>Price: ${formatNumber(marker.price)}</div>`);
+    if (marker.isOpenSell) {
+      parts.push(`<div><strong>verwacht PnL</strong>: ${marker.expectedPnl >= 0 ? "+" : ""}${formatNumber(marker.expectedPnl ?? 0)}</div>`);
+    }
+    tip.innerHTML = parts.join("");
+  }
+  tip.style.display = "block";
+  tip.style.left = Math.min(mx + 12, canvas.clientWidth - 180) + "px";
+  tip.style.top = (marker.y - 10) + "px";
+}
+
+// Tooltip on hover over trade and grid markers
 document.getElementById("trade_chart_canvas")?.addEventListener("mousemove", (e) => {
   const canvas = e.target;
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
-  const tip = document.getElementById("trade_chart_tooltip");
 
   let hit = null;
-  for (const m of _tradeChartMarkers) {
+  for (const m of _tradeChartGridMarkers) {
     const withinX = mx >= m.x1 && mx <= m.x2;
     const withinY = Math.abs(my - m.y) <= 6;
     if (withinX && withinY) { hit = m; break; }
   }
-  if (hit) {
-    const tr = hit.trade;
-    const time = new Date(tr.timestamp).toLocaleString();
-    const pnl = Number(tr.trade_pnl || 0);
-    const pnlCls = pnl >= 0 ? "color:#22c55e" : "color:#ef4444";
-    tip.innerHTML = `<div><strong>#${tr.trade_number}</strong> @ ${formatNumber(tr.price)}</div><div>${time}</div><div style="${pnlCls}">PnL: ${pnl >= 0 ? "+" : ""}${formatNumber(pnl)}</div><div>Equity: ${formatNumber(tr.total_equity)}</div>`;
-    tip.style.display = "block";
-    tip.style.left = Math.min(mx + 12, canvas.clientWidth - 180) + "px";
-    tip.style.top = (hit.y - 10) + "px";
-  } else {
-    tip.style.display = "none";
+  if (!hit) {
+    for (const m of _tradeChartMarkers) {
+      const withinX = mx >= m.x1 && mx <= m.x2;
+      const withinY = Math.abs(my - m.y) <= 6;
+      if (withinX && withinY) { hit = m; break; }
+    }
   }
+  if (hit) _updateTradeChartTooltip(hit, canvas, mx);
+  else document.getElementById("trade_chart_tooltip").style.display = "none";
 });
 document.getElementById("trade_chart_canvas")?.addEventListener("mouseleave", () => {
   document.getElementById("trade_chart_tooltip").style.display = "none";
@@ -2394,7 +2486,13 @@ document.getElementById("create").onclick = async () => {
     if (lastGridPreview && !lastGridPreview.is_profitable) {
       if (!await showConfirm(t("grid_confirm_unprofitable"))) return;
     }
-    await api("/api/v1/bots", { method: "POST", body: JSON.stringify({ name: document.getElementById("name").value, config }) });
+    await api("/api/v1/bots", {
+      method: "POST",
+      body: JSON.stringify({
+        name: document.getElementById("name").value,
+        config,
+      }),
+    });
     await loadBots();
     document.getElementById("create_bot_modal").close();
   } catch (err) {
@@ -2666,6 +2764,64 @@ function checkSessionExpiry() {
   }
 }
 
+let dashboardEventSource = null;
+let realtimeRefreshTimer = null;
+let realtimeRefreshInFlight = false;
+let realtimeRefreshQueued = false;
+
+async function runRealtimeRefresh() {
+  if (realtimeRefreshInFlight) {
+    realtimeRefreshQueued = true;
+    return;
+  }
+  realtimeRefreshInFlight = true;
+  try {
+    await loadBots();
+    await loadTradeEvents();
+    await loadOrders();
+    await loadEquityChart();
+    if (logsModalOpen) await loadAgentLogs();
+  } catch {
+    // Keep fallback polling as safety net when realtime updates fail.
+  } finally {
+    realtimeRefreshInFlight = false;
+    if (realtimeRefreshQueued) {
+      realtimeRefreshQueued = false;
+      await runRealtimeRefresh();
+    }
+  }
+}
+
+function scheduleRealtimeRefresh() {
+  if (realtimeRefreshTimer) clearTimeout(realtimeRefreshTimer);
+  realtimeRefreshTimer = setTimeout(() => {
+    realtimeRefreshTimer = null;
+    runRealtimeRefresh();
+  }, 150);
+}
+
+function connectDashboardRealtimeStream() {
+  if (typeof EventSource === "undefined") return;
+  if (dashboardEventSource) {
+    try { dashboardEventSource.close(); } catch { /* already closed */ }
+  }
+
+  dashboardEventSource = new EventSource("/api/v1/stream/dashboard");
+  const onUpdate = () => scheduleRealtimeRefresh();
+
+  dashboardEventSource.addEventListener("trade_event", onUpdate);
+  dashboardEventSource.addEventListener("equity_point", onUpdate);
+  dashboardEventSource.addEventListener("agent_event", async () => {
+    await loadAgents();
+    await loadEvents();
+    scheduleRealtimeRefresh();
+  });
+  dashboardEventSource.onmessage = onUpdate;
+  dashboardEventSource.onerror = () => {
+    // Browser EventSource auto-reconnects; keep polling fallback active.
+  };
+}
+
 // ──────────────────────────────────────────────────────────────
 // Initialisation
 // ──────────────────────────────────────────────────────────────
@@ -2710,13 +2866,14 @@ function checkSessionExpiry() {
   await loadTradeEvents();
   await loadEquityChart();
   await loadOrders();
+  connectDashboardRealtimeStream();
 })();
 
 // ──────────────────────────────────────────────────────────────
 // Polling intervals
 // ──────────────────────────────────────────────────────────────
 
-/** Refresh bots, agents, events, and trades every 5 seconds. */
+/** Fallback refresh when realtime SSE is temporarily unavailable. */
 setInterval(async () => { checkSessionExpiry(); await loadBots(); await loadAgents(); await loadEvents(); await loadTradeEvents(); await loadEquityChart(); await loadOrders(); if (logsModalOpen) await loadAgentLogs(); }, 5000);
 
 /** Refresh market summary from REST every 60 seconds (WebSocket handles real-time). */

@@ -11,6 +11,7 @@ from typing import Annotated
 from fastapi import Body, Depends, HTTPException
 from fastapi.routing import APIRouter
 import requests
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ from manager.app.events import (
     delete_trade_events_for_bot,
     get_trade_events,
 )
-from manager.app.models import Agent, Bot
+from manager.app.models import Agent, Bot, TradeEvent
 from manager.app.schemas import (
     BotCreateRequest,
     DeleteBotRequest,
@@ -52,6 +53,66 @@ def _load_bot_state_flags(bot: Bot) -> dict:
         return data if isinstance(data, dict) else {}
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
+
+
+def _load_saved_runner_state(bot: Bot) -> dict | None:
+    """Load the persisted runner state from the dedicated full-state payload."""
+    for raw_state in (bot.full_state_json, bot.state_json):
+        try:
+            data = json.loads(raw_state or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        runner_state = data.get("runner_state")
+        if isinstance(runner_state, dict):
+            return runner_state
+        if any(key in data for key in ("level_index", "open_orders", "filled_buys", "filled_amounts", "initial_equity", "trade_count")):
+            return data
+    return None
+
+
+def _set_full_state(bot: Bot, snapshot: object | None, runner_state: object | None) -> None:
+    """Persist the bot's full runtime state separately from manager flags."""
+    payload: dict[str, object] = {}
+    if snapshot is not None:
+        payload["snapshot"] = snapshot.model_dump(mode="json") if hasattr(snapshot, "model_dump") else snapshot
+    if runner_state is not None:
+        payload["runner_state"] = runner_state.model_dump(mode="json") if hasattr(runner_state, "model_dump") else runner_state
+    bot.full_state_json = json.dumps(payload)
+
+
+def _build_open_orders_from_saved_state(bot: Bot) -> dict:
+    """Reconstruct open orders from the last persisted runner state."""
+    saved_state = _load_saved_runner_state(bot) or {}
+    config = json.loads(bot.config_json or "{}")
+    grid = config.get("grid", {})
+    lower_price = float(grid.get("lower_price") or 0.0)
+    upper_price = float(grid.get("upper_price") or 0.0)
+    levels = int(grid.get("levels") or 0)
+    order_size_quote = float(grid.get("order_size_quote") or 0.0)
+    filled_amounts = saved_state.get("filled_amounts") or {}
+    open_orders = []
+
+    if levels >= 2 and upper_price > lower_price:
+        step = (upper_price - lower_price) / (levels - 1)
+        for raw_level, side in (saved_state.get("open_orders") or {}).items():
+            try:
+                level_index = int(raw_level)
+            except (TypeError, ValueError):
+                continue
+            if level_index < 0 or level_index >= levels:
+                continue
+            filled_quote = float(filled_amounts.get(str(level_index), filled_amounts.get(level_index, 0.0)) or 0.0)
+            open_orders.append({
+                "level": level_index,
+                "price": round(lower_price + level_index * step, 6),
+                "side": str(side),
+                "quote_amount": order_size_quote,
+                "filled_quote": round(filled_quote, 6),
+            })
+
+    return {"bot_id": bot.id, "orders": sorted(open_orders, key=lambda item: item["level"])}
 
 
 def _set_manual_stop_flag(bot: Bot, value: bool) -> None:
@@ -164,15 +225,287 @@ def _resolve_fee_rate_for_bot(bot: Bot) -> float:
     )
 
 
-def _trade_based_pnl(metrics: dict[str, object]) -> float:
+def _trade_based_pnl(metrics: dict[str, object], starting_equity: float | None = None) -> float:
     """Return the PnL value that should be shown in the dashboard.
 
-    Dashboard PnL must be based on executed trades, not mark-to-market equity drift.
+    Prefer mark-to-market PnL when the starting equity baseline is known.
     """
+    total_equity = float(metrics.get("total_equity_quote", 0.0) or 0.0)
+    if starting_equity is not None:
+        return total_equity - float(starting_equity)
+    realized = float(metrics.get("realized_pnl_quote", 0.0) or 0.0)
+    unrealized = float(metrics.get("unrealized_pnl_quote", 0.0) or 0.0)
+    if abs(unrealized) > 0:
+        return realized + unrealized
     try:
-        return float(metrics.get("realized_pnl_quote", 0.0) or 0.0)
+        return realized
     except (TypeError, ValueError):
         return 0.0
+
+
+def _count_filled_events(bot_id: str) -> int:
+    """Count persisted filled order events for one bot."""
+    from manager.app.database import SessionLocal
+    from manager.app.models import TradeEvent
+
+    db = SessionLocal()
+    try:
+        return int(
+            db.query(TradeEvent)
+            .filter(TradeEvent.bot_id == bot_id, TradeEvent.event_type == "order_filled")
+            .count()
+        )
+    except SQLAlchemyError:
+        return 0
+    finally:
+        db.close()
+
+
+def _reconstruct_live_balances_from_fills(
+    bot_id: str,
+    start_quote: float,
+    start_base: float,
+    db: Session | None = None,
+) -> tuple[float, float, int] | None:
+    """Rebuild bot-scoped balances from persisted live fill events."""
+    owns_session = db is None
+    if db is None:
+        from manager.app.database import SessionLocal
+        db = SessionLocal()
+
+    try:
+        fills = (
+            db.query(TradeEvent)
+            .filter(TradeEvent.bot_id == bot_id, TradeEvent.event_type == "order_filled")
+            .order_by(TradeEvent.timestamp.asc(), TradeEvent.id.asc())
+            .all()
+        )
+    except SQLAlchemyError:
+        return None
+    finally:
+        if owns_session:
+            db.close()
+
+    quote_balance = float(start_quote)
+    base_balance = float(start_base)
+
+    for fill in fills:
+        side = str(fill.side or "").lower()
+        quote_amount = float(fill.quote_amount or 0.0)
+        fill_price = float(fill.price or 0.0)
+        fee_paid_quote = float(fill.fee_paid_quote or 0.0)
+        if quote_amount <= 0 or fill_price <= 0:
+            continue
+
+        base_amount = quote_amount / fill_price
+        if side == "buy":
+            quote_balance -= quote_amount
+            base_balance += max(0.0, base_amount - (fee_paid_quote / fill_price if fee_paid_quote > 0 else 0.0))
+        elif side == "sell":
+            base_balance = max(0.0, base_balance - base_amount)
+            quote_balance += max(0.0, quote_amount - fee_paid_quote)
+
+    return quote_balance, base_balance, len(fills)
+
+
+def _list_filled_events(bot_id: str, db: Session | None = None) -> list[TradeEvent]:
+    """Return filled-order events for one bot in chronological order."""
+    owns_session = db is None
+    if db is None:
+        from manager.app.database import SessionLocal
+        db = SessionLocal()
+
+    try:
+        return (
+            db.query(TradeEvent)
+            .filter(TradeEvent.bot_id == bot_id, TradeEvent.event_type == "order_filled")
+            .order_by(TradeEvent.timestamp.asc(), TradeEvent.id.asc())
+            .all()
+        )
+    except SQLAlchemyError:
+        return []
+    finally:
+        if owns_session:
+            db.close()
+
+
+def _timestamp_to_epoch_seconds(ts: object) -> float | None:
+    """Parse timestamps from DB datetimes or ISO strings into UTC epoch seconds."""
+    if isinstance(ts, datetime):
+        dt = ts
+    elif isinstance(ts, str):
+        raw = ts.strip()
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.timestamp()
+
+
+def _apply_fill_to_balances(quote_balance: float, base_balance: float, fill: TradeEvent) -> tuple[float, float]:
+    """Apply one fill event to quote/base balances."""
+    side = str(fill.side or "").lower()
+    quote_amount = float(fill.quote_amount or 0.0)
+    fill_price = float(fill.price or 0.0)
+    fee_paid_quote = float(fill.fee_paid_quote or 0.0)
+    if quote_amount <= 0 or fill_price <= 0:
+        return quote_balance, base_balance
+
+    base_amount = quote_amount / fill_price
+    if side == "buy":
+        quote_balance -= quote_amount
+        base_balance += max(0.0, base_amount - (fee_paid_quote / fill_price if fee_paid_quote > 0 else 0.0))
+    elif side == "sell":
+        base_balance = max(0.0, base_balance - base_amount)
+        quote_balance += max(0.0, quote_amount - fee_paid_quote)
+    return quote_balance, base_balance
+
+
+def _rebuild_live_equity_points_from_fills(
+    bot_id: str,
+    points: list[dict[str, object]],
+    start_quote: float,
+    start_base: float,
+    db: Session | None = None,
+) -> list[dict[str, object]]:
+    """Recompute live equity chart points from bot-scoped fills and per-point prices."""
+    if not points:
+        return points
+
+    fills = _list_filled_events(bot_id, db)
+    if not fills:
+        return points
+
+    parsed_points: list[tuple[float, dict[str, object]]] = []
+    for point in points:
+        ts = _timestamp_to_epoch_seconds(point.get("t"))
+        if ts is None:
+            continue
+        parsed_points.append((ts, point))
+    if not parsed_points:
+        return points
+
+    parsed_points.sort(key=lambda item: item[0])
+    parsed_fills: list[tuple[float, TradeEvent]] = []
+    for fill in fills:
+        ts = _timestamp_to_epoch_seconds(fill.timestamp)
+        if ts is None:
+            continue
+        parsed_fills.append((ts, fill))
+
+    quote_balance = float(start_quote)
+    base_balance = float(start_base)
+    fill_idx = 0
+    rebuilt: list[dict[str, object]] = []
+
+    for point_ts, point in parsed_points:
+        while fill_idx < len(parsed_fills) and parsed_fills[fill_idx][0] <= point_ts:
+            _, fill = parsed_fills[fill_idx]
+            quote_balance, base_balance = _apply_fill_to_balances(quote_balance, base_balance, fill)
+            fill_idx += 1
+
+        point_price = float(point.get("p", 0.0) or 0.0)
+        point_equity = float(point.get("v", 0.0) or 0.0)
+        if point_price > 0:
+            point_equity = quote_balance + base_balance * point_price
+
+        rebuilt.append({
+            "t": point.get("t"),
+            "v": point_equity,
+            "p": point_price,
+        })
+
+    return rebuilt
+
+
+def _build_live_equity_points_from_fills(
+    bot_id: str,
+    start_quote: float,
+    start_base: float,
+    db: Session | None = None,
+) -> list[dict[str, object]]:
+    """Build a minimal live equity series from persisted fill events."""
+    fills = _list_filled_events(bot_id, db)
+    if not fills:
+        return []
+
+    quote_balance = float(start_quote)
+    base_balance = float(start_base)
+    points: list[dict[str, object]] = []
+    seen_start = False
+
+    for fill in fills:
+        fill_price = float(fill.price or 0.0)
+        if fill_price <= 0:
+            continue
+        ts = fill.timestamp.isoformat() if isinstance(fill.timestamp, datetime) else ""
+        if ts and not seen_start:
+            points.append({
+                "t": ts,
+                "v": quote_balance + base_balance * fill_price,
+                "p": fill_price,
+            })
+            seen_start = True
+        quote_balance, base_balance = _apply_fill_to_balances(quote_balance, base_balance, fill)
+        if ts:
+            points.append({
+                "t": ts,
+                "v": quote_balance + base_balance * fill_price,
+                "p": fill_price,
+            })
+
+    return points
+
+
+def _normalized_metrics_for_bot(bot: Bot, db: Session | None = None) -> tuple[dict[str, object], float]:
+    """Return normalized metrics and starting quote budget for one bot."""
+    latest_metrics = json.loads(bot.latest_metrics_json or "{}")
+    config = json.loads(bot.config_json or "{}")
+    budget = config.get("budget", {}) if isinstance(config, dict) else {}
+
+    start_price = float(
+        (config.get("start_price") if isinstance(config, dict) else 0.0)
+        or latest_metrics.get("price", 0.0)
+        or 0.0
+    )
+    starting_equity = float(budget.get("quote_budget", 0.0) or 0.0) + float(budget.get("base_budget", 0.0) or 0.0) * start_price
+
+    if bot.mode == "live":
+        reconstructed = _reconstruct_live_balances_from_fills(
+            bot.id,
+            float(budget.get("quote_budget", 0.0) or 0.0),
+            float(budget.get("base_budget", 0.0) or 0.0),
+            db,
+        )
+        if reconstructed is not None:
+            rec_quote, rec_base, rec_trade_count = reconstructed
+            latest_metrics["quote_balance"] = rec_quote
+            latest_metrics["base_balance"] = rec_base
+            latest_metrics["trade_count"] = rec_trade_count
+    else:
+        current_trade_count = int(latest_metrics.get("trade_count", 0) or 0)
+        if current_trade_count <= 0:
+            filled_count = _count_filled_events(bot.id)
+            if filled_count > current_trade_count:
+                latest_metrics["trade_count"] = filled_count
+
+    price = float(latest_metrics.get("price", 0.0) or 0.0)
+    quote_balance = float(latest_metrics.get("quote_balance", 0.0) or 0.0)
+    base_balance = float(latest_metrics.get("base_balance", 0.0) or 0.0)
+    mtm_equity = quote_balance + base_balance * price
+    if mtm_equity > 0:
+        latest_metrics["total_equity_quote"] = mtm_equity
+        latest_metrics["unrealized_pnl_quote"] = mtm_equity - starting_equity
+
+    latest_metrics["dashboard_pnl_quote"] = _trade_based_pnl(latest_metrics, starting_equity)
+    return latest_metrics, float(budget.get("quote_budget", 0.0) or 0.0)
 
 
 def _build_pair_metrics(bot: Bot, event: object, linked: object | None) -> dict | None:
@@ -269,8 +602,8 @@ def bot_to_response(bot: Bot) -> BotResponse:
     :param bot: The Bot database model instance.
     :return: A BotResponse Pydantic model.
     """
-    latest_metrics = json.loads(bot.latest_metrics_json or "{}")
-    latest_metrics["dashboard_pnl_quote"] = _trade_based_pnl(latest_metrics)
+    latest_metrics, _ = _normalized_metrics_for_bot(bot)
+    config = json.loads(bot.config_json or "{}")
 
     return BotResponse(
         id=bot.id,
@@ -279,7 +612,7 @@ def bot_to_response(bot: Bot) -> BotResponse:
         mode=bot.mode,
         status=bot.status,
         assigned_agent_id=bot.assigned_agent_id,
-        config=json.loads(bot.config_json),
+        config=config,
         latest_metrics=latest_metrics,
         created_at=bot.created_at,
         updated_at=bot.updated_at,
@@ -338,17 +671,47 @@ def create_bot(payload: BotCreateRequest, db: DbSession) -> BotResponse:
     :return: BotResponse for the newly created bot.
     """
     _validate_live_order_size(payload.config)
+    assigned_agent_id = None
+    if payload.assigned_agent_id:
+        agent = db.query(Agent).filter(Agent.id == payload.assigned_agent_id).first()
+        if not agent:
+            raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
+        if agent.approval_status != "approved" or agent.status != "online":
+            raise HTTPException(status_code=400, detail="Assigned agent must be approved and online")
+        assigned_agent_id = agent.id
+    else:
+        auto_agent = _select_least_loaded_agent(db)
+        if auto_agent:
+            assigned_agent_id = auto_agent.id
 
     bot_id = str(uuid.uuid4())
+    starting_quote = float(payload.config.budget.quote_budget)
+    starting_base = float(payload.config.budget.base_budget)
+    initial_metrics = {
+        "bot_id": bot_id,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "runtime_seconds": 0,
+        "price": 0.0,
+        "quote_balance": starting_quote,
+        "base_balance": starting_base,
+        "base_value_in_quote": 0.0,
+        "total_equity_quote": starting_quote,
+        "realized_pnl_quote": 0.0,
+        "unrealized_pnl_quote": 0.0,
+        "skimmed_quote": 0.0,
+        "trade_count": 0,
+        "status": "stopped",
+    }
     bot = Bot(
         id=bot_id,
         name=payload.name,
         strategy_type=payload.config.strategy,
         mode=payload.config.mode,
         status="stopped",
-        assigned_agent_id=None,
+        assigned_agent_id=assigned_agent_id,
         config_json=payload.config.model_dump_json(),
-        latest_metrics_json="{}",
+        latest_metrics_json=json.dumps(initial_metrics),
+        full_state_json=json.dumps({"snapshot": initial_metrics, "runner_state": None}),
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
@@ -462,9 +825,9 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
         "config": json.loads(bot.config_json),
     }
     # Include saved runner state so the agent can resume from last position
-    saved_state = bot.state_json or "{}"
-    if saved_state and saved_state != "{}":
-        start_payload["runner_state"] = json.loads(saved_state)
+    saved_state = _load_saved_runner_state(bot)
+    if saved_state is not None:
+        start_payload["runner_state"] = saved_state
 
     ok, message = post_json(
         f"{agent_url}/agent/bots/{bot.id}/start",
@@ -531,9 +894,9 @@ def move_bot(bot_id: str, payload: MoveBotRequest, db: DbSession) -> dict:
             "bot_id": bot.id,
             "config": json.loads(bot.config_json),
         }
-        saved_state = bot.state_json or "{}"
-        if saved_state and saved_state != "{}":
-            start_payload["runner_state"] = json.loads(saved_state)
+        saved_state = _load_saved_runner_state(bot)
+        if saved_state:
+            start_payload["runner_state"] = saved_state
 
         ok, message = post_json(
             f"{target.base_url}/agent/bots/{bot.id}/start",
@@ -627,13 +990,8 @@ def delete_bot(bot_id: str, db: DbSession, payload: DeleteBotRequest | None = Bo
     delete_mode = payload.delete_mode if payload else "delete_open_orders"
 
     stop_warning = None
-    if bot.status in _ACTIVE_BOT_STATUSES:
-        if delete_mode == "delete_open_orders":
-            stop_result = stop_bot(bot_id, db)
-            stop_warning = stop_result.get("warning")
-        else:
-            if not bot.assigned_agent_id:
-                raise HTTPException(status_code=409, detail="Bot has no assigned agent for delete preparation")
+    if delete_mode == "delete_open_orders":
+        if bot.assigned_agent_id:
             agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
             if not agent or agent.approval_status != "approved":
                 raise HTTPException(status_code=502, detail="Assigned agent unavailable for delete preparation")
@@ -648,6 +1006,29 @@ def delete_bot(bot_id: str, db: DbSession, payload: DeleteBotRequest | None = Bo
             _set_manual_stop_flag(bot, True)
             bot.updated_at = datetime.now(UTC)
             db.commit()
+        else:
+            saved_state = _load_saved_runner_state(bot) or {}
+            saved_open_orders = saved_state.get("open_orders") if isinstance(saved_state, dict) else {}
+            has_saved_open_orders = isinstance(saved_open_orders, dict) and bool(saved_open_orders)
+            if bot.status in _ACTIVE_BOT_STATUSES or has_saved_open_orders:
+                raise HTTPException(status_code=409, detail="Bot has no assigned agent to cancel open orders before delete")
+    elif bot.status in _ACTIVE_BOT_STATUSES:
+        if not bot.assigned_agent_id:
+            raise HTTPException(status_code=409, detail="Bot has no assigned agent for delete preparation")
+        agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
+        if not agent or agent.approval_status != "approved":
+            raise HTTPException(status_code=502, detail="Assigned agent unavailable for delete preparation")
+        ok, message = post_json(
+            f"{agent.base_url}/agent/bots/{bot.id}/prepare-delete",
+            {"bot_id": bot.id, "delete_mode": delete_mode},
+        )
+        if not ok:
+            raise HTTPException(status_code=502, detail=f"Agent delete preparation failed: {message}")
+        bot.status = "stopped"
+        bot.assigned_agent_id = None
+        _set_manual_stop_flag(bot, True)
+        bot.updated_at = datetime.now(UTC)
+        db.commit()
 
     # Clean up trade events and equity history
     delete_trade_events_for_bot(bot_id)
@@ -795,8 +1176,7 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
 
     bot.status = snapshot.status
     bot.latest_metrics_json = snapshot.model_dump_json()
-    if payload.runner_state:
-        bot.state_json = payload.runner_state.model_dump_json()
+    _set_full_state(bot, snapshot, payload.runner_state)
     bot.updated_at = datetime.now(UTC)
     db.commit()
     return {"ok": True}
@@ -879,16 +1259,32 @@ def get_equity_history(bot_id: str, db: DbSession) -> dict:
     config = json.loads(bot.config_json) if bot else {}
     budget = config.get("budget", {})
     starting_budget = budget.get("quote_budget", 0)
-    metrics = json.loads(bot.latest_metrics_json or "{}") if bot else {}
+    metrics, _ = _normalized_metrics_for_bot(bot, db) if bot else ({}, 0.0)
 
     with EQUITY_HISTORY_LOCK:
-        points = EQUITY_HISTORY.get(bot_id, [])
+        points = list(EQUITY_HISTORY.get(bot_id, []))
+
+    if bot and bot.mode == "live":
+        if not points:
+            points = _build_live_equity_points_from_fills(
+                bot_id,
+                float(budget.get("quote_budget", 0.0) or 0.0),
+                float(budget.get("base_budget", 0.0) or 0.0),
+                db,
+            )
+        points = _rebuild_live_equity_points_from_fills(
+            bot_id,
+            points,
+            float(budget.get("quote_budget", 0.0) or 0.0),
+            float(budget.get("base_budget", 0.0) or 0.0),
+            db,
+        )
 
     return {
         "points": points,
         "starting_budget": starting_budget,
         "total_equity": metrics.get("total_equity_quote", starting_budget),
-        "pnl": _trade_based_pnl(metrics),
+        "pnl": _trade_based_pnl(metrics, float(starting_budget or 0.0)),
     }
 
 
@@ -906,9 +1302,9 @@ def get_total_equity_history(db: DbSession) -> dict:
         config = json.loads(bot.config_json) if bot else {}
         budget = config.get("budget", {})
         total_starting_budget += budget.get("quote_budget", 0)
-        metrics = json.loads(bot.latest_metrics_json or "{}") if bot else {}
+        metrics, _ = _normalized_metrics_for_bot(bot, db) if bot else ({}, 0.0)
         total_equity += metrics.get("total_equity_quote", budget.get("quote_budget", 0))
-        total_pnl += _trade_based_pnl(metrics)
+        total_pnl += _trade_based_pnl(metrics, float(budget.get("quote_budget", 0) or 0))
 
     # Merge all bot equity histories by timestamp
     with EQUITY_HISTORY_LOCK:
@@ -916,9 +1312,30 @@ def get_total_equity_history(db: DbSession) -> dict:
 
     # Build a combined timeline: for each timestamp sum the values
     ts_map: dict[str, float] = {}
-    for pts in all_series.values():
+    for bot in bots:
+        config = json.loads(bot.config_json or "{}")
+        budget = config.get("budget", {}) if isinstance(config, dict) else {}
+        pts = all_series.get(bot.id, [])
+        if bot.mode == "live":
+            if not pts:
+                pts = _build_live_equity_points_from_fills(
+                    bot.id,
+                    float(budget.get("quote_budget", 0.0) or 0.0),
+                    float(budget.get("base_budget", 0.0) or 0.0),
+                    db,
+                )
+            pts = _rebuild_live_equity_points_from_fills(
+                bot.id,
+                pts,
+                float(budget.get("quote_budget", 0.0) or 0.0),
+                float(budget.get("base_budget", 0.0) or 0.0),
+                db,
+            )
         for p in pts:
-            ts_map[p["t"]] = ts_map.get(p["t"], 0) + p["v"]
+            t = str(p.get("t", ""))
+            if not t:
+                continue
+            ts_map[t] = ts_map.get(t, 0.0) + float(p.get("v", 0.0) or 0.0)
 
     points = [{"t": t, "v": v, "p": 0} for t, v in sorted(ts_map.items())]
 
@@ -936,15 +1353,16 @@ def get_open_orders(bot_id: str, db: DbSession) -> dict:
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
         raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
-    if bot.status != "running" or not bot.assigned_agent_id:
-        raise HTTPException(status_code=409, detail="Bot is not running")
-    agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
-    if not agent:
-        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
-    import requests as req
-    try:
-        resp = req.get(f"{agent.base_url}/agent/bots/{bot_id}/open-orders", timeout=5)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if bot.assigned_agent_id:
+        agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
+        if agent:
+            import requests as req
+            try:
+                resp = req.get(f"{agent.base_url}/agent/bots/{bot_id}/open-orders", timeout=5)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception:
+                logger.debug("Falling back to saved open orders for bot %s", bot_id, exc_info=True)
+
+    return _build_open_orders_from_saved_state(bot)

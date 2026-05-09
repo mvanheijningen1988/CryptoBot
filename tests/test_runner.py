@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from common import BotConfig, BudgetConfig, GridConfig
-from agent.app.runner import AgentLogStore, BotRunner
+from agent.app.runner import AgentLogStore, BotRunner, RunnerManager
 from common.exchange.simulated import SimulatedExchange
 from common.exchange.bitvavo import BitvavoExchange
 
@@ -221,3 +221,58 @@ def test_restored_live_runner_takes_over_existing_exchange_orders(monkeypatch):
     assert sync_calls["count"] == 1
     assert exchange.synced_levels == {0, 1}
     assert exchange.placed_orders == []
+
+
+def test_live_snapshot_includes_reserved_open_order_value(monkeypatch):
+    class _LiveReservedExchange(_StubExchange):
+        def __init__(self) -> None:
+            super().__init__([100.0])
+            self._limit_orders = {
+                "buy-1": {
+                    "side": "buy",
+                    "quote_amount": 400.0,
+                    "limit_price": 95.0,
+                }
+            }
+            self.quote_balance = 600.0
+            self.base_balance = 0.0
+
+    exchange = _LiveReservedExchange()
+    config = _config().model_copy(update={"mode": "live", "budget": BudgetConfig(quote_budget=57.0, base_budget=0.0, profit_mode="compound", skim_ratio=0.5)})
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, cfg: exchange)
+
+    runner = BotRunner("bot-live-equity", config, "http://manager:8000", "agent-1", AgentLogStore())
+    runner.price = 100.0
+
+    snapshot = runner._build_snapshot("running")
+
+    assert snapshot.total_equity_quote == pytest.approx(57.0)
+    assert snapshot.unrealized_pnl_quote == pytest.approx(0.0)
+
+
+def test_runner_manager_prepare_delete_removes_runner_on_success():
+    class _DeleteOkRunner:
+        def prepare_delete(self, mode):
+            return {"mode": mode, "ok": True}
+
+    manager = RunnerManager("http://manager:8000", "agent-1")
+    manager.runners["bot-delete"] = _DeleteOkRunner()  # type: ignore[assignment]
+
+    details = manager.prepare_delete("bot-delete", "delete_open_orders")
+
+    assert details["ok"] is True
+    assert "bot-delete" not in manager.runners
+
+
+def test_runner_manager_prepare_delete_keeps_runner_on_failure():
+    class _DeleteFailRunner:
+        def prepare_delete(self, mode):
+            raise RuntimeError(f"failed mode={mode}")
+
+    manager = RunnerManager("http://manager:8000", "agent-1")
+    manager.runners["bot-delete-fail"] = _DeleteFailRunner()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="failed mode=delete_open_orders"):
+        manager.prepare_delete("bot-delete-fail", "delete_open_orders")
+
+    assert "bot-delete-fail" in manager.runners

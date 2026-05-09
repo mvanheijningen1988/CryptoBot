@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from manager.app.auth import create_token, hash_password
-from manager.app.models import Agent, Bot, User
+from manager.app.models import Agent, Bot, TradeEvent, User
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -94,7 +94,14 @@ def _seed_agent(client, agent_id="agent-1", approval="approved", status="online"
     return agent
 
 
-def _seed_bot(client, bot_id="bot-1", agent_id=None, status="stopped"):
+def _seed_bot(
+    client,
+    bot_id="bot-1",
+    agent_id=None,
+    status="stopped",
+    latest_metrics: dict | None = None,
+    full_state: dict | None = None,
+):
     """Insert a bot directly and return it."""
     from datetime import UTC, datetime
 
@@ -127,7 +134,8 @@ def _seed_bot(client, bot_id="bot-1", agent_id=None, status="stopped"):
                 "skim_ratio": 0.5,
             },
         }),
-        latest_metrics_json="{}",
+        latest_metrics_json=json.dumps(latest_metrics or {}),
+        full_state_json=json.dumps(full_state or {}),
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
@@ -471,6 +479,20 @@ class TestListAgents:
         assert len(r.json()) == 1
         assert r.json()[0]["id"] == "list-a"
 
+    def test_includes_bot_runtime_seconds(self, client):
+        _seed_agent(client, "list-b")
+        _seed_bot(
+            client,
+            "list-bot",
+            agent_id="list-b",
+            status="running",
+            latest_metrics={"trade_count": 3, "runtime_seconds": 3723, "quote_balance": 125.0, "base_balance": 1.5},
+        )
+        r = client.get("/api/v1/agents")
+        assert r.status_code == 200
+        bot = r.json()[0]["bots"][0]
+        assert bot["runtime_seconds"] == 3723
+
 
 class TestAgentEvents:
     def test_returns_list(self, client):
@@ -604,6 +626,67 @@ class TestCreateBot:
         assert body["name"] == "My Bot"
         assert body["status"] == "stopped"
         assert body["assigned_agent_id"] is None
+        assert body["latest_metrics"]["total_equity_quote"] == 1000.0
+        assert body["latest_metrics"]["runtime_seconds"] == 0
+
+    def test_create_bot_with_assigned_agent(self, client):
+        _seed_agent(client, "create-agent")
+        r = client.post("/api/v1/bots", json={
+            "name": "Assigned Bot",
+            "assigned_agent_id": "create-agent",
+            "config": {
+                "market": "BTC-EUR",
+                "base_currency": "BTC",
+                "quote_currency": "EUR",
+                "mode": "simulation",
+                "strategy": "static_grid",
+                "grid": {
+                    "lower_price": 48000.0,
+                    "upper_price": 52000.0,
+                    "levels": 5,
+                    "order_size_quote": 100.0,
+                },
+                "budget": {
+                    "quote_budget": 57.0,
+                    "base_budget": 0.0,
+                    "profit_mode": "compound",
+                    "skim_ratio": 0.5,
+                },
+            },
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["assigned_agent_id"] == "create-agent"
+        assert body["latest_metrics"]["quote_balance"] == 57.0
+        assert body["latest_metrics"]["total_equity_quote"] == 57.0
+
+    def test_create_bot_auto_assigns_available_agent(self, client):
+        _seed_agent(client, "create-auto-agent")
+        r = client.post("/api/v1/bots", json={
+            "name": "Auto Assigned Bot",
+            "config": {
+                "market": "BTC-EUR",
+                "base_currency": "BTC",
+                "quote_currency": "EUR",
+                "mode": "simulation",
+                "strategy": "static_grid",
+                "grid": {
+                    "lower_price": 48000.0,
+                    "upper_price": 52000.0,
+                    "levels": 5,
+                    "order_size_quote": 100.0,
+                },
+                "budget": {
+                    "quote_budget": 1000.0,
+                    "base_budget": 0.0,
+                    "profit_mode": "compound",
+                    "skim_ratio": 0.5,
+                },
+            },
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["assigned_agent_id"] == "create-auto-agent"
 
     @patch("manager.app.routes.bots.requests.get")
     def test_create_live_bot_rejects_order_size_below_bitvavo_minimum(self, mock_get, client):
@@ -711,7 +794,7 @@ class TestListBots:
         assert r.status_code == 200
         assert len(r.json()) == 1
 
-    def test_list_bots_exposes_trade_based_dashboard_pnl(self, client):
+    def test_list_bots_exposes_mark_to_market_dashboard_pnl(self, client):
         _seed_agent(client, "lb-pnl-agent")
         _seed_bot(client, "lb-pnl-bot", agent_id="lb-pnl-agent")
         db = _get_db(client)
@@ -727,11 +810,11 @@ class TestListBots:
         r = client.get("/api/v1/bots")
 
         assert r.status_code == 200
-        assert r.json()[0]["latest_metrics"]["dashboard_pnl_quote"] == pytest.approx(0.0)
+        assert r.json()[0]["latest_metrics"]["dashboard_pnl_quote"] == pytest.approx(42.5)
 
 
 class TestEquityHistoryPnl:
-    def test_bot_equity_history_returns_trade_based_pnl(self, client):
+    def test_bot_equity_history_returns_mark_to_market_pnl(self, client):
         _seed_bot(client, "eq-pnl-bot")
         db = _get_db(client)
         row = db.query(Bot).filter(Bot.id == "eq-pnl-bot").first()
@@ -746,9 +829,9 @@ class TestEquityHistoryPnl:
         r = client.get("/api/v1/bots/eq-pnl-bot/equity-history")
 
         assert r.status_code == 200
-        assert r.json()["pnl"] == pytest.approx(0.0)
+        assert r.json()["pnl"] == pytest.approx(99.0)
 
-    def test_total_equity_history_sums_trade_based_pnl(self, client):
+    def test_total_equity_history_sums_mark_to_market_pnl(self, client):
         _seed_bot(client, "eq-total-a")
         _seed_bot(client, "eq-total-b")
         db = _get_db(client)
@@ -771,7 +854,130 @@ class TestEquityHistoryPnl:
         r = client.get("/api/v1/bots/equity-history/total")
 
         assert r.status_code == 200
-        assert r.json()["pnl"] == pytest.approx(7.5)
+        assert r.json()["pnl"] == pytest.approx(130.0)
+
+    def test_live_bot_equity_history_uses_reconstructed_metrics(self, client):
+        _seed_bot(client, "eq-live-bot")
+        db = _get_db(client)
+        row = db.query(Bot).filter(Bot.id == "eq-live-bot").first()
+        cfg = json.loads(row.config_json)
+        cfg["mode"] = "live"
+        row.mode = "live"
+        row.config_json = json.dumps(cfg)
+        row.latest_metrics_json = json.dumps({
+            "price": 12.0,
+            "total_equity_quote": 0.0,
+            "trade_count": 0,
+        })
+        db.add(TradeEvent(
+            id="eq-live-fill-1",
+            bot_id="eq-live-bot",
+            bot_name=row.name,
+            event_type="order_filled",
+            side="buy",
+            quote_amount=100.0,
+            fill_count=1,
+            fee_paid_quote=0.0,
+            fee_rate=0.0,
+            price=10.0,
+            trade_pnl=0.0,
+            total_equity=0.0,
+            trade_number=1,
+            market="BTC-EUR",
+        ))
+        db.commit()
+
+        r = client.get("/api/v1/bots/eq-live-bot/equity-history")
+
+        assert r.status_code == 200
+        assert r.json()["total_equity"] == pytest.approx(1020.0)
+        assert r.json()["pnl"] == pytest.approx(20.0)
+
+    def test_live_bot_equity_history_repairs_points_from_fills(self, client):
+        _seed_bot(client, "eq-live-points")
+        db = _get_db(client)
+        row = db.query(Bot).filter(Bot.id == "eq-live-points").first()
+        cfg = json.loads(row.config_json)
+        cfg["mode"] = "live"
+        row.mode = "live"
+        row.config_json = json.dumps(cfg)
+        row.latest_metrics_json = json.dumps({"price": 12.0})
+        db.add(TradeEvent(
+            id="eq-live-fill-2",
+            bot_id="eq-live-points",
+            bot_name=row.name,
+            timestamp=datetime(2026, 1, 1, 10, 0, 30),
+            event_type="order_filled",
+            side="buy",
+            quote_amount=100.0,
+            fill_count=1,
+            fee_paid_quote=0.0,
+            fee_rate=0.0,
+            price=10.0,
+            trade_pnl=0.0,
+            total_equity=0.0,
+            trade_number=1,
+            market="BTC-EUR",
+        ))
+        db.commit()
+
+        from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
+
+        with EQUITY_HISTORY_LOCK:
+            EQUITY_HISTORY["eq-live-points"] = [
+                {"t": "2026-01-01T10:00:00+00:00", "v": 1000.0, "p": 10.0},
+                {"t": "2026-01-01T10:01:00+00:00", "v": 900.0, "p": 12.0},
+            ]
+
+        r = client.get("/api/v1/bots/eq-live-points/equity-history")
+
+        with EQUITY_HISTORY_LOCK:
+            EQUITY_HISTORY.pop("eq-live-points", None)
+
+        assert r.status_code == 200
+        assert len(r.json()["points"]) == 2
+        assert r.json()["points"][0]["v"] == pytest.approx(1000.0)
+        assert r.json()["points"][1]["v"] == pytest.approx(1020.0)
+
+    def test_live_bot_equity_history_backfills_points_when_memory_empty(self, client):
+        _seed_bot(client, "eq-live-backfill")
+        db = _get_db(client)
+        row = db.query(Bot).filter(Bot.id == "eq-live-backfill").first()
+        cfg = json.loads(row.config_json)
+        cfg["mode"] = "live"
+        row.mode = "live"
+        row.config_json = json.dumps(cfg)
+        row.latest_metrics_json = json.dumps({"price": 12.0})
+        db.add(TradeEvent(
+            id="eq-live-fill-3",
+            bot_id="eq-live-backfill",
+            bot_name=row.name,
+            timestamp=datetime(2026, 1, 1, 10, 2, 0),
+            event_type="order_filled",
+            side="buy",
+            quote_amount=100.0,
+            fill_count=1,
+            fee_paid_quote=0.0,
+            fee_rate=0.0,
+            price=10.0,
+            trade_pnl=0.0,
+            total_equity=0.0,
+            trade_number=1,
+            market="BTC-EUR",
+        ))
+        db.commit()
+
+        from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
+
+        with EQUITY_HISTORY_LOCK:
+            EQUITY_HISTORY.pop("eq-live-backfill", None)
+
+        r = client.get("/api/v1/bots/eq-live-backfill/equity-history")
+
+        assert r.status_code == 200
+        assert len(r.json()["points"]) >= 2
+        assert r.json()["points"][0]["v"] == pytest.approx(1000.0)
+        assert r.json()["points"][-1]["v"] == pytest.approx(1000.0)
 
 
 class TestStartBot:
@@ -823,7 +1029,7 @@ class TestStopBot:
 class TestDeleteBot:
     @patch("manager.app.routes.bots.delete_trade_events_for_bot")
     @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
-    def test_delete_running_bot_auto_stops_first(self, mock_post, mock_delete_events, client):
+    def test_delete_running_bot_delete_open_orders_calls_agent_prepare_delete(self, mock_post, mock_delete_events, client):
         _seed_agent(client, "delete-agent")
         _seed_bot(client, "delete-running-bot", agent_id="delete-agent", status="running")
 
@@ -831,9 +1037,10 @@ class TestDeleteBot:
 
         assert r.status_code == 200
         assert r.json()["ok"] is True
+        assert r.json()["delete_mode"] == "delete_open_orders"
         mock_post.assert_called_once_with(
-            "http://agent:8100/agent/bots/delete-running-bot/stop",
-            {"bot_id": "delete-running-bot"},
+            "http://agent:8100/agent/bots/delete-running-bot/prepare-delete",
+            {"bot_id": "delete-running-bot", "delete_mode": "delete_open_orders"},
         )
         mock_delete_events.assert_called_once_with("delete-running-bot")
 
@@ -887,6 +1094,42 @@ class TestDeleteBot:
         )
         mock_delete_events.assert_called_once_with("delete-running-bot-quote")
 
+    @patch("manager.app.routes.bots.delete_trade_events_for_bot")
+    def test_delete_open_orders_rejected_without_agent_when_saved_open_orders_exist(self, mock_delete_events, client):
+        _seed_bot(
+            client,
+            "delete-no-agent-open-orders",
+            agent_id=None,
+            status="stopped",
+            full_state={
+                "runner_state": {
+                    "open_orders": {"0": "buy", "1": "sell"},
+                }
+            },
+        )
+
+        r = client.delete("/api/v1/bots/delete-no-agent-open-orders")
+
+        assert r.status_code == 409
+        assert "cancel open orders" in r.json()["detail"]
+        mock_delete_events.assert_not_called()
+
+    @patch("manager.app.routes.bots.delete_trade_events_for_bot")
+    def test_delete_open_orders_allowed_without_agent_when_no_saved_open_orders(self, mock_delete_events, client):
+        _seed_bot(
+            client,
+            "delete-no-agent-empty",
+            agent_id=None,
+            status="stopped",
+            full_state={"runner_state": {"open_orders": {}}},
+        )
+
+        r = client.delete("/api/v1/bots/delete-no-agent-empty")
+
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        mock_delete_events.assert_called_once_with("delete-no-agent-empty")
+
 
 class TestMoveBot:
     def test_move_stopped_bot_reassigns_and_logs(self, client):
@@ -913,11 +1156,34 @@ class TestMoveBot:
     def test_move_active_bot_stops_then_starts(self, mock_post, client):
         _seed_agent(client, "move-src-active")
         _seed_agent(client, "move-dst-active")
-        _seed_bot(client, "move-active-bot", agent_id="move-src-active", status="running")
+        _seed_bot(
+            client,
+            "move-active-bot",
+            agent_id="move-src-active",
+            status="running",
+            full_state={
+                "runner_state": {
+                    "level_index": 3,
+                    "open_orders": {"3": "order-3"},
+                    "filled_buys": [1, 2],
+                    "filled_amounts": {"3": 42.5},
+                    "price": 101.25,
+                    "quote_balance": 850.0,
+                    "base_balance": 1.75,
+                    "initial_equity": 1000.0,
+                    "realized_pnl": 12.5,
+                    "skimmed_quote": 0.0,
+                    "trade_count": 9,
+                }
+            },
+        )
 
         r = client.post("/api/v1/bots/move-active-bot/move", json={"agent_id": "move-dst-active"})
         assert r.status_code == 200
         assert mock_post.call_count == 2
+        start_payload = mock_post.call_args_list[1].args[1]
+        assert start_payload["runner_state"]["level_index"] == 3
+        assert start_payload["runner_state"]["trade_count"] == 9
 
         db = _get_db(client)
         bot = db.query(Bot).filter(Bot.id == "move-active-bot").first()
@@ -953,6 +1219,33 @@ class TestUpdateBudget:
         )
         assert r.status_code == 200
         mock_post.assert_called_once()
+
+
+class TestOpenOrders:
+    def test_reconstructs_from_saved_state_when_not_running(self, client):
+        _seed_bot(
+            client,
+            "open-orders-bot",
+            status="stopped",
+            full_state={
+                "runner_state": {
+                    "open_orders": {"1": "buy", "4": "sell"},
+                    "filled_amounts": {"1": 25.0, "4": 25.0},
+                }
+            },
+        )
+
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "open-orders-bot").first()
+        assert bot is not None
+
+        r = client.get("/api/v1/bots/open-orders-bot/open-orders")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["bot_id"] == "open-orders-bot"
+        assert [order["side"] for order in body["orders"]] == ["buy", "sell"]
+        assert body["orders"][0]["level"] == 1
+        assert body["orders"][1]["level"] == 4
 
 
 class TestPushMetrics:
@@ -1010,6 +1303,62 @@ class TestPushMetrics:
         bot = db.query(Bot).filter(Bot.id == "met-assign-bot").first()
         assert bot is not None
         assert bot.assigned_agent_id == "met-assign"
+
+    def test_push_metrics_persists_full_state_separately_from_flags(self, client):
+        _seed_agent(client, "met-full-state")
+        _seed_bot(
+            client,
+            "met-full-state-bot",
+            agent_id="met-full-state",
+            status="running",
+            latest_metrics={"trade_count": 2},
+        )
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "met-full-state-bot").first()
+        bot.state_json = json.dumps({"manual_stop": True})
+        db.commit()
+
+        r = client.post(
+            "/api/v1/agents/met-full-state/bots/met-full-state-bot/metrics",
+            json={
+                "snapshot": {
+                    "bot_id": "met-full-state-bot",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "price": 100.0,
+                    "quote_balance": 900.0,
+                    "base_balance": 1.0,
+                    "base_value_in_quote": 100.0,
+                    "total_equity_quote": 1000.0,
+                    "realized_pnl_quote": 0.0,
+                    "unrealized_pnl_quote": 0.0,
+                    "skimmed_quote": 0.0,
+                    "trade_count": 2,
+                    "status": "running",
+                },
+                "runner_state": {
+                    "level_index": 4,
+                    "open_orders": {"4": "order-4"},
+                    "filled_buys": [1, 2],
+                    "filled_amounts": {"4": 50.0},
+                    "price": 100.0,
+                    "quote_balance": 900.0,
+                    "base_balance": 1.0,
+                    "initial_equity": 1000.0,
+                    "realized_pnl": 0.0,
+                    "skimmed_quote": 0.0,
+                    "trade_count": 2,
+                },
+            },
+        )
+        assert r.status_code == 200
+
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "met-full-state-bot").first()
+        assert bot is not None
+        assert json.loads(bot.state_json)["manual_stop"] is True
+        full_state = json.loads(bot.full_state_json)
+        assert full_state["runner_state"]["level_index"] == 4
+        assert full_state["snapshot"]["trade_count"] == 2
 
     def test_push_metrics_ignored_for_manually_stopped_bot(self, client):
         _seed_agent(client, "met-stop-agent")

@@ -19,6 +19,7 @@ def run_migrations(engine: Engine) -> None:
     _ensure_users_table(engine)
     _drop_agent_name_column(engine)
     _ensure_bot_state_column(engine)
+    _ensure_bot_full_state_column(engine)
     _ensure_trade_events_table(engine)
     _ensure_agent_uptime_column(engine)
     _add_trade_event_columns(engine)
@@ -103,6 +104,31 @@ def _ensure_bot_state_column(engine: Engine) -> None:
                 conn.exec_driver_sql(
                     "ALTER TABLE bots ADD COLUMN state_json TEXT DEFAULT '{}'"
                 )
+                conn.commit()
+        except Exception:
+            pass
+
+
+def _ensure_bot_full_state_column(engine: Engine) -> None:
+    """Add ``full_state_json`` column to bots if missing and seed legacy runner state."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(bots)").fetchall()
+            columns = {row[1] for row in rows}
+            if "full_state_json" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE bots ADD COLUMN full_state_json TEXT DEFAULT '{}'"
+                )
+                if "state_json" in columns:
+                    conn.exec_driver_sql(
+                        """
+                        UPDATE bots
+                        SET full_state_json = state_json
+                        WHERE full_state_json IS NULL
+                          AND state_json IS NOT NULL
+                          AND (state_json LIKE '%"level_index"%' OR state_json LIKE '%"open_orders"%' OR state_json LIKE '%"filled_buys"%' OR state_json LIKE '%"trade_count"%')
+                        """
+                    )
                 conn.commit()
         except Exception:
             pass

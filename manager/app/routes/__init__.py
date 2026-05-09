@@ -8,6 +8,7 @@ from manager.app.routes.analytics import router as analytics_router
 from manager.app.routes.auth import router as auth_router
 from manager.app.routes.bots import router as bots_router
 from manager.app.routes.market import router as market_router
+from manager.app.routes.stream import router as stream_router
 from manager.app.routes.users import router as users_router
 
 v1 = APIRouter(prefix="/api/v1")
@@ -17,5 +18,6 @@ v1.include_router(agents_router)
 v1.include_router(bots_router)
 v1.include_router(market_router)
 v1.include_router(analytics_router)
+v1.include_router(stream_router)
 
 __all__ = ["v1"]

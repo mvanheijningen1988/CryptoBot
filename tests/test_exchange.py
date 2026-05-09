@@ -524,6 +524,50 @@ class TestBitvavoRequestId:
         assert id2 == id1 + 1
 
 
+class TestBitvavoCallActionRetry:
+
+    def _make_exchange(self) -> BitvavoExchange:
+        ex = BitvavoExchange(
+            api_key="test", api_secret="secret",
+            market="BTC-EUR", base_currency="BTC", quote_currency="EUR",
+        )
+        ex.ws = MagicMock()
+        return ex
+
+    def test_retries_after_transient_send_error_with_reconnect(self):
+        ex = self._make_exchange()
+        calls = {"n": 0}
+
+        def _send(payload: dict):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("[SSL: BAD_LENGTH] bad length")
+            req_id = payload["requestId"]
+            ex.pending_responses[req_id] = {"requestId": req_id, "response": {"ok": True}}
+            ex.pending_events[req_id].set()
+
+        with patch.object(ex, "_send_json", side_effect=_send), patch.object(ex, "_reconnect_transport") as mock_reconnect:
+            response = ex._call_action("privateGetBalance", {}, timeout=0.2)
+
+        assert response["response"]["ok"] is True
+        assert calls["n"] == 2
+        mock_reconnect.assert_called_once()
+
+    def test_raises_when_send_error_persists_after_retries(self):
+        ex = self._make_exchange()
+        ex._action_send_retry_attempts = 2
+
+        with patch.object(ex, "_send_json", side_effect=OSError("[SSL: BAD_LENGTH] bad length")), patch.object(
+            ex,
+            "_reconnect_transport",
+            return_value=None,
+        ) as mock_reconnect:
+            with pytest.raises(RuntimeError, match="Bitvavo websocket send failed"):
+                ex._call_action("privateGetBalance", {}, timeout=0.1)
+
+        assert mock_reconnect.call_count == 1
+
+
 # ===================================================================
 # BitvavoExchange – execute without auth
 # ===================================================================
@@ -627,6 +671,19 @@ class TestBitvavoRefreshBalances:
         with patch.object(ex, "_call_action", return_value=response):
             with pytest.raises(RuntimeError, match="privateGetBalance failed: unauthorized"):
                 ex._refresh_balances()
+
+    def test_balance_timeout_is_non_fatal(self):
+        ex = BitvavoExchange(
+            api_key="test", api_secret="secret",
+            market="BTC-EUR", base_currency="BTC", quote_currency="EUR",
+        )
+        ex.authenticated = True
+
+        with patch.object(ex, "_call_action", side_effect=TimeoutError("timed out")):
+            ex._refresh_balances()
+
+        assert ex.quote_balance == pytest.approx(0.0)
+        assert ex.base_balance == pytest.approx(0.0)
 
 
 # ===================================================================

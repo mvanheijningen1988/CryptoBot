@@ -230,6 +230,7 @@ def list_agents(db: DbSession) -> list[dict]:
             "status": bot.status,
             "market": config.get("market", "-"),
             "trade_count": metrics.get("trade_count", 0),
+            "runtime_seconds": metrics.get("runtime_seconds", 0),
             "quote_balance": metrics.get("quote_balance", 0),
             "base_balance": metrics.get("base_balance", 0),
         })

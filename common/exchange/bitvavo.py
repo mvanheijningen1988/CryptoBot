@@ -5,6 +5,7 @@ prices, and executes market orders through the websocket action API.
 """
 from __future__ import annotations
 
+import logging
 import hashlib
 import hmac
 import json
@@ -20,6 +21,9 @@ import websocket
 
 from common.exchange.base import Exchange
 from common.models import TradeSignal
+
+
+logger = logging.getLogger(__name__)
 
 
 class BitvavoExchange(Exchange):
@@ -73,6 +77,7 @@ class BitvavoExchange(Exchange):
         self.pending_events: dict[int, threading.Event] = {}
         self.pending_responses: dict[int, dict[str, Any]] = {}
         self.price_update_event = threading.Event()
+        self._market_activity_event = threading.Event()
 
         # Limit order tracking
         self._limit_orders: dict[str, dict[str, Any]] = {}  # order_id → order info
@@ -93,6 +98,98 @@ class BitvavoExchange(Exchange):
         )
         self._last_planned_level_reconcile_at = 0.0
         self._processed_exchange_order_ids: set[str] = set()
+        self._action_send_retry_attempts = max(
+            1,
+            int(os.getenv("BITVAVO_ACTION_RETRY_ATTEMPTS", "3") or 3),
+        )
+        self._reconnect_backoff_seconds = max(
+            0.0,
+            float(os.getenv("BITVAVO_RECONNECT_BACKOFF_SECONDS", "0.25") or 0.25),
+        )
+        self._reconnect_lock = threading.Lock()
+        self._stop_requested = False
+
+    def _is_transient_transport_error(self, exc: Exception) -> bool:
+        """Return whether an action transport exception is retryable."""
+        if isinstance(exc, TimeoutError):
+            return True
+        if isinstance(exc, (websocket.WebSocketException, OSError, ConnectionError)):
+            return True
+        message = str(exc).lower()
+        return any(
+            token in message
+            for token in (
+                "bad_length",
+                "bad length",
+                "broken pipe",
+                "connection reset",
+                "connection aborted",
+                "eof",
+                "socket is already closed",
+                "websocket is not connected",
+                "timed out",
+            )
+        )
+
+    def _close_socket(self) -> None:
+        """Close websocket transport and mark auth disconnected."""
+        self.authenticated = False
+        self.running = False
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+        self.ws = None
+
+    def _connect_and_authenticate(self) -> None:
+        """Open websocket, authenticate and subscribe required channels."""
+        self.ws = websocket.create_connection(self.ws_url, timeout=10)
+        self.running = True
+
+        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self.reader_thread.start()
+
+        timestamp_ms = int(time.time() * 1000)
+        signature = self._create_signature(timestamp_ms)
+        auth_payload = {
+            "key": self.api_key,
+            "signature": signature,
+            "timestamp": timestamp_ms,
+        }
+        auth_response = self._call_action("authenticate", auth_payload, timeout=10.0, retry_transport=False)
+        if auth_response.get("errorCode") is not None:
+            self._close_socket()
+            raise self._raise_action_error(
+                "authenticate",
+                auth_payload,
+                f"Bitvavo authenticate failed: {auth_response.get('error') or auth_response.get('errorCode')}",
+            )
+
+        self._send_json(
+            {
+                "action": "subscribe",
+                "channels": [
+                    {"name": "ticker", "markets": [self.market]},
+                    {"name": "account", "markets": [self.market]},
+                ],
+            }
+        )
+        self.authenticated = True
+
+    def _reconnect_transport(self, reason: str) -> None:
+        """Rebuild websocket transport and re-authenticate after transient errors."""
+        if self._stop_requested:
+            raise RuntimeError("Bitvavo websocket reconnect skipped: exchange is stopping")
+
+        with self._reconnect_lock:
+            if self._stop_requested:
+                raise RuntimeError("Bitvavo websocket reconnect skipped: exchange is stopping")
+            logger.warning("Bitvavo websocket reconnecting after transport failure: %s", reason)
+            self._close_socket()
+            if self._reconnect_backoff_seconds > 0:
+                time.sleep(self._reconnect_backoff_seconds)
+            self._connect_and_authenticate()
 
     def _extract_action_response(self, response: dict[str, Any]) -> dict[str, Any]:
         """Return the response body for websocket action replies."""
@@ -624,7 +721,13 @@ class BitvavoExchange(Exchange):
             raise RuntimeError("Bitvavo websocket is not connected")
         self.ws.send(json.dumps(payload))
 
-    def _call_action(self, action: str, body: dict[str, Any], timeout: float = 6.0) -> dict[str, Any]:
+    def _call_action(
+        self,
+        action: str,
+        body: dict[str, Any],
+        timeout: float = 6.0,
+        retry_transport: bool = True,
+    ) -> dict[str, Any]:
         """
         Send an action and block until the response arrives or timeout elapses.
 
@@ -634,28 +737,47 @@ class BitvavoExchange(Exchange):
         :return: The parsed response dictionary.
         :raises TimeoutError: If no response arrives within the timeout.
         """
-        request_id = self._next_request_id()
-        event = threading.Event()
-        self.pending_events[request_id] = event
+        attempts = self._action_send_retry_attempts if retry_transport else 1
+        last_error: Exception | None = None
 
-        payload = dict(body)
-        payload["action"] = action
-        payload["requestId"] = request_id
-        try:
-            self._send_json(payload)
-        except Exception as exc:
+        for attempt in range(attempts):
+            request_id = self._next_request_id()
+            event = threading.Event()
+            self.pending_events[request_id] = event
+
+            payload = dict(body)
+            payload["action"] = action
+            payload["requestId"] = request_id
+            try:
+                self._send_json(payload)
+            except Exception as exc:
+                self.pending_events.pop(request_id, None)
+                self.pending_responses.pop(request_id, None)
+                last_error = exc
+                if retry_transport and attempt < attempts - 1 and self._is_transient_transport_error(exc):
+                    self._reconnect_transport(str(exc))
+                    continue
+                raise self._raise_action_error(action, payload, f"Bitvavo websocket send failed: {exc}") from exc
+
+            if not event.wait(timeout=timeout):
+                self.pending_events.pop(request_id, None)
+                self.pending_responses.pop(request_id, None)
+                timeout_exc = TimeoutError(
+                    f"Bitvavo websocket action timeout for {action} | {self._request_context(action, payload)}"
+                )
+                last_error = timeout_exc
+                if retry_transport and attempt < attempts - 1:
+                    self._reconnect_transport(str(timeout_exc))
+                    continue
+                raise timeout_exc
+
+            response = self.pending_responses.pop(request_id, {})
             self.pending_events.pop(request_id, None)
-            self.pending_responses.pop(request_id, None)
-            raise self._raise_action_error(action, payload, f"Bitvavo websocket send failed: {exc}") from exc
+            return response
 
-        if not event.wait(timeout=timeout):
-            self.pending_events.pop(request_id, None)
-            self.pending_responses.pop(request_id, None)
-            raise TimeoutError(f"Bitvavo websocket action timeout for {action} | {self._request_context(action, payload)}")
-
-        response = self.pending_responses.pop(request_id, {})
-        self.pending_events.pop(request_id, None)
-        return response
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Bitvavo action failed unexpectedly for {action}")
 
     def _extract_price(self, message: dict[str, Any]) -> float | None:
         """
@@ -709,6 +831,11 @@ class BitvavoExchange(Exchange):
 
         return None
 
+    def _has_pending_fills(self) -> bool:
+        """Return whether websocket/order polling has queued unprocessed fills."""
+        with self._fills_lock:
+            return bool(self._fills)
+
     def _handle_message(self, message_text: str) -> None:
         """
         Parse a raw websocket message and dispatch it.
@@ -739,6 +866,7 @@ class BitvavoExchange(Exchange):
             if price is not None:
                 self.latest_price = price
                 self.price_update_event.set()
+                self._market_activity_event.set()
             return
 
         # Order fill events from the account channel
@@ -757,6 +885,7 @@ class BitvavoExchange(Exchange):
             if price is not None:
                 self.latest_price = price
                 self.price_update_event.set()
+                self._market_activity_event.set()
 
     def _reader_loop(self) -> None:
         """Background loop that reads from the websocket until stopped."""
@@ -773,48 +902,8 @@ class BitvavoExchange(Exchange):
         """Open the websocket, authenticate, and subscribe to ticker events."""
         if self.running:
             return
-
-        self.ws = websocket.create_connection(self.ws_url, timeout=10)
-        self.running = True
-
-        self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
-        self.reader_thread.start()
-
-        timestamp_ms = int(time.time() * 1000)
-        signature = self._create_signature(timestamp_ms)
-        auth_response = self._call_action(
-            "authenticate",
-            {
-                "key": self.api_key,
-                "signature": signature,
-                "timestamp": timestamp_ms,
-            },
-            timeout=10.0,
-        )
-        if auth_response.get("errorCode") is not None:
-            self.running = False
-            self.stop()
-            raise self._raise_action_error(
-                "authenticate",
-                {
-                    "key": self.api_key,
-                    "signature": signature,
-                    "timestamp": timestamp_ms,
-                },
-                f"Bitvavo authenticate failed: {auth_response.get('error') or auth_response.get('errorCode')}",
-            )
-
-        # Subscribe to ticker updates for the configured market.
-        self._send_json(
-            {
-                "action": "subscribe",
-                "channels": [
-                    {"name": "ticker", "markets": [self.market]},
-                    {"name": "account", "markets": [self.market]},
-                ],
-            }
-        )
-        self.authenticated = True
+        self._stop_requested = False
+        self._connect_and_authenticate()
         self._load_market_precision()
 
         # Prime balances once after startup.
@@ -822,14 +911,10 @@ class BitvavoExchange(Exchange):
 
     def stop(self) -> None:
         """Close the websocket and stop the reader thread."""
+        self._stop_requested = True
         self.running = False
         self.authenticated = False
-        if self.ws:
-            try:
-                self.ws.close()
-            except Exception:
-                pass
-        self.ws = None
+        self._close_socket()
 
     def _refresh_balances(self) -> None:
         """Fetch latest balances from Bitvavo and update local state."""
@@ -842,7 +927,8 @@ class BitvavoExchange(Exchange):
                 break
             except TimeoutError:
                 if attempt == 1:
-                    raise
+                    logger.warning("Bitvavo privateGetBalance timed out; continuing without refreshed balances")
+                    return
 
         if response is None:
             return
@@ -896,10 +982,21 @@ class BitvavoExchange(Exchange):
         if current is not None and current != last_price:
             return current
 
+        # Allow runner loops to react to websocket fills immediately,
+        # even when price has not moved.
+        if self._has_pending_fills():
+            if current is not None:
+                return current
+            if last_price is not None:
+                return last_price
+
         self.price_update_event.clear()
-        has_update = self.price_update_event.wait(timeout=timeout_seconds)
+        self._market_activity_event.clear()
+        has_update = self._market_activity_event.wait(timeout=timeout_seconds)
         if has_update and self.latest_price is not None:
             return self.latest_price
+        if has_update and last_price is not None:
+            return last_price
 
         # If no WS tick arrived yet (common at startup), fetch real market price
         # directly from Bitvavo to avoid failing live bot startup.
@@ -967,6 +1064,7 @@ class BitvavoExchange(Exchange):
         if fill is not None:
             with self._fills_lock:
                 self._fills.append(fill)
+            self._market_activity_event.set()
 
     def place_limit_order(
         self,

@@ -8,6 +8,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from threading import Lock
+from threading import Condition
 
 from manager.app.database import SessionLocal
 from manager.app.models import TradeEvent
@@ -17,6 +18,33 @@ from manager.app.models import TradeEvent
 AGENT_EVENTS: list[dict] = []
 AGENT_EVENTS_LOCK = Lock()
 MAX_AGENT_EVENTS = 300
+
+# ── Dashboard realtime updates (SSE broker) ───────────────────────
+
+DASHBOARD_UPDATES_LOCK = Lock()
+DASHBOARD_UPDATES_CONDITION = Condition(DASHBOARD_UPDATES_LOCK)
+_dashboard_update_seq = 0
+_dashboard_update_event = "init"
+_dashboard_update_data: dict = {}
+
+
+def publish_dashboard_update(event: str, data: dict | None = None) -> int:
+    """Publish a lightweight dashboard update signal for SSE listeners."""
+    global _dashboard_update_seq, _dashboard_update_event, _dashboard_update_data
+    with DASHBOARD_UPDATES_CONDITION:
+        _dashboard_update_seq += 1
+        _dashboard_update_event = str(event or "update")
+        _dashboard_update_data = data if isinstance(data, dict) else {}
+        DASHBOARD_UPDATES_CONDITION.notify_all()
+        return _dashboard_update_seq
+
+
+def wait_for_dashboard_update(last_seq: int, timeout_seconds: float = 15.0) -> tuple[int, str, dict]:
+    """Block until a newer dashboard update is available or timeout elapses."""
+    with DASHBOARD_UPDATES_CONDITION:
+        if _dashboard_update_seq <= int(last_seq):
+            DASHBOARD_UPDATES_CONDITION.wait(timeout=max(0.0, float(timeout_seconds)))
+        return _dashboard_update_seq, _dashboard_update_event, dict(_dashboard_update_data)
 
 
 def add_agent_event(agent_id: str, event_type: str, message: str) -> None:
@@ -38,6 +66,7 @@ def add_agent_event(agent_id: str, event_type: str, message: str) -> None:
         AGENT_EVENTS.insert(0, event)
         if len(AGENT_EVENTS) > MAX_AGENT_EVENTS:
             del AGENT_EVENTS[MAX_AGENT_EVENTS:]
+    publish_dashboard_update("agent_event", {"agent_id": agent_id, "event_type": event_type})
 
 # ── Trade events (persisted to DB) ───────────────────────────
 
@@ -142,6 +171,7 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
         db.commit()
     finally:
         db.close()
+    publish_dashboard_update("trade_event", {"bot_id": bot_id, "event_type": event_type, "side": side})
     return event_id
 
 
@@ -213,3 +243,5 @@ def add_equity_point(bot_id: str, timestamp: str, total_equity: float, price: fl
         EQUITY_HISTORY[bot_id].append(point)
         if len(EQUITY_HISTORY[bot_id]) > MAX_EQUITY_POINTS:
             EQUITY_HISTORY[bot_id] = EQUITY_HISTORY[bot_id][-MAX_EQUITY_POINTS:]
+    # Equity updates are emitted as lightweight wake-up signals.
+    publish_dashboard_update("equity_point", {"bot_id": bot_id})

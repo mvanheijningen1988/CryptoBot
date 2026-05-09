@@ -59,6 +59,7 @@ class BotSnapshot(BaseModel):
     """Point-in-time metrics snapshot pushed from an agent to the manager."""
 
     bot_id: str
+    runtime_seconds: int = 0
     timestamp: datetime
     price: float
     quote_balance: float
@@ -83,6 +84,7 @@ class RunnerState(BaseModel):
     open_orders: dict[int, str] = Field(default_factory=dict)
     filled_buys: list[int] = Field(default_factory=list)
     filled_amounts: dict[int, float] = Field(default_factory=dict)
+    started_at: datetime | None = None
     price: float = 0.0
     quote_balance: float = 0.0
     base_balance: float = 0.0

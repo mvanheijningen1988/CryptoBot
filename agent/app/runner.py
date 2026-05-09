@@ -128,11 +128,12 @@ class BotRunner:
         self.state = StrategyState()
 
         self.price = getattr(self.exchange, 'price', 0.0)
-        self.initial_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+        self.initial_equity = config.budget.quote_budget + config.budget.base_budget * self.price
         self.realized_pnl = 0.0
         self.skimmed_quote = 0.0
         self.trade_count = 0
         self._pending_trade_events: list[dict] = []
+        self.started_at: datetime | None = None
 
     def _wait_for_initial_price(self) -> bool:
         """Block until the exchange provides the first usable price."""
@@ -155,9 +156,13 @@ class BotRunner:
 
     def _build_snapshot(self, status: str) -> BotSnapshot:
         """Create a snapshot for the current bot state."""
-        total_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+        total_equity = self._calculate_total_equity()
+        runtime_seconds = 0
+        if self.started_at is not None:
+            runtime_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
         return BotSnapshot(
             bot_id=self.bot_id,
+            runtime_seconds=runtime_seconds,
             timestamp=datetime.now(timezone.utc),
             price=self.price,
             quote_balance=self.exchange.quote_balance,
@@ -170,6 +175,40 @@ class BotRunner:
             trade_count=self.trade_count,
             status=status,
         )
+
+    def _calculate_total_equity(self) -> float:
+        """Return full mark-to-market equity, including reserved live orders when available."""
+        if self.trade_count == 0:
+            # Keep the startup baseline stable only while balances still match
+            # the configured starting base position. If base holdings changed
+            # (e.g. restored session or exchange-side buy fill), use
+            # mark-to-market immediately.
+            base_delta = abs(float(self.exchange.base_balance) - float(self.config.budget.base_budget))
+            if base_delta <= 1e-12:
+                return self.initial_equity
+
+        total_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+        if self.config.mode != "live":
+            return total_equity
+
+        open_orders = getattr(self.exchange, "_limit_orders", None)
+        if not isinstance(open_orders, dict):
+            return total_equity
+
+        reserved_quote = 0.0
+        reserved_base_value = 0.0
+        for order in open_orders.values():
+            if not isinstance(order, dict):
+                continue
+            side = str(order.get("side", "") or "").lower()
+            quote_amount = float(order.get("quote_amount") or 0.0)
+            limit_price = float(order.get("limit_price") or 0.0)
+            if side == "buy":
+                reserved_quote += max(0.0, quote_amount)
+            elif side == "sell" and limit_price > 0 and self.price > 0:
+                reserved_base_value += max(0.0, (quote_amount / limit_price) * self.price)
+
+        return total_equity + reserved_quote + reserved_base_value
 
     def _bitvavo_operator_id(self) -> int:
         """Derive a stable positive int64 operatorId from the bot identifier."""
@@ -223,6 +262,27 @@ class BotRunner:
             fee_rate=float(config.fee_rate or os.getenv("SIM_MAKER_FEE_RATE", os.getenv("SIM_FEE_RATE", "0.0"))),
         )
 
+    def _apply_live_fill_to_virtual_balances(self, fill: dict) -> None:
+        """Apply one confirmed live fill to bot-scoped virtual balances."""
+        side = str(fill.get("side", "") or "").lower()
+        quote_amount = float(fill.get("quote_amount", 0.0) or 0.0)
+        fill_price = float(fill.get("fill_price", 0.0) or 0.0)
+        fee_paid_quote = float(fill.get("fee_paid_quote", 0.0) or 0.0)
+
+        if quote_amount <= 0 or fill_price <= 0:
+            return
+
+        base_amount = quote_amount / fill_price
+
+        if side == "buy":
+            self.exchange.quote_balance -= quote_amount
+            # Convert fee to base-equivalent so base holdings reflect net position.
+            net_base = max(0.0, base_amount - (fee_paid_quote / fill_price if fee_paid_quote > 0 else 0.0))
+            self.exchange.base_balance += net_base
+        elif side == "sell":
+            self.exchange.base_balance = max(0.0, self.exchange.base_balance - base_amount)
+            self.exchange.quote_balance += max(0.0, quote_amount - fee_paid_quote)
+
     def start(self, restored: bool = False) -> None:
         """
         Start the exchange connection and launch the trading loop.
@@ -235,6 +295,8 @@ class BotRunner:
         if self.running:
             return
         self.running = True
+        if self.started_at is None:
+            self.started_at = datetime.now(timezone.utc)
         self.thread = threading.Thread(target=self._startup_and_loop, args=(restored,), daemon=True)
         self.thread.start()
 
@@ -244,23 +306,30 @@ class BotRunner:
             self.exchange.start()
 
             if not restored:
-                quote_balance, base_balance = self.exchange.get_balances()
-                self.exchange.quote_balance = quote_balance
-                self.exchange.base_balance = base_balance
+                if self.config.mode == "live":
+                    # Keep bot accounting isolated from full-account balances.
+                    self.exchange.quote_balance = float(self.config.budget.quote_budget)
+                    self.exchange.base_balance = float(self.config.budget.base_budget)
+                else:
+                    quote_balance, base_balance = self.exchange.get_balances()
+                    self.exchange.quote_balance = quote_balance
+                    self.exchange.base_balance = base_balance
 
             if not self._wait_for_initial_price():
                 return
 
             if not restored:
                 self.strategy.on_price(self.price, self.state)
-                self.initial_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+                self.initial_equity = self.config.budget.quote_budget + self.config.budget.base_budget * self.price
                 synced_levels = self._sync_existing_live_open_orders()
                 if synced_levels:
+                    levels_sorted = sorted(synced_levels)
+                    levels_text = ", ".join(str(level) for level in levels_sorted)
                     self.log_store.add(
                         "orders_recovered",
-                        f"Recovered {len(synced_levels)} existing open order(s) from exchange before seeding.",
+                        f"Recovered {len(synced_levels)} existing open order(s) from exchange before seeding. Levels: {levels_text}",
                         bot_id=self.bot_id,
-                        data={"levels": sorted(synced_levels)},
+                        data={"levels": levels_sorted},
                         category="system",
                     )
                 # Publish the first running snapshot before submitting initial orders
@@ -277,11 +346,13 @@ class BotRunner:
 
                 synced_levels = self._sync_existing_live_open_orders()
                 if synced_levels:
+                    levels_sorted = sorted(synced_levels)
+                    levels_text = ", ".join(str(level) for level in levels_sorted)
                     self.log_store.add(
                         "orders_recovered",
-                        f"Recovered {len(synced_levels)} existing open order(s) from exchange before restore.",
+                        f"Recovered {len(synced_levels)} existing open order(s) from exchange before restore. Levels: {levels_text}",
                         bot_id=self.bot_id,
-                        data={"levels": sorted(synced_levels)},
+                        data={"levels": levels_sorted},
                         category="system",
                     )
 
@@ -444,6 +515,7 @@ class BotRunner:
             open_orders={int(k): v for k, v in self.state.open_orders.items()},
             filled_buys=sorted(self.state.filled_buys),
             filled_amounts={int(k): v for k, v in self.state.filled_amounts.items()},
+            started_at=self.started_at,
             price=self.price,
             quote_balance=self.exchange.quote_balance,
             base_balance=self.exchange.base_balance,
@@ -459,6 +531,7 @@ class BotRunner:
         self.state.open_orders = {int(k): v for k, v in rs.open_orders.items()}
         self.state.filled_buys = set(rs.filled_buys)
         self.state.filled_amounts = {int(k): v for k, v in rs.filled_amounts.items()}
+        self.started_at = rs.started_at or self.started_at
         self.price = rs.price
         self.exchange.quote_balance = rs.quote_balance
         self.exchange.base_balance = rs.base_balance
@@ -543,18 +616,6 @@ class BotRunner:
             data={"matched_levels": sorted(synced_levels), "matches": recovery_details},
             category="system",
         )
-        for match in recovery_details:
-            level_idx = match.get("level_index")
-            ref = match.get("client_reference")
-            method = match.get("match_method")
-            exchange_order_id = match.get("exchange_order_id")
-            self.log_store.add(
-                "orders_recovered",
-                f"Recovered open order for level {level_idx} ({ref}) via {method}: {exchange_order_id}",
-                bot_id=self.bot_id,
-                data=match,
-                category="system",
-            )
         return synced_levels
 
     def _limit_order_readiness(self, level_idx: int, side: str, limit_price: float) -> tuple[bool, str | None, dict | None]:
@@ -778,17 +839,20 @@ class BotRunner:
                         level_index=idx,
                     )
 
-                    before_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+                    before_equity = self._calculate_total_equity()
 
                     # Confirm the fill — places follow-up orders in state
                     orders_before = set(self.state.open_orders.keys())
                     self.strategy.confirm_fill(signal, self.state)
 
                     # Update balances
-                    quote_balance, base_balance = self.exchange.get_balances()
-                    self.exchange.quote_balance = quote_balance
-                    self.exchange.base_balance = base_balance
-                    after_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+                    if self.config.mode == "live" and isinstance(self.exchange, BitvavoExchange):
+                        self._apply_live_fill_to_virtual_balances(fill)
+                    else:
+                        quote_balance, base_balance = self.exchange.get_balances()
+                        self.exchange.quote_balance = quote_balance
+                        self.exchange.base_balance = base_balance
+                    after_equity = self._calculate_total_equity()
                     trade_pnl = after_equity - before_equity
                     self.realized_pnl += trade_pnl
                     self.trade_count += 1
@@ -819,7 +883,7 @@ class BotRunner:
                         "price": fill_price,
                         "level_index": idx,
                         "trade_pnl": round(trade_pnl, 6),
-                        "total_equity": round(self.exchange.quote_balance + self.exchange.base_balance * self.price, 4),
+                        "total_equity": round(self._calculate_total_equity(), 4),
                         "trade_number": self.trade_count,
                     })
 
@@ -828,13 +892,14 @@ class BotRunner:
                         if new_idx not in orders_before:
                             self._place_limit_order(new_idx, "follow-up")
 
-            quote_balance, base_balance = self.exchange.get_balances()
-            self.exchange.quote_balance = quote_balance
-            self.exchange.base_balance = base_balance
+            if self.config.mode != "live":
+                quote_balance, base_balance = self.exchange.get_balances()
+                self.exchange.quote_balance = quote_balance
+                self.exchange.base_balance = base_balance
 
-            total_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+            total_equity = self._calculate_total_equity()
             self._apply_profit_mode(total_equity)
-            total_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+            total_equity = self._calculate_total_equity()
 
             # Re-check waiting orders as market price / balances change.
             self._place_ready_open_orders("pending")
@@ -895,7 +960,9 @@ class RunnerManager:
         runner = self.runners.get(bot_id)
         if not runner:
             raise RuntimeError("Bot is not running on this agent")
-        return runner.prepare_delete(delete_mode)
+        details = runner.prepare_delete(delete_mode)
+        self.runners.pop(bot_id, None)
+        return details
 
     def update_budget(self, bot_id: str, budget: BudgetConfig) -> None:
         """
