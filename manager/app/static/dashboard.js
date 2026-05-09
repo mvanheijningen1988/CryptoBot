@@ -69,6 +69,12 @@ let lastGridPreview = null;
 /** Currently selected agent ID for the logs modal. */
 let selectedAgentId = null;
 
+/** Optional selected bot ID when the logs modal is opened from bot actions. */
+let selectedLogBotId = null;
+
+/** Optional bot name shown in the logs modal title for bot logs. */
+let selectedLogBotName = "";
+
 /** Whether the agent-logs modal is currently visible. */
 let logsModalOpen = false;
 
@@ -86,6 +92,274 @@ let marketSnapshot = null;
 
 /** Metadata map (market → {base, quote, status}) loaded from /api/markets. */
 const marketMeta = new Map();
+let marketOptions = [];
+let marketHighlightIndex = -1;
+let lastFeeSnapshot = null;
+const MAX_DECIMALS = 8;
+
+function roundToDecimals(value, decimals = MAX_DECIMALS) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  const factor = 10 ** decimals;
+  return Math.round(n * factor) / factor;
+}
+
+function clampInputDecimals(inputEl, decimals = MAX_DECIMALS) {
+  if (!inputEl) return;
+  const raw = String(inputEl.value ?? "");
+  const dotIndex = raw.indexOf(".");
+  if (dotIndex < 0) return;
+  const intPart = raw.slice(0, dotIndex);
+  const fracPart = raw.slice(dotIndex + 1);
+  if (fracPart.length <= decimals) return;
+  inputEl.value = `${intPart}.${fracPart.slice(0, decimals)}`;
+}
+
+function bindMaxDecimalInput(id, decimals = MAX_DECIMALS) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener("input", () => clampInputDecimals(el, decimals));
+}
+
+function placeFloatingMenu(anchorEl, menuEl, maxHeight = 240) {
+  if (!anchorEl || !menuEl) return;
+  const rect = anchorEl.getBoundingClientRect();
+  const viewportH = window.innerHeight;
+  const spaceBelow = viewportH - rect.bottom - 8;
+  const spaceAbove = rect.top - 8;
+  const openUp = spaceBelow < 180 && spaceAbove > spaceBelow;
+  const menuHeight = Math.max(120, Math.min(maxHeight, openUp ? spaceAbove : spaceBelow));
+
+  menuEl.style.left = `${Math.max(8, rect.left)}px`;
+  menuEl.style.width = `${Math.max(180, rect.width)}px`;
+  menuEl.style.maxHeight = `${menuHeight}px`;
+  if (openUp) {
+    menuEl.style.top = `${Math.max(8, rect.top - menuHeight - 4)}px`;
+  } else {
+    menuEl.style.top = `${Math.min(viewportH - 8, rect.bottom + 4)}px`;
+  }
+}
+
+function closeAllAppSelects() {
+  document.querySelectorAll(".app-select.open").forEach((el) => el.classList.remove("open"));
+}
+
+function refreshAppSelect(selectEl) {
+  if (!selectEl) return;
+  const wrapper = selectEl.nextElementSibling;
+  if (!wrapper || !wrapper.classList.contains("app-select")) return;
+  const label = wrapper.querySelector(".app-select-label");
+  const menu = wrapper.querySelector(".app-select-menu");
+  if (!label || !menu) return;
+
+  const options = [...selectEl.options];
+  const current = options.find((o) => o.value === selectEl.value) || options[0];
+  label.textContent = current ? current.textContent : "";
+  menu.innerHTML = "";
+
+  options.forEach((opt) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `app-select-item${opt.value === selectEl.value ? " current" : ""}${opt.disabled ? " disabled" : ""}`;
+    btn.textContent = opt.textContent;
+    if (opt.disabled) {
+      btn.disabled = true;
+    } else {
+      btn.onclick = () => {
+        selectEl.value = opt.value;
+        selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+        refreshAppSelect(selectEl);
+        wrapper.classList.remove("open");
+      };
+    }
+    menu.appendChild(btn);
+  });
+}
+
+function initAppSelect(selectEl) {
+  if (!selectEl || selectEl.dataset.customized === "1") return;
+  if (selectEl.id === "market") return;
+
+  selectEl.dataset.customized = "1";
+  selectEl.classList.add("app-select-native");
+
+  const wrap = document.createElement("div");
+  wrap.className = "app-select";
+  wrap.innerHTML = `<button type="button" class="app-select-trigger"><span class="app-select-label"></span><span class="app-select-caret">▾</span></button><div class="app-select-menu"></div>`;
+  selectEl.insertAdjacentElement("afterend", wrap);
+
+  const trigger = wrap.querySelector(".app-select-trigger");
+  trigger.onclick = (e) => {
+    e.stopPropagation();
+    const isOpen = wrap.classList.contains("open");
+    closeAllAppSelects();
+    if (!isOpen) {
+      wrap.classList.add("open");
+      placeFloatingMenu(trigger, wrap.querySelector(".app-select-menu"), 260);
+    }
+  };
+
+  selectEl.addEventListener("change", () => refreshAppSelect(selectEl));
+  refreshAppSelect(selectEl);
+}
+
+function initAllAppSelects() {
+  document.querySelectorAll("select").forEach((sel) => initAppSelect(sel));
+}
+
+function refreshAllAppSelects() {
+  document.querySelectorAll("select").forEach((sel) => refreshAppSelect(sel));
+}
+
+function normalizeMarketValue(raw) {
+  return String(raw || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\//g, "-")
+    .replace(/\s+/g, "");
+}
+
+function getMarketInput() {
+  return document.getElementById("market");
+}
+
+function closeMarketSuggestions() {
+  const menu = document.getElementById("market_suggestions");
+  if (!menu) return;
+  menu.classList.remove("open");
+  menu.innerHTML = "";
+  marketHighlightIndex = -1;
+}
+
+function renderMarketSuggestions(query = "") {
+  const menu = document.getElementById("market_suggestions");
+  const input = getMarketInput();
+  if (!menu) return;
+  const q = normalizeMarketValue(query);
+  const filtered = marketOptions.filter((m) => !q || m.includes(q)).slice(0, 30);
+  menu.innerHTML = "";
+  if (!filtered.length) {
+    menu.innerHTML = `<div class="combo-empty">No markets found</div>`;
+    menu.classList.add("open");
+    if (input) placeFloatingMenu(input, menu, 260);
+    marketHighlightIndex = -1;
+    return;
+  }
+  filtered.forEach((market, idx) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "combo-item";
+    btn.dataset.market = market;
+    btn.dataset.idx = String(idx);
+    btn.textContent = market;
+    btn.onclick = () => {
+      const input = getMarketInput();
+      if (!input) return;
+      input.value = market;
+      closeMarketSuggestions();
+      onMarketValueCommitted();
+    };
+    menu.appendChild(btn);
+  });
+  marketHighlightIndex = 0;
+  menu.classList.add("open");
+  if (input) placeFloatingMenu(input, menu, 260);
+}
+
+function updateMarketHighlight(delta) {
+  const menu = document.getElementById("market_suggestions");
+  if (!menu || !menu.classList.contains("open")) return;
+  const items = [...menu.querySelectorAll(".combo-item")];
+  if (!items.length) return;
+  marketHighlightIndex = (marketHighlightIndex + delta + items.length) % items.length;
+  items.forEach((el, idx) => el.classList.toggle("active", idx === marketHighlightIndex));
+  items[marketHighlightIndex]?.scrollIntoView({ block: "nearest" });
+}
+
+function onMarketValueCommitted() {
+  const input = getMarketInput();
+  if (!input) return;
+  input.value = normalizeMarketValue(input.value);
+  closeMarketSuggestions();
+  startMarketRealtime();
+  loadBalances();
+  loadMarketFees(true);
+  renderMinimumOrderHint();
+  scheduleGridCheck();
+}
+
+function formatPctFromRate(rate) {
+  const n = Number(rate || 0) * 100;
+  return `${n.toFixed(4)}%`;
+}
+
+function tr(key, fallback) {
+  const value = t(key);
+  return value === key ? fallback : value;
+}
+
+function fillTemplate(template, values) {
+  let output = String(template || "");
+  for (const [key, value] of Object.entries(values || {})) {
+    output = output.replaceAll(`{${key}}`, String(value));
+  }
+  return output;
+}
+
+function renderFeeInfo(snapshot) {
+  const box = document.getElementById("fee_info_box");
+  if (!box) return;
+  const title = tr("lbl_fee_info_title", "Bitvavo fees");
+  const tierLabel = tr("lbl_fee_tier", "Tier");
+  const volumeLabel = tr("lbl_fee_volume_30d", "30d volume");
+  const marketRatesLabel = tr("lbl_fee_market_rates", "Market rates");
+  const accountRatesLabel = tr("lbl_fee_account_rates", "Account rates");
+  const appliedLabelText = tr("lbl_fee_applied", "Applied to this bot");
+  const makerLabel = tr("lbl_maker", "Maker");
+  const takerLabel = tr("lbl_taker", "Taker");
+  const unavailableLabel = tr("lbl_fee_info_unavailable", "Bitvavo fees are currently unavailable.");
+
+  if (!snapshot || !snapshot.available) {
+    box.classList.add("warn");
+    const msg = snapshot?.message || unavailableLabel;
+    box.innerHTML = `<strong>${title}</strong><br>${msg}`;
+    return;
+  }
+
+  box.classList.remove("warn");
+  const tier = snapshot.tier ?? "-";
+  const volume = formatNumber(snapshot.volume_30d_eur ?? 0);
+  const marketMaker = formatPctFromRate(snapshot.market_maker_fee_rate);
+  const marketTaker = formatPctFromRate(snapshot.market_taker_fee_rate);
+  const accountMaker = formatPctFromRate(snapshot.account_maker_fee_rate);
+  const accountTaker = formatPctFromRate(snapshot.account_taker_fee_rate);
+  const applied = formatPctFromRate(snapshot.applied_fee_rate);
+  const appliedLabel = snapshot.applied_fee_type === "taker" ? takerLabel : makerLabel;
+
+  box.innerHTML = [
+    `<strong>${title}</strong>`,
+    `${tierLabel}: ${tier} | ${volumeLabel}: ${volume} EUR`,
+    `${marketRatesLabel}: ${makerLabel} ${marketMaker} / ${takerLabel} ${marketTaker}`,
+    `${accountRatesLabel}: ${makerLabel} ${accountMaker} / ${takerLabel} ${accountTaker}`,
+    `${appliedLabelText}: ${applied} (${appliedLabel})`,
+  ].join("<br>");
+}
+
+async function loadMarketFees(forceSet = false) {
+  const market = normalizeMarketValue(getMarketInput()?.value);
+  const box = document.getElementById("fee_info_box");
+  if (!box || !market) return;
+
+  try {
+    const data = await api(`/api/v1/market/fees?market=${encodeURIComponent(market)}`);
+    lastFeeSnapshot = data;
+    renderFeeInfo(data);
+    if (forceSet) scheduleGridCheck();
+  } catch (err) {
+    lastFeeSnapshot = { available: false, message: String(err.message || err) };
+    renderFeeInfo(lastFeeSnapshot);
+  }
+}
 
 // ──────────────────────────────────────────────────────────────
 // Authenticated API helper
@@ -138,7 +412,7 @@ async function api(url, options = {}) {
  * @returns {object} Configuration payload.
  */
 function currentConfig() {
-  const market = document.getElementById("market").value;
+  const market = normalizeMarketValue(document.getElementById("market").value);
   const marketInfo = marketMeta.get(market) || {};
   const split = market.split("-");
   return {
@@ -147,20 +421,73 @@ function currentConfig() {
     quote_currency: marketInfo.quote || split[1] || "",
     mode: document.getElementById("mode").value,
     strategy: "static_grid",
+    fee_rate: roundToDecimals(Number(lastFeeSnapshot?.applied_fee_rate || 0)),
     start_price: 0,
     grid: {
-      lower_price: Number(document.getElementById("lower_price").value),
-      upper_price: Number(document.getElementById("upper_price").value),
+      lower_price: roundToDecimals(Number(document.getElementById("lower_price").value)),
+      upper_price: roundToDecimals(Number(document.getElementById("upper_price").value)),
       levels: Number(document.getElementById("levels").value),
-      order_size_quote: Number(document.getElementById("order_size_quote").value),
+      order_size_quote: roundToDecimals(Number(document.getElementById("order_size_quote").value)),
     },
     budget: {
-      quote_budget: Number(document.getElementById("quote_budget").value),
+      quote_budget: roundToDecimals(Number(document.getElementById("quote_budget").value)),
       base_budget: 0,
       profit_mode: document.getElementById("profit_mode").value,
-      skim_ratio: Number(document.getElementById("skim_ratio").value),
+      skim_ratio: roundToDecimals(Number(document.getElementById("skim_ratio").value)),
     },
   };
+}
+
+function getMinimumRequiredOrderSizeQuote(config) {
+  if (!config || config.mode !== "live") return null;
+  const meta = marketMeta.get(config.market);
+  if (!meta) return null;
+  const minQuote = Number(meta.min_order_in_quote_asset || 0);
+  const minBase = Number(meta.min_order_in_base_asset || 0);
+  const maxGridPrice = Math.max(Number(config.grid?.lower_price || 0), Number(config.grid?.upper_price || 0));
+  const minQuoteFromBase = minBase > 0 && maxGridPrice > 0 ? minBase * maxGridPrice : 0;
+  const requiredQuote = Math.max(minQuote, minQuoteFromBase);
+  if (!(requiredQuote > 0)) return null;
+  return {
+    requiredQuote,
+    minQuote,
+    minBase,
+    minQuoteFromBase,
+    quoteCurrency: config.quote_currency,
+    baseCurrency: config.base_currency,
+    maxGridPrice,
+  };
+}
+
+function renderMinimumOrderHint(config = currentConfig()) {
+  const hintEl = document.getElementById("min_order_hint");
+  if (!hintEl) return;
+
+  hintEl.classList.remove("warn", "ok");
+
+  if (config.mode !== "live") {
+    hintEl.textContent = t("lbl_min_order_hint_live_only");
+    return;
+  }
+
+  const limits = getMinimumRequiredOrderSizeQuote(config);
+  if (!limits) {
+    hintEl.textContent = t("lbl_min_order_hint_unavailable");
+    return;
+  }
+
+  const values = {
+    required: formatNumber(limits.requiredQuote),
+    quote: limits.quoteCurrency,
+  };
+  const currentOrderSize = Number(config.grid?.order_size_quote || 0);
+  const isValid = currentOrderSize + 1e-12 >= limits.requiredQuote;
+
+  hintEl.textContent = fillTemplate(
+    t(isValid ? "lbl_min_order_hint_ok" : "lbl_min_order_hint_warn"),
+    values,
+  );
+  hintEl.classList.add(isValid ? "ok" : "warn");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -278,22 +605,25 @@ function resetMarketSummaryToNA() {
  * populate the <select id="market"> dropdown.
  */
 async function loadMarkets() {
-  const sel = document.getElementById("market");
+  const input = getMarketInput();
+  if (!input) return;
   try {
     const markets = await api("/api/v1/markets?status=trading");
-    const cur = sel.value;
-    sel.innerHTML = "";
+    const current = normalizeMarketValue(input.value);
     marketMeta.clear();
+    marketOptions = [];
     for (const item of markets) {
       marketMeta.set(item.market, item);
-      const o = document.createElement("option");
-      o.value = item.market;
-      o.textContent = item.market;
-      sel.appendChild(o);
+      marketOptions.push(item.market);
     }
+    marketOptions.sort();
     // Restore previous selection or default to BTC-EUR
-    if (cur && marketMeta.has(cur)) sel.value = cur;
-    else if (marketMeta.has("BTC-EUR")) sel.value = "BTC-EUR";
+    if (current && marketMeta.has(current)) input.value = current;
+    else if (marketMeta.has("BTC-EUR")) input.value = "BTC-EUR";
+    else if (marketOptions.length) input.value = marketOptions[0];
+    renderMarketSuggestions(input.value);
+    closeMarketSuggestions();
+    renderMinimumOrderHint();
   } catch (err) {
     console.error("Failed to load markets", err);
   }
@@ -304,7 +634,7 @@ async function loadMarkets() {
  * and update the market stats panel.
  */
 async function loadMarketSummary() {
-  const market = document.getElementById("market").value.trim();
+  const market = normalizeMarketValue(getMarketInput()?.value);
   if (!market) { resetMarketSummaryToNA(); return; }
   try {
     const s = await api(`/api/v1/market/summary?market=${encodeURIComponent(market)}`);
@@ -328,7 +658,7 @@ async function loadMarketSummary() {
  * Also auto-fills the quote_budget field.
  */
 async function loadBalances() {
-  const market = document.getElementById("market").value.trim();
+  const market = normalizeMarketValue(getMarketInput()?.value);
   const quoteEl = document.getElementById("avail_quote");
   const baseEl = document.getElementById("avail_base");
   quoteEl.textContent = "-";
@@ -350,6 +680,7 @@ async function loadBalances() {
 
     // Pre-fill budget with full available balance
     document.getElementById("quote_budget").value = formatNumber(availQuote);
+    syncBudgetAndOrderSize("budget");
   } catch (err) {
     console.error("Failed to load balances", err);
     quoteEl.textContent = "n/a";
@@ -409,7 +740,7 @@ function handleMarketSocketMessage(raw) {
  * selected market. Automatically reconnects on close after 1.5 s.
  */
 function startMarketRealtime() {
-  const market = document.getElementById("market").value.trim();
+  const market = normalizeMarketValue(getMarketInput()?.value);
   closeMarketSocket();
   marketSocketMarket = market;
   if (!market) { resetMarketSummaryToNA(); return; }
@@ -423,7 +754,7 @@ function startMarketRealtime() {
   marketSocket.onclose = () => {
     if (marketSocketMarket !== market) return;  // Market changed, don't reconnect
     marketReconnectTimer = setTimeout(() => {
-      if (document.getElementById("market").value.trim() === market) startMarketRealtime();
+      if (normalizeMarketValue(getMarketInput()?.value) === market) startMarketRealtime();
     }, 1500);
   };
 
@@ -441,31 +772,55 @@ function startMarketRealtime() {
  */
 async function checkGridProfitability() {
   try {
-    const payload = {
+    const basePayload = {
       grid: {
         lower_price: Number(document.getElementById("lower_price").value),
         upper_price: Number(document.getElementById("upper_price").value),
         levels: Number(document.getElementById("levels").value),
         order_size_quote: Number(document.getElementById("order_size_quote").value),
       },
-      fee_rate: Number(document.getElementById("fee_rate_percent").value) / 100,
     };
-    const r = await api("/api/v1/strategy/static-grid/preview", { method: "POST", body: JSON.stringify(payload) });
-    lastGridPreview = r;
+    const makerRate = Number(lastFeeSnapshot?.market_maker_fee_rate ?? lastFeeSnapshot?.account_maker_fee_rate ?? 0);
+    const takerRate = Number(lastFeeSnapshot?.market_taker_fee_rate ?? lastFeeSnapshot?.account_taker_fee_rate ?? 0);
+    const [makerPreview, takerPreview] = await Promise.all([
+      api("/api/v1/strategy/static-grid/preview", { method: "POST", body: JSON.stringify({ ...basePayload, fee_rate: makerRate }) }),
+      api("/api/v1/strategy/static-grid/preview", { method: "POST", body: JSON.stringify({ ...basePayload, fee_rate: takerRate }) }),
+    ]);
 
-    const cls = r.is_profitable ? "profit-ok" : "profit-warn";
-    const txt = r.is_profitable ? t("grid_profitable") : t("grid_not_profitable");
+    const appliedType = lastFeeSnapshot?.applied_fee_type === "maker" ? "maker" : "taker";
+    const appliedPreview = appliedType === "maker" ? makerPreview : takerPreview;
+    const combinedPreview = {
+      ...appliedPreview,
+      fee_context: {
+        maker_rate: makerRate,
+        taker_rate: takerRate,
+        applied_type: appliedType,
+        maker: makerPreview,
+        taker: takerPreview,
+      },
+    };
+
+    lastGridPreview = combinedPreview;
+
+    const cls = combinedPreview.is_profitable ? "profit-ok" : "profit-warn";
+    const txt = combinedPreview.is_profitable ? t("grid_profitable") : t("grid_not_profitable");
 
     const inlineEl = document.getElementById("grid_profit_summary");
     if (inlineEl) {
-      inlineEl.innerHTML = `<span class="${cls}"><strong>${txt}</strong></span> — <a href="#" id="grid_preview_link" style="color:var(--accent)">${t("btn_view_details")}</a>`;
-      document.getElementById("grid_preview_link").onclick = (e) => { e.preventDefault(); openGridPreviewModal(r); };
+      inlineEl.innerHTML = `<span class="${cls}"><strong>${txt}</strong></span> — <a href="#" id="grid_preview_link" data-action="open-grid-preview" style="color:var(--accent)">${t("btn_view_details")}</a>`;
+      const linkEl = inlineEl.querySelector("#grid_preview_link");
+      if (linkEl) {
+        linkEl.onclick = (e) => {
+          e.preventDefault();
+          openGridPreviewModal(combinedPreview);
+        };
+      }
     }
 
     // If the preview modal is already open, refresh its content in-place
     const previewModal = document.getElementById("grid_preview_modal");
     if (previewModal && previewModal.open) {
-      openGridPreviewModal(r, true);
+      openGridPreviewModal(combinedPreview, true);
     }
   } catch (err) {
     lastGridPreview = null;
@@ -480,31 +835,40 @@ async function checkGridProfitability() {
  */
 function openGridPreviewModal(r, skipShowModal = false) {
   const modal = document.getElementById("grid_preview_modal");
-  const summary = document.getElementById("grid_preview_summary");
   const tbody = document.getElementById("grid_trades_body");
-
-  const cls = r.is_profitable ? "profit-ok" : "profit-warn";
-  const txt = r.is_profitable ? t("grid_profitable") : t("grid_not_profitable");
-
-  summary.innerHTML = `
-    <div class="${cls}"><strong>${txt}</strong></div>
-    <div>${t("grid_step_size")}: ${formatNumber(r.step_size)} (${formatNumber(r.step_percent)}%)</div>
-    <div>${t("grid_profit_per_trade")} ${formatNumber(r.profit_per_trade_quote_min)}, ${t("grid_avg")} ${formatNumber(r.profit_per_trade_quote_avg)}, ${t("grid_max")} ${formatNumber(r.profit_per_trade_quote_max)}</div>
-    <div>${t("grid_profitable_paths")}: ${r.profitable_trades}/${r.total_trade_paths}</div>
-    <div>${t("grid_used_fee")}: ${formatNumber(r.fee_rate * 100)}%</div>
-  `;
+  if (!modal || !tbody || !r) return;
 
   tbody.innerHTML = "";
-  for (const tr of (r.trades || [])) {
+  for (const trade of (r.trades || [])) {
     const row = document.createElement("tr");
-    const pcls = tr.profitable ? "grid-trade-ok" : "grid-trade-bad";
-    const icon = tr.profitable ? "✓" : "✗";
-    row.innerHTML = `<td>${tr.level}</td><td>${formatNumber(tr.buy_price)}</td><td>${formatNumber(tr.sell_price)}</td><td>${formatNumber(tr.order_size_quote)}</td><td class="${pcls}">${formatNumber(tr.net_profit)}</td><td class="${pcls}">${icon}</td>`;
+    const displayLevel = Number(trade.level) + 1;
+    const pcls = trade.profitable ? "grid-trade-ok" : "grid-trade-bad";
+    const icon = trade.profitable ? "✓" : "✗";
+    const feeRatePct = Number(r.fee_rate || 0) * 100;
+    const buyFee = Number(trade.buy_fee_quote || 0);
+    const sellFee = Number(trade.sell_fee_quote || 0);
+    const totalFees = Number(trade.total_fees_quote || 0);
+    const feeTitle = [
+      `${tr("lbl_fee_rate", "Fee rate")} ${formatNumber(feeRatePct)}%`,
+      `${tr("lbl_fee_tooltip_buy", "Buy fee")}: ${formatNumber(buyFee)} (${formatNumber(feeRatePct)}% ${tr("lbl_fee_tooltip_of_order_size", "of order size")})`,
+      `${tr("lbl_fee_tooltip_sell", "Sell fee")}: ${formatNumber(sellFee)} (${formatNumber(feeRatePct)}% ${tr("lbl_fee_tooltip_of_sell_value", "of sell value")})`,
+      `${tr("lbl_total_fees", "Total Fees")}: ${formatNumber(totalFees)}`,
+    ].join("\n");
+    const safeFeeTip = feeTitle.replace(/"/g, "&quot;");
+    row.innerHTML = `<td>${displayLevel}</td><td>${formatNumber(trade.buy_price)}</td><td>${formatNumber(trade.sell_price)}</td><td>${formatNumber(trade.order_size_quote)}</td><td class="grid-fee-cell" data-fee-tip="${safeFeeTip}">${formatNumber(totalFees)}</td><td class="${pcls}">${formatNumber(trade.net_profit)}</td><td class="${pcls}">${icon}</td>`;
     tbody.appendChild(row);
   }
 
   if (!skipShowModal) modal.showModal();
 }
+
+document.getElementById("grid_profit_summary")?.addEventListener("click", (e) => {
+  const target = e.target instanceof Element ? e.target : null;
+  const link = target ? target.closest("[data-action='open-grid-preview']") : null;
+  if (!link) return;
+  e.preventDefault();
+  if (lastGridPreview) openGridPreviewModal(lastGridPreview);
+});
 
 document.getElementById("close_grid_preview")?.addEventListener("click", () => {
   document.getElementById("grid_preview_modal").close();
@@ -531,37 +895,62 @@ function syncBudgetAndOrderSize(source) {
     _budgetCalcSource = "budget";
     const budget = Number(budgetEl.value) || 0;
     if (budget > 0 && levels > 0) {
-      sizeEl.value = formatNumber(budget / levels);
+      sizeEl.value = String(roundToDecimals(budget / levels));
     }
   } else if (source === "size") {
     _budgetCalcSource = "size";
     const size = Number(sizeEl.value) || 0;
     if (size > 0 && levels > 0) {
-      budgetEl.value = formatNumber(size * levels);
+      budgetEl.value = String(roundToDecimals(size * levels));
     }
   } else if (source === "levels") {
     // Recalculate based on whichever the user last touched
     if (_budgetCalcSource === "budget") {
       const budget = Number(budgetEl.value) || 0;
       if (budget > 0 && levels > 0) {
-        sizeEl.value = formatNumber(budget / levels);
+        sizeEl.value = String(roundToDecimals(budget / levels));
       }
     } else if (_budgetCalcSource === "size") {
       const size = Number(sizeEl.value) || 0;
       if (size > 0 && levels > 0) {
-        budgetEl.value = formatNumber(size * levels);
+        budgetEl.value = String(roundToDecimals(size * levels));
       }
     }
   }
+  scheduleGridCheck();
 }
 
 document.getElementById("quote_budget").addEventListener("input", () => syncBudgetAndOrderSize("budget"));
 document.getElementById("order_size_quote").addEventListener("input", () => syncBudgetAndOrderSize("size"));
 document.getElementById("levels").addEventListener("input", () => syncBudgetAndOrderSize("levels"));
+bindMaxDecimalInput("lower_price");
+bindMaxDecimalInput("upper_price");
+bindMaxDecimalInput("order_size_quote");
+bindMaxDecimalInput("quote_budget");
+bindMaxDecimalInput("skim_ratio");
 
 // ──────────────────────────────────────────────────────────────
 // Bot list
 // ──────────────────────────────────────────────────────────────
+
+function buildAgentCellHtml(bot, candidateAgents, isViewer) {
+  const assignedId = bot.assigned_agent_id || "";
+  const label = assignedId ? assignedId.slice(0, 8) : "-";
+  if (isViewer || candidateAgents.length <= 1 || !assignedId) {
+    return label;
+  }
+  const options = candidateAgents
+    .map((agent) => {
+      const short = agent.id.slice(0, 8);
+      const isCurrent = agent.id === assignedId;
+      const isUnavailable = agent.status !== "online" || agent.approval_status !== "approved";
+      const disabled = isCurrent || isUnavailable;
+      const suffix = isUnavailable ? " (offline)" : "";
+      return `<button type="button" class="agent-move-item${isCurrent ? " current" : ""}" data-move-bot-id="${bot.id}" data-target-agent-id="${agent.id}" data-bot-name="${bot.name}" ${disabled ? "disabled" : ""}>${isCurrent ? "✓ " : ""}${short}${suffix}</button>`;
+    })
+    .join("");
+  return `<div class="agent-move-dropdown" data-bot-id="${bot.id}"><span class="agent-move-pill">${label}<span class="agent-move-caret">▾</span></span><div class="agent-move-menu">${options}</div></div>`;
+}
 
 /**
  * Fetch all bots from the API and render them into the bots table.
@@ -569,6 +958,8 @@ document.getElementById("levels").addEventListener("input", () => syncBudgetAndO
  */
 async function loadBots() {
   const bots = await api("/api/v1/bots");
+  const agents = await api("/api/v1/agents");
+  const moveCandidates = agents.filter((a) => a.approval_status === "approved");
   const body = document.getElementById("bots_body");
   const isViewer = currentUser?.role === "viewer";
 
@@ -584,6 +975,7 @@ async function loadBots() {
       if (bot.id === currentVal) opt.selected = true;
       chartSelect.appendChild(opt);
     }
+    refreshAppSelect(chartSelect);
   }
 
   // Track which bot IDs are in the new data
@@ -596,7 +988,7 @@ async function loadBots() {
 
   for (const bot of bots) {
     const m = bot.latest_metrics || {};
-    const pnl = Number(m.unrealized_pnl_quote || 0);
+    const pnl = Number(m.dashboard_pnl_quote ?? m.realized_pnl_quote ?? 0);
     const trades = Number(m.trade_count || 0);
     const lastPrice = Number(m.price || 0);
     const market = bot.config?.market || "-";
@@ -604,7 +996,7 @@ async function loadBots() {
     const upperPrice = Number(bot.config?.grid?.upper_price || 0);
     const isOutsideGrid = lastPrice > 0 && lowerPrice > 0 && upperPrice > 0 && (lastPrice < lowerPrice || lastPrice > upperPrice);
     const nameHtml = isOutsideGrid
-      ? `<span class="bot-name-cell">${bot.name}<span class="bot-grid-warning" title="${t("bot_grid_warning")}">&#9888;</span></span>`
+      ? `<span class="bot-name-cell bot-grid-outside">${bot.name}<span class="bot-grid-warning" title="${t("bot_grid_warning")}">&#9888;</span></span>`
       : bot.name;
 
     const modeLabel = bot.mode === "live" ? "Live" : "Sim";
@@ -621,7 +1013,8 @@ async function loadBots() {
     } else {
       statusHtml = bot.status;
     }
-    const agentLabel = bot.assigned_agent_id ? bot.assigned_agent_id.slice(0, 8) : "-";
+    const agentHtml = buildAgentCellHtml(bot, moveCandidates, isViewer);
+    const agentTitle = bot.assigned_agent_id || "";
 
     let tr = body.querySelector(`tr[data-bot-id="${bot.id}"]`);
     if (tr) {
@@ -631,8 +1024,8 @@ async function loadBots() {
       cells[1].textContent = market;
       cells[2].innerHTML = modeLabel;
       cells[3].innerHTML = statusHtml;
-      cells[4].textContent = agentLabel;
-      cells[4].title = bot.assigned_agent_id || "";
+      cells[4].innerHTML = agentHtml;
+      cells[4].title = agentTitle;
       cells[5].textContent = priceStr;
       cells[6].textContent = formatNumber(m.total_equity_quote || 0);
       cells[7].className = pnl >= 0 ? "pnl-positive" : "pnl-negative";
@@ -645,8 +1038,8 @@ async function loadBots() {
       tr.dataset.botId = bot.id;
       const acts = isViewer
         ? "<td>-</td>"
-        : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
-      tr.innerHTML = `<td>${nameHtml}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${bot.assigned_agent_id || ''}">${agentLabel}</td><td>${priceStr}</td><td>${formatNumber(m.total_equity_quote || 0)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${formatNumber(pnl)}</td><td>${trades}</td>${acts}`;
+        : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="bot_logs">${t("btn_bot_log")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
+      tr.innerHTML = `<td>${nameHtml}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${agentTitle}">${agentHtml}</td><td>${priceStr}</td><td>${formatNumber(m.total_equity_quote || 0)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${formatNumber(pnl)}</td><td>${trades}</td>${acts}`;
       body.appendChild(tr);
       _wireUpBotRow(tr, bots);
     }
@@ -693,9 +1086,17 @@ function _wireUpBotRow(tr, bots) {
         } else if (action === "orders") {
           openOrdersModal(bot);
           return;
+        } else if (action === "bot_logs") {
+          openLogsModal(bot.assigned_agent_id || "", bot.id, bot.name);
+          await loadAgentLogs();
+          return;
         } else if (action === "delete") {
-          if (!await showConfirm(t("confirm_delete_bot"))) return;
-          await api(`/api/v1/bots/${botId}`, { method: "DELETE" });
+          const deleteMode = await showDeleteBotModeModal(bot.name || botId);
+          if (!deleteMode) return;
+          await api(`/api/v1/bots/${botId}`, {
+            method: "DELETE",
+            body: JSON.stringify({ delete_mode: deleteMode }),
+          });
         }
       } catch (err) {
         showToast(t("btn_" + action) || action, err.message || String(err), "warn", 5000);
@@ -709,9 +1110,61 @@ function _wireUpBotRow(tr, bots) {
 }
 
 // Close menus on outside click (register once)
-document.addEventListener("click", () => {
+document.addEventListener("click", (e) => {
+  closeAllAppSelects();
   document.querySelectorAll(".action-menu.open").forEach((m) => m.classList.remove("open"));
+  document.querySelectorAll(".agent-move-dropdown.open").forEach((m) => m.classList.remove("open"));
+  if (!e.target.closest(".combo-wrap")) {
+    closeMarketSuggestions();
+  }
 });
+
+document.addEventListener("click", async (e) => {
+  const trigger = e.target.closest(".agent-move-pill");
+  if (trigger) {
+    const wrap = trigger.closest(".agent-move-dropdown");
+    if (!wrap) return;
+    e.stopPropagation();
+    document.querySelectorAll(".agent-move-dropdown.open").forEach((m) => {
+      if (m !== wrap) m.classList.remove("open");
+    });
+    wrap.classList.toggle("open");
+    return;
+  }
+
+  const moveBtn = e.target.closest(".agent-move-item");
+  if (!moveBtn || moveBtn.disabled) return;
+  e.stopPropagation();
+  const botId = moveBtn.dataset.moveBotId;
+  const targetAgentId = moveBtn.dataset.targetAgentId;
+  const botName = moveBtn.dataset.botName || botId;
+  if (!botId || !targetAgentId) return;
+
+  try {
+    await api(`/api/v1/bots/${botId}/move`, {
+      method: "POST",
+      body: JSON.stringify({ agent_id: targetAgentId }),
+    });
+    showToast(t("th_agent"), `${botName} moved to ${targetAgentId.slice(0, 8)}`, "info", 3500);
+    await loadBots();
+    await loadAgents();
+    await loadEvents();
+  } catch (err) {
+    showToast(t("th_agent"), err.message || String(err), "warn", 4500);
+  }
+});
+
+window.addEventListener("resize", () => {
+  closeAllAppSelects();
+  closeMarketSuggestions();
+});
+
+document.addEventListener("scroll", (e) => {
+  if (e.target.closest(".modal") || e.target === document) {
+    closeAllAppSelects();
+    closeMarketSuggestions();
+  }
+}, true);
 
 // ──────────────────────────────────────────────────────────────
 // Toast notifications
@@ -938,16 +1391,36 @@ function _wireUpAgentRow(tr, agent) {
  * Open the logs modal for a specific agent.
  *
  * @param {string} agentId - The agent whose logs to display.
+ * @param {string|null} botId - Optional bot id to filter logs.
+ * @param {string} botName - Optional bot name for the modal title.
  */
-function openLogsModal(agentId) {
+function refreshLogsModalTitle() {
+  const titleEl = document.querySelector("#agent_logs_modal .modal-title");
+  if (!titleEl) return;
+  titleEl.textContent = selectedLogBotId
+    ? `${t("bot_logs_title")}: ${selectedLogBotName || selectedLogBotId}`
+    : t("logs_title");
+}
+
+function openLogsModal(agentId, botId = null, botName = "") {
   logsModalOpen = true;
+  selectedAgentId = agentId;
+  selectedLogBotId = botId;
+  selectedLogBotName = botName || "";
+  if (botId) {
+    const categoryEl = document.getElementById("modal_log_category");
+    if (categoryEl) categoryEl.value = "";
+  }
   document.getElementById("modal_selected_agent_id").value = agentId;
+  refreshLogsModalTitle();
   document.getElementById("agent_logs_modal").showModal();
 }
 
 /** Close the agent-logs modal and stop polling. */
 function closeLogsModal() {
   logsModalOpen = false;
+  selectedLogBotId = null;
+  selectedLogBotName = "";
   document.getElementById("agent_logs_modal").close();
 }
 
@@ -957,7 +1430,7 @@ function closeLogsModal() {
  */
 async function loadAgentLogs() {
   const list = document.getElementById("modal_agent_logs_list");
-  if (!selectedAgentId) { list.innerHTML = `<div class="log-item">${t("logs_no_agent")}</div>`; return; }
+  if (!selectedAgentId && !selectedLogBotId) { list.innerHTML = `<div class="log-item">${t("logs_no_agent")}</div>`; return; }
 
   const limit = Number(document.getElementById("modal_agent_logs_limit").value || "200");
   const category = document.getElementById("modal_log_category").value;
@@ -965,7 +1438,14 @@ async function loadAgentLogs() {
   if (category) qs.set("category", category);
 
   try {
-    const payload = await api(`/api/v1/agents/${selectedAgentId}/logs?${qs.toString()}`);
+    const url = selectedLogBotId
+      ? `/api/v1/bots/${selectedLogBotId}/logs?${qs.toString()}`
+      : `/api/v1/agents/${selectedAgentId}/logs?${qs.toString()}`;
+    const payload = await api(url);
+    if (payload?.agent_id) {
+      selectedAgentId = payload.agent_id;
+      document.getElementById("modal_selected_agent_id").value = payload.agent_id;
+    }
     const logs = payload.logs || [];
     if (!logs.length) { list.innerHTML = `<div class="log-item">${t("logs_none")}</div>`; return; }
 
@@ -1302,7 +1782,8 @@ async function loadOrders() {
       const pnlClass = ev.trade_pnl > 0 ? "pnl-positive" : ev.trade_pnl < 0 ? "pnl-negative" : "";
       const sideClass = ev.side === "buy" ? "order-buy" : ev.side === "sell" ? "order-sell" : "";
       const marketLabel = ev.market || ev.bot_name || "-";
-      tr.innerHTML = `<td>${ts}</td><td>${marketLabel}</td><td class="${typeClass}">${typeLabel}</td><td class="${sideClass}">${ev.side.toUpperCase()}</td><td>${formatNumber(ev.price)}</td><td>${formatNumber(ev.quote_amount)}</td><td class="${pnlClass}">${pnlStr}</td>`;
+      const feeStr = Number(ev.fee_paid_quote || 0) > 0 ? formatNumber(ev.fee_paid_quote) : "-";
+      tr.innerHTML = `<td>${ts}</td><td>${marketLabel}</td><td class="${typeClass}">${typeLabel}</td><td class="${sideClass}">${ev.side.toUpperCase()}</td><td>${formatNumber(ev.price)}</td><td>${formatNumber(ev.quote_amount)}</td><td>${feeStr}</td><td class="${pnlClass}">${pnlStr}</td>`;
       tr.onclick = () => openOrderDetail(ev.id);
       body.appendChild(tr);
     }
@@ -1335,8 +1816,11 @@ async function openOrderDetail(eventId) {
     html += `<div class="od-row"><span class="od-label">${t("th_market")}</span><span>${ev.market || ev.bot_name || "-"}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(ev.price)}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_amount")}</span><span>${formatNumber(ev.quote_amount)}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("th_fee_amount")}</span><span>${Number(ev.fee_paid_quote || 0) > 0 ? formatNumber(ev.fee_paid_quote) : "-"}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_time")}</span><span>${new Date(ev.timestamp).toLocaleString()}</span></div>`;
-    html += `<div class="od-row"><span class="od-label">${t("lbl_pnl")}</span><span class="${pnlClass}">${pnlStr}</span></div>`;
+    if (ev.side !== "buy") {
+      html += `<div class="od-row"><span class="od-label">${t("lbl_pnl")}</span><span class="${pnlClass}">${pnlStr}</span></div>`;
+    }
     html += `<div class="od-row"><span class="od-label">${t("lbl_equity")}</span><span>${formatNumber(ev.total_equity)}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_level")}</span><span>${ev.level_index != null ? ev.level_index : "-"}</span></div>`;
     html += `</div>`;
@@ -1354,6 +1838,8 @@ async function openOrderDetail(eventId) {
       html += `<div class="od-row"><span class="od-label">${t("lbl_quantity")}</span><span>${formatNumber(pm.quantity_base)}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("lbl_fee_rate")}</span><span>${(pm.fee_rate * 100).toFixed(2)}%</span></div>`;
       html += `</div>`;
+    } else if (ev.side === "buy") {
+      html += `<p style="color:#94a3b8;margin-top:12px;font-size:0.9rem;">${t("lbl_pair_pnl_pending_sell_fill")}</p>`;
     }
 
     // Linked order section
@@ -1369,6 +1855,7 @@ async function openOrderDetail(eventId) {
       html += `<div class="od-row"><span class="od-label">${t("th_side")}</span><span class="${loSideClass}">${lo.side.toUpperCase()}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(lo.price)}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_amount")}</span><span>${formatNumber(lo.quote_amount)}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("th_fee_amount")}</span><span>${Number(lo.fee_paid_quote || 0) > 0 ? formatNumber(lo.fee_paid_quote) : "-"}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_time")}</span><span>${new Date(lo.timestamp).toLocaleString()}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("lbl_pnl")}</span><span>${loPnlStr}</span></div>`;
       html += `</div>`;
@@ -1662,13 +2149,28 @@ document.getElementById("trade_chart_canvas")?.addEventListener("mouseleave", ()
 
 /** Create-bot button: validate grid, confirm if unprofitable, then POST. */
 document.getElementById("create").onclick = async () => {
-  await checkGridProfitability();
-  if (lastGridPreview && !lastGridPreview.is_profitable) {
-    if (!await showConfirm(t("grid_confirm_unprofitable"))) return;
+  try {
+    const config = currentConfig();
+    const limits = getMinimumRequiredOrderSizeQuote(config);
+    if (limits && Number(config.grid.order_size_quote || 0) + 1e-12 < limits.requiredQuote) {
+      const parts = [];
+      if (limits.minQuote > 0) parts.push(`min quote: ${formatNumber(limits.minQuote)} ${limits.quoteCurrency}`);
+      if (limits.minBase > 0) {
+        parts.push(`min base: ${formatNumber(limits.minBase)} ${limits.baseCurrency} (= ${formatNumber(limits.minQuoteFromBase)} ${limits.quoteCurrency} at max grid price ${formatNumber(limits.maxGridPrice)})`);
+      }
+      throw new Error(`Order size ${formatNumber(config.grid.order_size_quote)} ${limits.quoteCurrency} is below the Bitvavo minimum. Minimum required order size is ${formatNumber(limits.requiredQuote)} ${limits.quoteCurrency}${parts.length ? ` (${parts.join("; ")})` : ""}`);
+    }
+
+    await checkGridProfitability();
+    if (lastGridPreview && !lastGridPreview.is_profitable) {
+      if (!await showConfirm(t("grid_confirm_unprofitable"))) return;
+    }
+    await api("/api/v1/bots", { method: "POST", body: JSON.stringify({ name: document.getElementById("name").value, config }) });
+    await loadBots();
+    document.getElementById("create_bot_modal").close();
+  } catch (err) {
+    showToast(t("grid_calc_error"), err.message || String(err), "warn", 5000);
   }
-  await api("/api/v1/bots", { method: "POST", body: JSON.stringify({ name: document.getElementById("name").value, config: currentConfig() }) });
-  await loadBots();
-  document.getElementById("create_bot_modal").close();
 };
 
 /**
@@ -1697,6 +2199,43 @@ function showConfirm(message, title = "") {
   });
 }
 
+function showDeleteBotModeModal(botName = "") {
+  return new Promise((resolve) => {
+    const dialog = document.getElementById("delete_bot_modal");
+    const titleEl = document.getElementById("delete_bot_modal_title");
+    const messageEl = document.getElementById("delete_bot_modal_message");
+    const confirmBtn = document.getElementById("delete_bot_modal_confirm");
+    const cancelBtn = document.getElementById("delete_bot_modal_cancel");
+    const modeButtons = [...dialog.querySelectorAll("[data-delete-mode]")];
+    let selectedMode = null;
+
+    titleEl.textContent = t("delete_bot_modal_title");
+    const baseMsg = t("delete_bot_modal_message");
+    messageEl.textContent = botName ? `${baseMsg} (${botName})` : baseMsg;
+    confirmBtn.disabled = true;
+    modeButtons.forEach((btn) => btn.classList.remove("selected"));
+
+    function cleanup(result) {
+      confirmBtn.onclick = null;
+      cancelBtn.onclick = null;
+      modeButtons.forEach((btn) => { btn.onclick = null; });
+      dialog.close();
+      resolve(result);
+    }
+
+    confirmBtn.onclick = () => cleanup(selectedMode);
+    cancelBtn.onclick = () => cleanup(null);
+    modeButtons.forEach((btn) => {
+      btn.onclick = () => {
+        selectedMode = btn.dataset.deleteMode || null;
+        modeButtons.forEach((el) => el.classList.toggle("selected", el === btn));
+        confirmBtn.disabled = !selectedMode;
+      };
+    });
+    dialog.showModal();
+  });
+}
+
 /** Switch to the Agents tab programmatically. */
 function switchToAgentsTab() {
   document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
@@ -1719,7 +2258,12 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
 /** Open the "Create Bot" modal and load market data + balances. */
 document.getElementById("open_create_bot").onclick = () => {
   document.getElementById("create_bot_modal").showModal();
-  loadMarkets().then(() => { startMarketRealtime(); loadBalances(); });
+  loadMarkets().then(() => {
+    startMarketRealtime();
+    loadBalances();
+    loadMarketFees(true);
+    renderMinimumOrderHint();
+  });
 };
 
 document.getElementById("cancel_create_bot").onclick = () => { document.getElementById("create_bot_modal").close(); };
@@ -1732,16 +2276,20 @@ function scheduleGridCheck() {
   clearTimeout(_gridCheckTimer);
   _gridCheckTimer = setTimeout(() => checkGridProfitability(), 400);
 }
-["lower_price", "upper_price", "levels", "order_size_quote", "fee_rate_percent"].forEach(
+["lower_price", "upper_price", "levels", "order_size_quote"].forEach(
   (id) => document.getElementById(id)?.addEventListener("input", scheduleGridCheck)
 );
+document.getElementById("order_size_quote")?.addEventListener("input", () => renderMinimumOrderHint());
+document.getElementById("lower_price")?.addEventListener("input", () => renderMinimumOrderHint());
+document.getElementById("upper_price")?.addEventListener("input", () => renderMinimumOrderHint());
+document.getElementById("mode")?.addEventListener("change", () => renderMinimumOrderHint());
 
 /**
  * Fetch the average high/low for the selected market over the
  * configured lookback period and fill in the lower/upper fields.
  */
 document.getElementById("btn_suggest_range").onclick = async () => {
-  const market = document.getElementById("market").value;
+  const market = normalizeMarketValue(getMarketInput()?.value);
   const days = Number(document.getElementById("lookback_days").value) || 7;
   const btn = document.getElementById("btn_suggest_range");
   btn.disabled = true;
@@ -1765,8 +2313,46 @@ document.getElementById("backtest").onclick = async () => {
   document.getElementById("backtest_result").textContent = JSON.stringify(result, null, 2);
 };
 
-/** When the market dropdown changes, reconnect WebSocket + refresh balances. */
-document.getElementById("market").addEventListener("change", () => { startMarketRealtime(); loadBalances(); });
+/** Market combobox interactions: type to filter, enter to select, arrows to navigate. */
+const marketInputEl = getMarketInput();
+marketInputEl?.addEventListener("focus", () => {
+  renderMarketSuggestions(marketInputEl.value);
+});
+marketInputEl?.addEventListener("input", () => {
+  marketInputEl.value = normalizeMarketValue(marketInputEl.value);
+  renderMarketSuggestions(marketInputEl.value);
+  if (marketMeta.has(marketInputEl.value)) {
+    onMarketValueCommitted();
+  }
+});
+marketInputEl?.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    updateMarketHighlight(1);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    updateMarketHighlight(-1);
+  } else if (e.key === "Enter") {
+    const menu = document.getElementById("market_suggestions");
+    if (menu?.classList.contains("open")) {
+      const items = [...menu.querySelectorAll(".combo-item")];
+      if (items.length && marketHighlightIndex >= 0) {
+        e.preventDefault();
+        items[marketHighlightIndex].click();
+        return;
+      }
+    }
+    onMarketValueCommitted();
+  } else if (e.key === "Escape") {
+    closeMarketSuggestions();
+  }
+});
+marketInputEl?.addEventListener("blur", () => {
+  setTimeout(() => {
+    closeMarketSuggestions();
+    onMarketValueCommitted();
+  }, 120);
+});
 
 /**
  * Show/hide the "Skim ratio" field based on profit mode.
@@ -1776,6 +2362,9 @@ function toggleSkimRatio() {
   document.getElementById("skim_ratio_label").style.display = document.getElementById("profit_mode").value === "skim" ? "block" : "none";
 }
 document.getElementById("profit_mode").addEventListener("change", toggleSkimRatio);
+document.getElementById("mode")?.addEventListener("change", () => {
+  loadMarketFees(false);
+});
 toggleSkimRatio();
 
 document.getElementById("modal_refresh_agent_logs").onclick = async () => { await loadAgentLogs(); };
@@ -1802,6 +2391,9 @@ document.querySelectorAll(".lang-flag").forEach((btn) => {
     localStorage.setItem("cryptobot_lang", lang);
     updateLangFlags();
     applyTranslations();
+    refreshLogsModalTitle();
+    renderFeeInfo(lastFeeSnapshot);
+    refreshAllAppSelects();
     try { await api("/api/v1/auth/locale", { method: "POST", body: JSON.stringify({ locale: lang }) }); } catch { /* best-effort locale sync */ }
   };
 });
@@ -1862,6 +2454,7 @@ function checkSessionExpiry() {
   document.getElementById("role_display").textContent = currentUser.role;
 
   applyTranslations();
+  initAllAppSelects();
   applyRBAC();
 
   // Initial data load
@@ -1898,10 +2491,38 @@ setInterval(async () => { if (logsModalOpen) await loadAgentLogs(); }, 2000);
   tipEl.style.display = "none";
   document.body.appendChild(tipEl);
 
+  const hoverSelector = ".info-tip, .grid-fee-cell";
+
+  function renderTipContent(trigger, text) {
+    const isFeeTip = trigger.classList.contains("grid-fee-cell");
+    tipEl.classList.toggle("fee-popup", isFeeTip);
+    tipEl.classList.toggle("info-popup", !isFeeTip);
+
+    if (!isFeeTip) {
+      tipEl.textContent = text;
+      return;
+    }
+
+    const lines = String(text)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const title = lines[0] || t("lbl_total_fees");
+    const rows = lines.slice(1);
+    tipEl.innerHTML = `
+      <div class="tip-title">${title}</div>
+      <div class="tip-body">
+        ${rows.map((line) => `<div class="tip-row">${line}</div>`).join("")}
+      </div>
+    `;
+  }
+
   document.addEventListener("mouseover", (e) => {
-    const trigger = e.target.closest(".info-tip");
+    const target = e.target instanceof Element ? e.target : null;
+    const trigger = target ? target.closest(hoverSelector) : null;
     if (!trigger) return;
-    const text = trigger.dataset.tip;
+    const text = trigger.dataset.tip || trigger.dataset.feeTip;
     if (!text) return;
 
     // Move tooltip into the open dialog (top-layer) so it renders above it
@@ -1909,7 +2530,7 @@ setInterval(async () => { if (logsModalOpen) await loadAgentLogs(); }, 2000);
     const tipParent = openDialog || document.body;
     if (tipEl.parentNode !== tipParent) tipParent.appendChild(tipEl);
 
-    tipEl.textContent = text;
+    renderTipContent(trigger, text);
     tipEl.style.display = "block";
 
     // Position above the trigger icon, horizontally centred
@@ -1930,6 +2551,11 @@ setInterval(async () => { if (logsModalOpen) await loadAgentLogs(); }, 2000);
   });
 
   document.addEventListener("mouseout", (e) => {
-    if (e.target.closest(".info-tip")) tipEl.style.display = "none";
+    const target = e.target instanceof Element ? e.target : null;
+    const related = e.relatedTarget instanceof Element ? e.relatedTarget : null;
+    if (!target) return;
+    const fromTrigger = target.closest(hoverSelector);
+    const toTrigger = related ? related.closest(hoverSelector) : null;
+    if (fromTrigger && !toTrigger) tipEl.style.display = "none";
   });
 })();

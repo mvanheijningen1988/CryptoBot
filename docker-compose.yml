@@ -12,11 +12,11 @@ services:
       - ./data:/app/data
     restart: unless-stopped
 
-  agent:
+  agent1:
     build:
       context: .
       dockerfile: agent/Dockerfile
-    container_name: cryptobot-agent
+    container_name: cryptobot-agent1
     env_file:
       - agent/.env
     depends_on:

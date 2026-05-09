@@ -42,6 +42,7 @@ class BotConfig(BaseModel):
     quote_currency: str
     mode: Literal["simulation", "live"] = "simulation"
     strategy: Literal["static_grid"] = "static_grid"
+    fee_rate: float = Field(default=0.0, ge=0, le=0.05)
     grid: GridConfig
     budget: BudgetConfig
 

@@ -180,6 +180,14 @@ def _add_trade_event_columns(engine: Engine) -> None:
                 conn.exec_driver_sql(
                     "ALTER TABLE trade_events ADD COLUMN linked_order_id VARCHAR(64) DEFAULT NULL"
                 )
+            if "fee_paid_quote" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE trade_events ADD COLUMN fee_paid_quote FLOAT DEFAULT 0.0"
+                )
+            if "fee_rate" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE trade_events ADD COLUMN fee_rate FLOAT DEFAULT 0.0"
+                )
             conn.commit()
         except Exception:
             pass

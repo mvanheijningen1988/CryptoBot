@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -54,11 +54,31 @@ class StartBotRequest(BaseModel):
     agent_id: str | None = None
 
 
+class MoveBotRequest(BaseModel):
+    """Manual bot reassignment request to a specific agent."""
+
+    agent_id: str
+
+
 class UpdateBudgetRequest(BaseModel):
     """Hot-update of a bot's quote and base balances."""
 
     quote_budget: float = Field(default=0, ge=0)
     base_budget: float = Field(default=0, ge=0)
+
+
+DeleteBotMode = Literal[
+    "delete_open_orders",
+    "delete_as_is",
+    "transform_to_base",
+    "transform_to_quote",
+]
+
+
+class DeleteBotRequest(BaseModel):
+    """Delete mode selection for bot removal workflows."""
+
+    delete_mode: DeleteBotMode = "delete_open_orders"
 
 
 class BacktestRequest(BaseModel):
@@ -89,7 +109,7 @@ class StaticGridPreviewRequest(BaseModel):
     """Request to preview per-trade profitability of a grid configuration."""
 
     grid: GridConfig
-    fee_rate: float = Field(default=0.0025, ge=0, le=0.05)
+    fee_rate: float = Field(default=0.0, ge=0, le=0.05)
 
 
 class GridTradePreview(BaseModel):
@@ -99,6 +119,9 @@ class GridTradePreview(BaseModel):
     buy_price: float
     sell_price: float
     order_size_quote: float
+    buy_fee_quote: float = 0.0
+    sell_fee_quote: float = 0.0
+    total_fees_quote: float = 0.0
     net_profit: float
     profitable: bool
 
@@ -115,5 +138,10 @@ class StaticGridPreviewResponse(BaseModel):
     profitable_trades: int
     total_trade_paths: int
     fee_rate: float
+    fee_cost_per_trade_quote_min: float = 0.0
+    fee_cost_per_trade_quote_avg: float = 0.0
+    fee_cost_per_trade_quote_max: float = 0.0
+    total_fee_cost_quote: float = 0.0
     levels: list[float]
     trades: list[GridTradePreview]
+    fee_context: dict[str, Any] | None = None

@@ -22,6 +22,7 @@ def build_static_grid_profit_preview(grid: GridConfig, fee_rate: float) -> dict:
 
     trades: list[dict] = []
     per_trade_profits: list[float] = []
+    per_trade_fees: list[float] = []
     profitable_count = 0
 
     for i in range(len(levels) - 1):
@@ -33,17 +34,22 @@ def build_static_grid_profit_preview(grid: GridConfig, fee_rate: float) -> dict:
 
         buy_fee = quote_spent * fee_rate
         sell_fee = quote_received_before_fees * fee_rate
-        net_profit = quote_received_before_fees - quote_spent - buy_fee - sell_fee
+        total_fees = buy_fee + sell_fee
+        net_profit = quote_received_before_fees - quote_spent - total_fees
 
         per_trade_profits.append(net_profit)
+        per_trade_fees.append(total_fees)
         if net_profit > 0:
             profitable_count += 1
 
         trades.append({
-            "level": i + 1,
+            "level": i,
             "buy_price": round(buy_price, 6),
             "sell_price": round(sell_price, 6),
             "order_size_quote": round(quote_spent, 6),
+            "buy_fee_quote": round(buy_fee, 6),
+            "sell_fee_quote": round(sell_fee, 6),
+            "total_fees_quote": round(total_fees, 6),
             "net_profit": round(net_profit, 6),
             "profitable": net_profit > 0,
         })
@@ -51,6 +57,10 @@ def build_static_grid_profit_preview(grid: GridConfig, fee_rate: float) -> dict:
     min_profit = min(per_trade_profits)
     max_profit = max(per_trade_profits)
     avg_profit = sum(per_trade_profits) / len(per_trade_profits)
+    min_fee = min(per_trade_fees)
+    max_fee = max(per_trade_fees)
+    avg_fee = sum(per_trade_fees) / len(per_trade_fees)
+    total_fee_cost = sum(per_trade_fees)
 
     is_profitable = min_profit > 0
 
@@ -64,6 +74,10 @@ def build_static_grid_profit_preview(grid: GridConfig, fee_rate: float) -> dict:
         "profitable_trades": profitable_count,
         "total_trade_paths": len(per_trade_profits),
         "fee_rate": fee_rate,
+        "fee_cost_per_trade_quote_min": min_fee,
+        "fee_cost_per_trade_quote_avg": avg_fee,
+        "fee_cost_per_trade_quote_max": max_fee,
+        "total_fee_cost_quote": total_fee_cost,
         "levels": [round(lv, 6) for lv in levels],
         "trades": trades,
     }

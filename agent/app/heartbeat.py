@@ -24,7 +24,11 @@ def register_agent() -> bool:
     try:
         response = requests.post(f"{MANAGER_URL}/api/v1/agents/register", json=payload, timeout=5)
         if response.status_code < 400:
-            runner_manager.log_system("register_ok", "Agent registered to manager.", {"manager_url": MANAGER_URL})
+            runner_manager.log_system(
+                "register_ok",
+                "Agent registered to manager.",
+                {"manager_url": MANAGER_URL, "base_url": AGENT_BASE_URL},
+            )
         else:
             runner_manager.log_system(
                 "register_failed",

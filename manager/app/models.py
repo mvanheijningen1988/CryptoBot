@@ -68,6 +68,8 @@ class TradeEvent(Base):
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     quote_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    fee_paid_quote: Mapped[float] = mapped_column(Float, default=0.0)
+    fee_rate: Mapped[float] = mapped_column(Float, default=0.0)
     price: Mapped[float] = mapped_column(Float, default=0.0)
     trade_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     total_equity: Mapped[float] = mapped_column(Float, default=0.0)

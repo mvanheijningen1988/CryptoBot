@@ -47,7 +47,9 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
                     trade_number: int, event_type: str = "trade",
                     level_index: int | None = None,
                     market: str = "",
-                    order_id: str | None = None) -> str:
+                    order_id: str | None = None,
+                    fee_paid_quote: float = 0.0,
+                    fee_rate: float = 0.0) -> str:
     """Persist a trade-related event to the database. Returns the event ID.
 
     Buy/sell events are linked per grid step:
@@ -82,6 +84,8 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
         row.event_type = event_type
         row.side = side
         row.quote_amount = quote_amount
+        row.fee_paid_quote = fee_paid_quote
+        row.fee_rate = fee_rate
         row.price = price
         row.trade_pnl = trade_pnl
         row.total_equity = total_equity
@@ -158,6 +162,8 @@ def get_trade_events(bot_id: str | None = None, limit: int = 200) -> list[dict]:
                 "event_type": r.event_type,
                 "side": r.side,
                 "quote_amount": r.quote_amount,
+                "fee_paid_quote": r.fee_paid_quote,
+                "fee_rate": r.fee_rate,
                 "price": r.price,
                 "trade_pnl": r.trade_pnl,
                 "total_equity": r.total_equity,

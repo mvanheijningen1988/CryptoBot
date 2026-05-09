@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from common import BotConfig, BudgetConfig, GridConfig
 from agent.app.runner import AgentLogStore, BotRunner
+from common.exchange.simulated import SimulatedExchange
+from common.exchange.bitvavo import BitvavoExchange
 
 
 class _StubExchange:
@@ -35,15 +39,28 @@ class _StubExchange:
         quote_amount: float,
         limit_price: float,
         level_index: int | None = None,
+        client_reference: str | None = None,
     ) -> bool:
         self.placed_orders.append({
             "order_id": order_id,
+            "client_reference": client_reference,
             "side": side,
             "quote_amount": quote_amount,
             "limit_price": limit_price,
             "level_index": level_index,
         })
         return True
+
+    def has_tracked_level_order(self, level_index: int, side: str, limit_price: float) -> bool:  # noqa: ARG002
+        return False
+
+    def sync_open_orders_for_levels(
+        self,
+        planned_open_orders: dict[int, str],
+        level_prices: list[float],
+        quote_amount: float,
+    ) -> set[int]:  # noqa: ARG002
+        return set()
 
     def get_filled_orders(self) -> list[dict]:
         return []
@@ -56,6 +73,7 @@ def _config() -> BotConfig:
         quote_currency="EUR",
         mode="simulation",
         strategy="static_grid",
+        fee_rate=0.0015,
         grid=GridConfig(lower_price=90.0, upper_price=110.0, levels=5, order_size_quote=100.0),
         budget=BudgetConfig(quote_budget=1000.0, base_budget=0.0),
     )
@@ -67,7 +85,17 @@ def test_runner_waits_for_real_price_before_initial_orders(monkeypatch):
 
     monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
     monkeypatch.setattr(BotRunner, "_loop", lambda self: None)
-    monkeypatch.setattr(BotRunner, "_push_snapshot", lambda self, snapshot: snapshots.append(snapshot))
+    monkeypatch.setattr(
+        BotRunner,
+        "_push_snapshot",
+        lambda self, snapshot: snapshots.append(
+            {
+                "snapshot": snapshot,
+                "placed_orders": len(exchange.placed_orders),
+                "pending_events": len(self._pending_trade_events),
+            }
+        ),
+    )
     monkeypatch.setattr("agent.app.runner.time.sleep", lambda _: None)
 
     runner = BotRunner("bot-1", _config(), "http://manager:8000", "agent-1", AgentLogStore())
@@ -77,5 +105,75 @@ def test_runner_waits_for_real_price_before_initial_orders(monkeypatch):
 
     assert [order["level_index"] for order in exchange.placed_orders] == [0, 1]
     assert all(order["side"] == "buy" for order in exchange.placed_orders)
-    assert snapshots[-1].status == "running"
-    assert runner.price == 100.0
+    assert len(snapshots) == 2
+    assert snapshots[0]["snapshot"].status == "running"
+    assert snapshots[0]["placed_orders"] == 0
+    assert snapshots[1]["snapshot"].status == "running"
+    assert snapshots[1]["placed_orders"] == 2
+    assert snapshots[1]["pending_events"] == 2
+    assert runner.price == pytest.approx(100.0)
+    event_types = [entry.get("event_type") for entry in runner.log_store.logs]
+    assert "orders_batch_planned" in event_types
+    assert "order_posting" in event_types
+    assert "order_opened" in event_types
+
+
+def test_build_exchange_uses_configured_simulation_fee_rate():
+    runner = BotRunner("bot-1", _config(), "http://manager:8000", "agent-1", AgentLogStore())
+
+    exchange = runner._build_exchange(_config())
+
+    assert isinstance(exchange, SimulatedExchange)
+    assert exchange.fee_rate == pytest.approx(0.0015)
+
+
+def test_build_exchange_derives_bitvavo_operator_id_from_bot_id(monkeypatch):
+    config = _config().model_copy(update={"mode": "live"})
+    monkeypatch.setenv("LIVE_EXCHANGE_PROVIDER", "bitvavo")
+    monkeypatch.setenv("BITVAVO_API_KEY", "key")
+    monkeypatch.setenv("BITVAVO_API_SECRET", "secret")
+
+    bot_id = "36fe4c40-f2d4-42e0-8408-0b6da0fb8c68"
+    runner = BotRunner(bot_id, config, "http://manager:8000", "agent-1", AgentLogStore())
+
+    exchange = runner._build_exchange(config)
+
+    assert isinstance(exchange, BitvavoExchange)
+    assert exchange.operator_id == 8215871869382038057
+
+
+def test_runner_only_posts_buy_orders_below_current_price(monkeypatch):
+    exchange = _StubExchange([100.0])
+
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+
+    runner = BotRunner("bot-buy-filter", _config(), "http://manager:8000", "agent-1", AgentLogStore())
+    runner.price = 100.0
+    runner.state.open_orders = {0: "buy", 3: "buy"}
+
+    runner._place_all_limit_orders("initial")
+
+    assert [order["level_index"] for order in exchange.placed_orders] == [0]
+    waiting_logs = [entry for entry in runner.log_store.logs if entry.get("event_type") == "order_waiting"]
+    assert any(log.get("data", {}).get("reason") == "buy_above_market" for log in waiting_logs)
+
+
+def test_runner_waits_with_sell_orders_until_enough_base(monkeypatch):
+    exchange = _StubExchange([100.0])
+
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+
+    runner = BotRunner("bot-sell-filter", _config(), "http://manager:8000", "agent-1", AgentLogStore())
+    runner.price = 100.0
+    runner.state.open_orders = {4: "sell"}
+
+    exchange.base_balance = 0.0
+    runner._place_all_limit_orders("follow-up")
+    assert exchange.placed_orders == []
+
+    exchange.base_balance = 1.0
+    runner._place_ready_open_orders("pending")
+
+    assert [order["level_index"] for order in exchange.placed_orders] == [4]
+    waiting_logs = [entry for entry in runner.log_store.logs if entry.get("event_type") == "order_waiting"]
+    assert any(log.get("data", {}).get("reason") == "insufficient_base" for log in waiting_logs)

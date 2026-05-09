@@ -9,8 +9,11 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+import hashlib
 from datetime import datetime, timezone
 import os
+import traceback
+from typing import Literal
 
 import requests
 
@@ -163,6 +166,15 @@ class BotRunner:
             status=status,
         )
 
+    def _bitvavo_operator_id(self) -> int:
+        """Derive a stable positive int64 operatorId from the bot identifier."""
+        try:
+            bot_uuid = uuid.UUID(str(self.bot_id))
+            return bot_uuid.int % ((1 << 63) - 1)
+        except ValueError:
+            digest = hashlib.sha256(str(self.bot_id).encode("utf-8")).digest()
+            return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
+
     def _build_exchange(self, config: BotConfig) -> Exchange:
         """
         Create the appropriate exchange adapter based on config.mode.
@@ -179,11 +191,21 @@ class BotRunner:
             api_key = os.getenv("BITVAVO_API_KEY", "")
             api_secret = os.getenv("BITVAVO_API_SECRET", "")
             if not api_key or not api_secret:
-                raise RuntimeError("BITVAVO_API_KEY and BITVAVO_API_SECRET are required for live mode")
+                missing: list[str] = []
+                if not api_key:
+                    missing.append("BITVAVO_API_KEY")
+                if not api_secret:
+                    missing.append("BITVAVO_API_SECRET")
+                missing_list = ", ".join(missing)
+                raise RuntimeError(
+                    f"Missing live-mode credentials: {missing_list}. "
+                    "Set them in agent/.env (or an env_file loaded by the agent service)."
+                )
 
             return BitvavoExchange(
                 api_key=api_key,
                 api_secret=api_secret,
+                operator_id=self._bitvavo_operator_id(),
                 market=config.market,
                 base_currency=config.base_currency,
                 quote_currency=config.quote_currency,
@@ -193,7 +215,7 @@ class BotRunner:
         return SimulatedExchange(
             config.budget,
             market=config.market,
-            fee_rate=float(os.getenv("SIM_FEE_RATE", "0.0025")),
+            fee_rate=float(config.fee_rate or os.getenv("SIM_MAKER_FEE_RATE", os.getenv("SIM_FEE_RATE", "0.0"))),
         )
 
     def start(self, restored: bool = False) -> None:
@@ -227,12 +249,37 @@ class BotRunner:
             if not restored:
                 self.strategy.on_price(self.price, self.state)
                 self.initial_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+                synced_levels = self._sync_existing_live_open_orders()
+                if synced_levels:
+                    self.log_store.add(
+                        "orders_recovered",
+                        f"Recovered {len(synced_levels)} existing open order(s) from exchange before seeding.",
+                        bot_id=self.bot_id,
+                        data={"levels": sorted(synced_levels)},
+                        category="trading",
+                    )
+                # Publish the first running snapshot before submitting initial orders
+                # so the manager UI can leave "initializing" immediately.
+                self._push_snapshot(self._build_snapshot("running"))
                 self._place_all_limit_orders("initial")
+                # Flush initial order_placed events and runner state right away.
+                self._push_snapshot(self._build_snapshot("running"))
             elif not self.state.open_orders:
                 # Restored but no open orders (e.g. crash during fill) — reinitialize grid
                 self.state.level_index = None
                 self.strategy.on_price(self.price, self.state)
+                synced_levels = self._sync_existing_live_open_orders()
+                if synced_levels:
+                    self.log_store.add(
+                        "orders_recovered",
+                        f"Recovered {len(synced_levels)} existing open order(s) from exchange before re-seeding.",
+                        bot_id=self.bot_id,
+                        data={"levels": sorted(synced_levels)},
+                        category="trading",
+                    )
+                self._push_snapshot(self._build_snapshot("running"))
                 self._place_all_limit_orders("initial")
+                self._push_snapshot(self._build_snapshot("running"))
 
             label = "resumed" if restored else "started"
             self.log_store.add("bot_start", f"Bot {self.bot_id} {label}.", bot_id=self.bot_id, category="system")
@@ -254,22 +301,115 @@ class BotRunner:
                     category="system",
                 )
 
-            self._push_snapshot(self._build_snapshot("running"))
-
             self._loop()
-        except Exception:
+        except Exception as exc:
             self.running = False
-            self.log_store.add("bot_error", f"Bot {self.bot_id} failed to start.", bot_id=self.bot_id, category="system")
+            self.log_store.add(
+                "bot_error",
+                f"Bot {self.bot_id} failed to start: {exc}",
+                bot_id=self.bot_id,
+                data={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "traceback": traceback.format_exc(limit=20),
+                },
+                category="system",
+            )
             raise
 
     def stop(self) -> None:
         """
         Stop the trading loop and close the exchange connection.
         """
+        self.stop_with_mode(cancel_orders=True)
+
+    def stop_with_mode(self, cancel_orders: bool = True) -> None:
+        """Stop the trading loop with optional open-order cancellation."""
         self.running = False
-        self.exchange.cancel_all_orders()
+        if cancel_orders:
+            self.exchange.cancel_all_orders()
         self.exchange.stop()
-        self.log_store.add("bot_stop", f"Bot {self.bot_id} stopped.", bot_id=self.bot_id, category="system")
+        suffix = " (open orders kept)" if not cancel_orders else ""
+        self.log_store.add("bot_stop", f"Bot {self.bot_id} stopped{suffix}.", bot_id=self.bot_id, category="system")
+
+    def prepare_delete(self, delete_mode: Literal["delete_open_orders", "delete_as_is", "transform_to_base", "transform_to_quote"]) -> dict:
+        """Execute bot delete preparation on the connected exchange before stopping."""
+        self.running = False
+        quote_before, base_before = self.exchange.get_balances()
+        self.exchange.quote_balance = quote_before
+        self.exchange.base_balance = base_before
+
+        details = {
+            "mode": delete_mode,
+            "quote_before": quote_before,
+            "base_before": base_before,
+            "actions": [],
+        }
+
+        if delete_mode == "delete_open_orders":
+            self.exchange.cancel_all_orders()
+            details["actions"].append("cancel_open_orders")
+            self.exchange.stop()
+            self.log_store.add(
+                "bot_delete_prepared",
+                f"Bot {self.bot_id} prepared for delete: cancelled open orders and stopped.",
+                bot_id=self.bot_id,
+                data=details,
+                category="trading",
+            )
+            return details
+
+        if delete_mode == "delete_as_is":
+            self.exchange.stop()
+            self.log_store.add(
+                "bot_delete_prepared",
+                f"Bot {self.bot_id} prepared for delete: keeping open orders and balances as-is.",
+                bot_id=self.bot_id,
+                data=details,
+                category="trading",
+            )
+            return details
+
+        self.exchange.cancel_all_orders()
+        details["actions"].append("cancel_open_orders")
+
+        price = self.price
+        if price <= 0:
+            price = self.exchange.get_price(None)
+            self.price = price
+
+        if delete_mode == "transform_to_base":
+            quote_to_spend = max(self.exchange.quote_balance, 0.0)
+            if quote_to_spend > 0:
+                ok = self.exchange.execute(TradeSignal(side="buy", quote_amount=quote_to_spend), price=price)
+                if not ok:
+                    raise RuntimeError("Failed to transform quote balance into base at market price")
+                details["actions"].append("buy_base_with_all_quote")
+        elif delete_mode == "transform_to_quote":
+            base_to_sell = max(self.exchange.base_balance, 0.0)
+            quote_to_receive = base_to_sell * price
+            if quote_to_receive > 0:
+                ok = self.exchange.execute(TradeSignal(side="sell", quote_amount=quote_to_receive), price=price)
+                if not ok:
+                    raise RuntimeError("Failed to transform base balance into quote at market price")
+                details["actions"].append("sell_all_base_to_quote")
+
+        quote_after, base_after = self.exchange.get_balances()
+        self.exchange.quote_balance = quote_after
+        self.exchange.base_balance = base_after
+        details["quote_after"] = quote_after
+        details["base_after"] = base_after
+        details["price_used"] = price
+
+        self.exchange.stop()
+        self.log_store.add(
+            "bot_delete_prepared",
+            f"Bot {self.bot_id} prepared for delete with mode {delete_mode}.",
+            bot_id=self.bot_id,
+            data=details,
+            category="trading",
+        )
+        return details
 
     def update_budget(self, budget: BudgetConfig) -> None:
         """
@@ -364,20 +504,164 @@ class BotRunner:
         except requests.RequestException:
             return
 
+    def _sync_existing_live_open_orders(self) -> set[int]:
+        """Import already-open exchange orders for planned levels in live mode."""
+        if self.config.mode != "live" or not isinstance(self.exchange, BitvavoExchange):
+            return set()
+        planned_levels = sorted(self.state.open_orders.keys())
+        self.log_store.add(
+            "orders_sync_planned",
+            f"Syncing existing open orders on exchange for {len(planned_levels)} planned level(s).",
+            bot_id=self.bot_id,
+            data={"levels": planned_levels},
+            category="trading",
+        )
+        synced_levels = self.exchange.sync_open_orders_for_levels(
+            planned_open_orders=self.state.open_orders,
+            level_prices=self.strategy.levels,
+            quote_amount=self.config.grid.order_size_quote,
+        )
+        recovery_details: list[dict] = []
+        if hasattr(self.exchange, "get_last_open_order_sync_matches"):
+            try:
+                recovery_details = list(getattr(self.exchange, "get_last_open_order_sync_matches")() or [])
+            except Exception:
+                recovery_details = []
+        self.log_store.add(
+            "orders_sync_completed",
+            f"Exchange open-order sync completed: matched {len(synced_levels)} level(s).",
+            bot_id=self.bot_id,
+            data={"matched_levels": sorted(synced_levels), "matches": recovery_details},
+            category="trading",
+        )
+        for match in recovery_details:
+            level_idx = match.get("level_index")
+            ref = match.get("client_reference")
+            method = match.get("match_method")
+            exchange_order_id = match.get("exchange_order_id")
+            self.log_store.add(
+                "orders_recovered",
+                f"Recovered open order for level {level_idx} ({ref}) via {method}: {exchange_order_id}",
+                bot_id=self.bot_id,
+                data=match,
+                category="trading",
+            )
+        return synced_levels
+
+    def _limit_order_readiness(self, level_idx: int, side: str, limit_price: float) -> tuple[bool, str | None, dict | None]:
+        """Return whether an order is ready to post on the exchange right now."""
+        if side == "buy":
+            if self.price > 0 and limit_price >= self.price:
+                return False, "buy_above_market", {
+                    "level_index": level_idx,
+                    "side": side,
+                    "limit_price": limit_price,
+                    "current_price": self.price,
+                }
+            return True, None, None
+
+        required_base = self.config.grid.order_size_quote / limit_price if limit_price > 0 else 0.0
+        if self.exchange.base_balance + 1e-12 < required_base:
+            return False, "insufficient_base", {
+                "level_index": level_idx,
+                "side": side,
+                "limit_price": limit_price,
+                "required_base": required_base,
+                "available_base": self.exchange.base_balance,
+            }
+        return True, None, None
+
+    def _place_ready_open_orders(self, context: str = "", log_deferred: bool = False) -> None:
+        """Try to place currently open strategy orders that are valid to post now."""
+        for idx in sorted(self.state.open_orders.keys()):
+            side = self.state.open_orders.get(idx)
+            if side is None:
+                continue
+            limit_price = self.strategy.levels[idx]
+            if self.exchange.has_tracked_level_order(idx, side, limit_price):
+                continue
+            ready, reason, details = self._limit_order_readiness(idx, side, limit_price)
+            if not ready:
+                if log_deferred:
+                    self.log_store.add(
+                        "order_waiting",
+                        f"Waiting to post {side.upper()} at level {idx} (price {limit_price:.6f}): {reason}",
+                        bot_id=self.bot_id,
+                        data={"context": context, "reason": reason, **(details or {})},
+                        category="trading",
+                    )
+                continue
+            self._place_limit_order(idx, context)
+
     def _place_limit_order(self, level_idx: int, context: str = "") -> None:
         """Place a single limit order on the exchange for a grid level."""
         side = self.state.open_orders.get(level_idx)
         if side is None:
             return
         limit_price = self.strategy.levels[level_idx]
+        order_reference = f"level-{level_idx}"
+        ready, reason, details = self._limit_order_readiness(level_idx, side, limit_price)
+        if not ready:
+            self.log_store.add(
+                "order_waiting",
+                f"Waiting to post {side.upper()} at level {level_idx} (price {limit_price:.6f}): {reason}",
+                bot_id=self.bot_id,
+                data={"context": context, "reason": reason, **(details or {})},
+                category="trading",
+            )
+            return
+        if self.exchange.has_tracked_level_order(level_idx, side, limit_price):
+            self.log_store.add(
+                "order_already_open",
+                f"Skipped duplicate order ({context}): {side.upper()} at level {level_idx} (price {limit_price:.6f})",
+                bot_id=self.bot_id,
+                data={"side": side, "level_index": level_idx, "price": limit_price, "context": context},
+                category="trading",
+            )
+            return
         order_id = f"{self.bot_id}-{level_idx}-{uuid.uuid4().hex[:12]}"
-        success = self.exchange.place_limit_order(
-            order_id=order_id,
-            side=side,
-            quote_amount=self.config.grid.order_size_quote,
-            limit_price=limit_price,
-            level_index=level_idx,
+        self.log_store.add(
+            "order_posting",
+            f"Posting limit order ({context}): {side.upper()} at level {level_idx} (price {limit_price:.6f})",
+            bot_id=self.bot_id,
+            data={
+                "order_id": order_id,
+                "order_reference": order_reference,
+                "side": side,
+                "level_index": level_idx,
+                "price": limit_price,
+                "quote_amount": self.config.grid.order_size_quote,
+                "context": context,
+            },
+            category="trading",
         )
+        try:
+            success = self.exchange.place_limit_order(
+                order_id=order_id,
+                side=side,
+                quote_amount=self.config.grid.order_size_quote,
+                limit_price=limit_price,
+                level_index=level_idx,
+                client_reference=order_reference,
+            )
+        except Exception as exc:
+            self.log_store.add(
+                "order_post_failed",
+                f"Failed posting limit order ({context}) at level {level_idx}: {exc}",
+                bot_id=self.bot_id,
+                data={
+                    "order_id": order_id,
+                    "order_reference": order_reference,
+                    "side": side,
+                    "level_index": level_idx,
+                    "price": limit_price,
+                    "quote_amount": self.config.grid.order_size_quote,
+                    "context": context,
+                    "error": str(exc),
+                },
+                category="trading",
+            )
+            raise
         if success:
             self.log_store.add(
                 "order_opened",
@@ -400,8 +684,27 @@ class BotRunner:
 
     def _place_all_limit_orders(self, context: str = "") -> None:
         """Place limit orders for all current open orders in state."""
+        planned: list[dict[str, float | int | str]] = []
         for idx in sorted(self.state.open_orders.keys()):
-            self._place_limit_order(idx, context)
+            side = self.state.open_orders.get(idx)
+            if side is None:
+                continue
+            planned.append({
+                "level_index": idx,
+                "side": side,
+                "price": self.strategy.levels[idx],
+                "quote_amount": self.config.grid.order_size_quote,
+            })
+
+        self.log_store.add(
+            "orders_batch_planned",
+            f"Planning to post {len(planned)} limit order(s) ({context or 'n/a'}).",
+            bot_id=self.bot_id,
+            data={"context": context, "orders": planned},
+            category="trading",
+        )
+
+        self._place_ready_open_orders(context, log_deferred=True)
 
     def _loop(self) -> None:
         """Main trading loop: wait for price updates, check for filled limit orders."""
@@ -458,11 +761,6 @@ class BotRunner:
                     orders_before = set(self.state.open_orders.keys())
                     self.strategy.confirm_fill(signal, self.state)
 
-                    # Place limit orders for any new follow-up orders
-                    for new_idx in sorted(self.state.open_orders.keys()):
-                        if new_idx not in orders_before:
-                            self._place_limit_order(new_idx, "follow-up")
-
                     # Update balances
                     quote_balance, base_balance = self.exchange.get_balances()
                     self.exchange.quote_balance = quote_balance
@@ -491,12 +789,19 @@ class BotRunner:
                         "order_id": fill.get("order_id"),
                         "side": side,
                         "quote_amount": fill["quote_amount"],
+                        "fee_paid_quote": round(float(fill.get("fee_paid_quote", 0.0) or 0.0), 8),
+                        "fee_rate": round(float(fill.get("fee_rate", 0.0) or 0.0), 8),
                         "price": fill_price,
                         "level_index": idx,
                         "trade_pnl": round(trade_pnl, 6),
                         "total_equity": round(self.exchange.quote_balance + self.exchange.base_balance * self.price, 4),
                         "trade_number": self.trade_count,
                     })
+
+                    # Place any new follow-up orders only after balances reflect the fill.
+                    for new_idx in sorted(self.state.open_orders.keys()):
+                        if new_idx not in orders_before:
+                            self._place_limit_order(new_idx, "follow-up")
 
             quote_balance, base_balance = self.exchange.get_balances()
             self.exchange.quote_balance = quote_balance
@@ -505,6 +810,9 @@ class BotRunner:
             total_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
             self._apply_profit_mode(total_equity)
             total_equity = self.exchange.quote_balance + self.exchange.base_balance * self.price
+
+            # Re-check waiting orders as market price / balances change.
+            self._place_ready_open_orders("pending")
 
             snapshot = self._build_snapshot("running")
             self._push_snapshot(snapshot)
@@ -542,7 +850,7 @@ class RunnerManager:
         self.runners[bot_id] = runner
         runner.start(restored=runner_state is not None)
 
-    def stop_bot(self, bot_id: str) -> None:
+    def stop_bot(self, bot_id: str, cancel_orders: bool = True) -> None:
         """
         Stop a running bot.
 
@@ -551,7 +859,18 @@ class RunnerManager:
         runner = self.runners.get(bot_id)
         if not runner:
             return
-        runner.stop()
+        runner.stop_with_mode(cancel_orders=cancel_orders)
+
+    def prepare_delete(
+        self,
+        bot_id: str,
+        delete_mode: Literal["delete_open_orders", "delete_as_is", "transform_to_base", "transform_to_quote"],
+    ) -> dict:
+        """Run delete preparation mode for a running bot."""
+        runner = self.runners.get(bot_id)
+        if not runner:
+            raise RuntimeError("Bot is not running on this agent")
+        return runner.prepare_delete(delete_mode)
 
     def update_budget(self, bot_id: str, budget: BudgetConfig) -> None:
         """

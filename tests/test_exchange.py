@@ -57,7 +57,7 @@ class TestSimulatedInit:
 
     def test_default_fee_rate(self):
         ex = SimulatedExchange(_budget())
-        assert ex.fee_rate == pytest.approx(0.0025)
+        assert ex.fee_rate == pytest.approx(0.0)
 
 
 # ===================================================================
@@ -616,6 +616,450 @@ class TestBitvavoRefreshBalances:
             ex._refresh_balances()
         assert ex.quote_balance == pytest.approx(0.0)
         assert ex.base_balance == pytest.approx(0.0)
+
+    def test_balance_error_code_raises_runtime_error(self):
+        ex = BitvavoExchange(
+            api_key="test", api_secret="secret",
+            market="BTC-EUR", base_currency="BTC", quote_currency="EUR",
+        )
+        ex.authenticated = True
+        response = {"errorCode": 201, "error": "unauthorized"}
+        with patch.object(ex, "_call_action", return_value=response):
+            with pytest.raises(RuntimeError, match="privateGetBalance failed: unauthorized"):
+                ex._refresh_balances()
+
+
+# ===================================================================
+# BitvavoExchange – tracked order polling
+# ===================================================================
+
+class TestBitvavoTrackedOrders:
+
+    def _make_exchange(self) -> BitvavoExchange:
+        ex = BitvavoExchange(
+            api_key="test", api_secret="secret",
+            market="BTC-EUR", base_currency="BTC", quote_currency="EUR",
+        )
+        ex.authenticated = True
+        return ex
+
+    def test_get_filled_orders_uses_order_api_fee(self):
+        ex = self._make_exchange()
+        ex._limit_orders["our-1"] = {
+            "side": "buy",
+            "quote_amount": 100.0,
+            "limit_price": 100.0,
+            "level_index": 2,
+            "exchange_order_id": "ex-1",
+        }
+        ex._exchange_order_map["ex-1"] = "our-1"
+
+        order_response = {
+            "response": {
+                "orderId": "ex-1",
+                "status": "filled",
+                "filledAmount": "1.0",
+                "filledAmountQuote": "100.0",
+                "feePaid": "0.15",
+                "feeCurrency": "EUR",
+                "fills": [
+                    {
+                        "amount": "1.0",
+                        "price": "100.0",
+                        "fee": "0.15",
+                        "feeCurrency": "EUR",
+                        "taker": False,
+                        "settled": True,
+                    }
+                ],
+            }
+        }
+
+        with patch.object(ex, "_call_action", return_value=order_response), patch.object(ex, "_refresh_balances"):
+            fills = ex.get_filled_orders()
+
+        assert len(fills) == 1
+        assert fills[0]["order_id"] == "our-1"
+        assert fills[0]["quote_amount"] == pytest.approx(100.0)
+        assert fills[0]["fee_paid_quote"] == pytest.approx(0.15)
+        assert fills[0]["fee_rate"] == pytest.approx(0.0015)
+        assert "our-1" not in ex._limit_orders
+
+    def test_partially_filled_order_stays_tracked_until_filled(self):
+        ex = self._make_exchange()
+        ex._limit_orders["our-2"] = {
+            "side": "sell",
+            "quote_amount": 120.0,
+            "limit_price": 120.0,
+            "level_index": 4,
+            "exchange_order_id": "ex-2",
+        }
+        ex._exchange_order_map["ex-2"] = "our-2"
+
+        partial_response = {
+            "response": {
+                "orderId": "ex-2",
+                "status": "partiallyFilled",
+                "filledAmount": "0.5",
+                "filledAmountQuote": "60.0",
+            }
+        }
+        final_response = {
+            "response": {
+                "orderId": "ex-2",
+                "status": "filled",
+                "filledAmount": "1.0",
+                "filledAmountQuote": "120.0",
+                "feePaid": "0.18",
+                "feeCurrency": "EUR",
+                "fills": [
+                    {
+                        "amount": "0.5",
+                        "price": "120.0",
+                        "fee": "0.09",
+                        "feeCurrency": "EUR",
+                        "taker": False,
+                        "settled": True,
+                    },
+                    {
+                        "amount": "0.5",
+                        "price": "120.0",
+                        "fee": "0.09",
+                        "feeCurrency": "EUR",
+                        "taker": False,
+                        "settled": True,
+                    },
+                ],
+            }
+        }
+
+        with patch.object(ex, "_call_action", side_effect=[partial_response, final_response]), patch.object(ex, "_refresh_balances"):
+            first = ex.get_filled_orders()
+            assert first == []
+            assert "our-2" in ex._limit_orders
+
+            second = ex.get_filled_orders()
+
+        assert len(second) == 1
+        assert second[0]["order_id"] == "our-2"
+        assert second[0]["fee_paid_quote"] == pytest.approx(0.18)
+        assert "our-2" not in ex._limit_orders
+
+
+class TestBitvavoPlaceLimitOrder:
+
+    def _make_exchange(self) -> BitvavoExchange:
+        ex = BitvavoExchange(
+            api_key="test", api_secret="secret",
+            market="BTC-EUR", base_currency="BTC", quote_currency="EUR",
+        )
+        ex.authenticated = True
+        return ex
+
+    def test_timeout_falls_back_to_get_order_by_client_order_id(self):
+        ex = self._make_exchange()
+        expected_client_order_id = ex._client_order_id("our-timeout", "level-1")
+
+        def _call(action, body, timeout=6.0):  # noqa: ARG001
+            if action == "privateCreateOrder":
+                assert body.get("clientOrderId") == expected_client_order_id
+                raise TimeoutError("create timeout")
+            if action == "privateGetOrder":
+                assert body.get("clientOrderId") == expected_client_order_id
+                return {"response": {"orderId": "ex-timeout", "status": "new"}}
+            raise AssertionError(f"Unexpected action: {action}")
+
+        with patch.object(ex, "_call_action", side_effect=_call):
+            ok = ex.place_limit_order("our-timeout", "buy", 100.0, 50000.0, level_index=1)
+
+        assert ok is True
+        assert "our-timeout" in ex._limit_orders
+        assert ex._limit_orders["our-timeout"]["client_order_id"] == expected_client_order_id
+        assert ex._limit_orders["our-timeout"]["exchange_order_id"] == "ex-timeout"
+        assert ex._exchange_order_map["ex-timeout"] == "our-timeout"
+
+    def test_error_code_raises_runtime_error(self):
+        ex = self._make_exchange()
+
+        with patch.object(ex, "_call_action", return_value={"errorCode": 105, "error": "insufficient balance"}):
+            with pytest.raises(RuntimeError, match="privateCreateOrder failed: insufficient balance"):
+                ex.place_limit_order("our-fail", "buy", 100.0, 50000.0, level_index=1)
+
+    def test_limit_order_payload_uses_max_6_decimals_round_down(self):
+        ex = self._make_exchange()
+
+        calls: list[tuple[str, dict]] = []
+
+        def _call(action, body, timeout=6.0):  # noqa: ARG001
+            calls.append((action, body))
+            return {"response": {"orderId": "ex-precise", "status": "new"}}
+
+        with patch.object(ex, "_call_action", side_effect=_call):
+            ok = ex.place_limit_order("our-precise", "buy", 12.3456789123, 123.4567899876, level_index=0)
+
+        assert ok is True
+        create_call = next((payload for action, payload in calls if action == "privateCreateOrder"), None)
+        assert create_call is not None
+        assert create_call["price"] == "123.456789"
+        assert create_call["amount"] == "0.099999"
+
+    @patch("common.exchange.bitvavo.requests.get")
+    def test_load_market_precision_from_markets_metadata(self, mock_get):
+        ex = self._make_exchange()
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = [{
+            "market": "BTC-EUR",
+            "pricePrecision": 5,
+            "amountPrecision": 4,
+            "quotePrecision": 2,
+        }]
+        mock_get.return_value = mock_response
+
+        ex._load_market_precision()
+
+        assert ex._price_decimals == 5
+        assert ex._amount_decimals == 4
+        assert ex._quote_decimals == 2
+
+    @patch("common.exchange.bitvavo.requests.get")
+    def test_load_market_precision_caps_to_6_decimals(self, mock_get):
+        ex = self._make_exchange()
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = [{
+            "market": "BTC-EUR",
+            "pricePrecision": 8,
+            "amountPrecision": 8,
+            "quotePrecision": 8,
+        }]
+        mock_get.return_value = mock_response
+
+        ex._load_market_precision()
+
+        assert ex._price_decimals == 6
+        assert ex._amount_decimals == 6
+        assert ex._quote_decimals == 6
+
+    def test_limit_order_payload_uses_market_precision_when_loaded(self):
+        ex = self._make_exchange()
+        ex._price_decimals = 5
+        ex._amount_decimals = 4
+
+        calls: list[tuple[str, dict]] = []
+
+        def _call(action, body, timeout=6.0):  # noqa: ARG001
+            calls.append((action, body))
+            return {"response": {"orderId": "ex-precise-market", "status": "new"}}
+
+        with patch.object(ex, "_call_action", side_effect=_call):
+            ok = ex.place_limit_order("our-precise-market", "buy", 12.3456789123, 123.4567891234, level_index=0)
+
+        assert ok is True
+        create_call = next((payload for action, payload in calls if action == "privateCreateOrder"), None)
+        assert create_call is not None
+        assert create_call["price"] == "123.45678"
+        assert create_call["amount"] == "0.0999"
+
+    def test_limit_order_uses_stable_level_client_reference_for_client_order_id(self):
+        ex = self._make_exchange()
+        ex.operator_id = 42
+
+        calls: list[tuple[str, dict]] = []
+
+        def _call(action, body, timeout=6.0):  # noqa: ARG001
+            calls.append((action, body))
+            return {"response": {"orderId": "ex-level-ref", "status": "new"}}
+
+        with patch.object(ex, "_call_action", side_effect=_call):
+            ok = ex.place_limit_order(
+                "our-dynamic-id",
+                "buy",
+                100.0,
+                50000.0,
+                level_index=0,
+                client_reference="level-0",
+            )
+
+        assert ok is True
+        create_call = next((payload for action, payload in calls if action == "privateCreateOrder"), None)
+        assert create_call is not None
+        assert create_call["clientOrderId"] == ex._client_order_id("our-dynamic-id", "level-0")
+        assert ex._limit_orders["our-dynamic-id"]["client_reference"] == "level-0"
+
+
+class TestBitvavoSyncOpenOrders:
+
+    def _make_exchange(self) -> BitvavoExchange:
+        ex = BitvavoExchange(
+            api_key="test", api_secret="secret",
+            market="BTC-EUR", base_currency="BTC", quote_currency="EUR", operator_id=42,
+        )
+        ex.authenticated = True
+        return ex
+
+    def test_sync_open_orders_tracks_matching_operator_and_level(self):
+        ex = self._make_exchange()
+
+        open_orders_response = {
+            "response": [
+                {
+                    "orderId": "ex-match",
+                    "operatorId": 42,
+                    "side": "buy",
+                    "price": "100.00000000",
+                    "status": "new",
+                    "clientOrderId": "cid-match",
+                },
+                {
+                    "orderId": "ex-other-operator",
+                    "operatorId": 99,
+                    "side": "buy",
+                    "price": "95.00000000",
+                    "status": "new",
+                    "clientOrderId": "cid-other",
+                },
+            ]
+        }
+
+        with patch.object(ex, "_call_action", return_value=open_orders_response) as mock_call:
+            matched = ex.sync_open_orders_for_levels(
+                planned_open_orders={0: "buy", 1: "buy"},
+                level_prices=[100.0, 95.0],
+                quote_amount=100.0,
+            )
+
+        assert matched == {0}
+        assert ex.has_tracked_level_order(0, "buy", 100.0) is True
+        assert ex.has_tracked_level_order(1, "buy", 95.0) is False
+        assert mock_call.call_args_list[0].args[0] == "privateGetOrdersOpen"
+
+    def test_sync_open_orders_raises_exchange_error(self):
+        ex = self._make_exchange()
+
+        with patch.object(ex, "_call_action", return_value={"errorCode": 201, "error": "unauthorized"}):
+            with pytest.raises(RuntimeError, match="privateGetOrdersOpen failed: unauthorized") as exc_info:
+                ex.sync_open_orders_for_levels(
+                    planned_open_orders={0: "buy"},
+                    level_prices=[100.0],
+                    quote_amount=100.0,
+                )
+        assert "request_action=privateGetOrdersOpen" in str(exc_info.value)
+        assert '"market": "BTC-EUR"' in str(exc_info.value)
+
+    def test_sync_open_orders_falls_back_to_get_orders_on_invalid_action(self):
+        ex = self._make_exchange()
+
+        fallback_open_orders = {
+            "response": [
+                {
+                    "orderId": "ex-fallback",
+                    "operatorId": 42,
+                    "side": "buy",
+                    "price": "100.00000000",
+                    "status": "new",
+                    "clientOrderId": "cid-fallback",
+                }
+            ]
+        }
+
+        calls: list[str] = []
+
+        def _call(action, body, timeout=6.0):  # noqa: ARG001
+            calls.append(action)
+            if action == "privateGetOrdersOpen":
+                return {"errorCode": 110, "error": "Invalid action. Please check the request."}
+            if action == "privateGetOrders":
+                return fallback_open_orders
+            raise AssertionError(f"Unexpected action: {action}")
+
+        with patch.object(ex, "_call_action", side_effect=_call):
+            matched = ex.sync_open_orders_for_levels(
+                planned_open_orders={0: "buy"},
+                level_prices=[100.0],
+                quote_amount=100.0,
+            )
+
+        assert calls == ["privateGetOrdersOpen", "privateGetOrders"]
+        assert matched == {0}
+
+    def test_sync_open_orders_matches_stable_level_client_order_id_before_price(self):
+        ex = self._make_exchange()
+        expected_client_order_id = ex._client_order_id("sync-0", "level-0")
+
+        open_orders_response = {
+            "response": [
+                {
+                    "orderId": "ex-level-0",
+                    "operatorId": 42,
+                    "side": "buy",
+                    "price": "101.00000000",
+                    "status": "new",
+                    "clientOrderId": expected_client_order_id,
+                }
+            ]
+        }
+
+        with patch.object(ex, "_call_action", return_value=open_orders_response):
+            matched = ex.sync_open_orders_for_levels(
+                planned_open_orders={0: "buy"},
+                level_prices=[100.0],
+                quote_amount=100.0,
+            )
+
+        assert matched == {0}
+        assert ex.has_tracked_level_order(0, "buy", 100.0) is True
+        tracked = next(iter(ex._limit_orders.values()))
+        assert tracked["client_reference"] == "level-0"
+        assert tracked["client_order_id"] == expected_client_order_id
+        assert tracked["exchange_order_id"] == "ex-level-0"
+
+        matches = ex.get_last_open_order_sync_matches()
+        assert len(matches) == 1
+        assert matches[0]["level_index"] == 0
+        assert matches[0]["match_method"] == "client_reference"
+        assert matches[0]["client_reference"] == "level-0"
+        assert matches[0]["client_order_id"] == expected_client_order_id
+
+
+# ===================================================================
+# BitvavoExchange – wait_for_price_update fallback
+# ===================================================================
+
+class TestBitvavoWaitForPriceUpdate:
+
+    def _make_exchange(self) -> BitvavoExchange:
+        return BitvavoExchange(
+            api_key="test", api_secret="secret",
+            market="BTC-EUR", base_currency="BTC", quote_currency="EUR",
+        )
+
+    @patch("common.exchange.bitvavo.requests.get")
+    def test_fetches_price_from_exchange_when_ws_timeout(self, mock_get):
+        ex = self._make_exchange()
+        ex.latest_price = None
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"market": "BTC-EUR", "price": "61500.12"}
+        mock_get.return_value = mock_response
+
+        price = ex.wait_for_price_update(last_price=None, timeout_seconds=0.01)
+
+        assert price == pytest.approx(61500.12)
+        assert ex.latest_price == pytest.approx(61500.12)
+
+    @patch("common.exchange.bitvavo.requests.get")
+    def test_prefers_ws_price_when_available(self, mock_get):
+        ex = self._make_exchange()
+        ex.latest_price = 42000.0
+
+        price = ex.wait_for_price_update(last_price=None, timeout_seconds=0.01)
+
+        assert price == pytest.approx(42000.0)
+        mock_get.assert_not_called()
 
 
 # ===================================================================

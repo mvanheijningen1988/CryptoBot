@@ -120,6 +120,8 @@ class TestGridPreview:
         assert result["total_trade_paths"] == 4
         assert result["step_size"] == pytest.approx(5.0)
         assert result["fee_rate"] == pytest.approx(0.001)
+        assert result["trades"][0]["level"] == 0
+        assert result["trades"][1]["level"] == 1
 
     def test_narrow_grid_high_fees_unprofitable(self):
         grid = GridConfig(lower_price=99.0, upper_price=101.0, levels=2, order_size_quote=100.0)

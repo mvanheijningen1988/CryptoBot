@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from fastapi.routing import APIRouter
 
 from agent.app.config import AGENT_ID, runner_manager
-from agent.app.schemas import BudgetPayload, StartBotPayload, StopBotPayload
+from agent.app.schemas import BudgetPayload, DeleteBotPayload, StartBotPayload, StopBotPayload
 from agent.app.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -116,3 +116,16 @@ def get_open_orders(bot_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Bot not running")
     orders = runner.strategy.get_open_orders(runner.state)
     return {"bot_id": bot_id, "orders": orders}
+
+
+@router.post("/agent/bots/{bot_id}/prepare-delete")
+def prepare_delete(bot_id: str, payload: DeleteBotPayload) -> dict:
+    """Prepare a bot for deletion with the requested liquidation/cancel mode."""
+    logger.info("PREPARE DELETE request for bot %s (mode=%s)", bot_id, payload.delete_mode)
+    try:
+        details = runner_manager.prepare_delete(bot_id, payload.delete_mode)
+    except Exception as exc:
+        logger.exception("Failed to prepare bot %s for delete", bot_id)
+        raise HTTPException(status_code=500, detail=f"Delete prepare failed: {exc}") from exc
+    logger.info("Bot %s prepared for delete", bot_id)
+    return {"ok": True, "details": details}

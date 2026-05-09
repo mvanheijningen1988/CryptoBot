@@ -69,6 +69,7 @@ class Exchange(ABC):
         quote_amount: float,
         limit_price: float,
         level_index: int | None = None,
+        client_reference: str | None = None,
     ) -> bool:
         """Place a limit order at *limit_price*.
 
@@ -77,6 +78,7 @@ class Exchange(ABC):
         :param quote_amount: Order size in quote currency.
         :param limit_price: Price at which the order should fill.
         :param level_index: Optional grid level index for tracking.
+        :param client_reference: Optional stable exchange-facing reference for recovery.
         :return: True if the order was accepted.
         """
         raise NotImplementedError
@@ -88,6 +90,19 @@ class Exchange(ABC):
         ``quote_amount``, ``fill_price``, ``level_index``.
         """
         return []
+
+    def has_tracked_level_order(self, level_index: int, side: str, limit_price: float) -> bool:
+        """Return whether a matching open order is already tracked locally."""
+        return False
+
+    def sync_open_orders_for_levels(
+        self,
+        planned_open_orders: dict[int, str],
+        level_prices: list[float],
+        quote_amount: float,
+    ) -> set[int]:
+        """Sync exchange open orders for planned levels and return matched indices."""
+        return set()
 
     def cancel_all_orders(self) -> None:
         """Cancel all pending limit orders."""

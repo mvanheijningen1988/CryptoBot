@@ -8,14 +8,16 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import Depends, HTTPException
+from fastapi import Body, Depends, HTTPException
 from fastapi.routing import APIRouter
+import requests
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
 from manager.app.database import get_db
 from manager.app.events import (
+    add_agent_event,
     add_equity_point,
     add_trade_event,
     delete_trade_events_for_bot,
@@ -24,8 +26,10 @@ from manager.app.events import (
 from manager.app.models import Agent, Bot
 from manager.app.schemas import (
     BotCreateRequest,
+    DeleteBotRequest,
     BotResponse,
     MetricsPushRequest,
+    MoveBotRequest,
     StartBotRequest,
     UpdateBudgetRequest,
 )
@@ -41,18 +45,123 @@ _AGENT_NOT_APPROVED = "Agent is not approved"
 _ACTIVE_BOT_STATUSES = ("initializing", "running")
 
 
+def _config_value(obj: object, key: str, default: object = None) -> object:
+    """Read a config field from either a model-like object or a dict."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _fetch_bitvavo_market_limits(market: str) -> dict[str, float | str]:
+    """Fetch minimum order constraints for one Bitvavo market."""
+    try:
+        response = requests.get(
+            "https://api.bitvavo.com/v2/markets",
+            params={"market": market},
+            timeout=6,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch Bitvavo market limits: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Bitvavo returned {response.status_code}: {response.text}")
+
+    payload = response.json()
+    if isinstance(payload, list):
+        if not payload or not isinstance(payload[0], dict):
+            raise HTTPException(status_code=404, detail=f"Bitvavo market not found: {market}")
+        item = payload[0]
+    elif isinstance(payload, dict):
+        item = payload
+    else:
+        raise HTTPException(status_code=502, detail="Unexpected Bitvavo markets response format")
+
+    try:
+        return {
+            "market": str(item.get("market") or market),
+            "min_quote": float(item.get("minOrderInQuoteAsset") or 0.0),
+            "min_base": float(item.get("minOrderInBaseAsset") or 0.0),
+        }
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Invalid Bitvavo market limits: {exc}") from exc
+
+
+def _validate_live_order_size(config: object) -> None:
+    """Reject live bots whose order size is below Bitvavo minimums."""
+    mode = _config_value(config, "mode", "")
+    if mode != "live":
+        return
+
+    market = str(_config_value(config, "market", "") or "").upper()
+    quote_currency = str(_config_value(config, "quote_currency", "") or "QUOTE")
+    base_currency = str(_config_value(config, "base_currency", "") or "BASE")
+    grid = _config_value(config, "grid", {})
+    order_size_quote = float(_config_value(grid, "order_size_quote", 0.0) or 0.0)
+    highest_grid_price = max(
+        float(_config_value(grid, "lower_price", 0.0) or 0.0),
+        float(_config_value(grid, "upper_price", 0.0) or 0.0),
+    )
+
+    limits = _fetch_bitvavo_market_limits(market)
+    min_quote = float(limits["min_quote"] or 0.0)
+    min_base = float(limits["min_base"] or 0.0)
+    min_quote_from_base = min_base * highest_grid_price if min_base > 0 and highest_grid_price > 0 else 0.0
+    minimum_required_quote = max(min_quote, min_quote_from_base)
+
+    if order_size_quote + 1e-12 >= minimum_required_quote:
+        return
+
+    detail = (
+        f"Order size {order_size_quote:.8f} {quote_currency} is below the Bitvavo minimum for {market}. "
+        f"Minimum required order size is {minimum_required_quote:.8f} {quote_currency}"
+    )
+    extras: list[str] = []
+    if min_quote > 0:
+        extras.append(f"min quote: {min_quote:.8f} {quote_currency}")
+    if min_base > 0:
+        extras.append(
+            f"min base: {min_base:.8f} {base_currency} (={min_quote_from_base:.8f} {quote_currency} at max grid price {highest_grid_price:.8f})"
+        )
+    if extras:
+        detail += f" ({'; '.join(extras)})"
+    raise HTTPException(status_code=400, detail=detail)
+
+
 def _resolve_fee_rate_for_bot(bot: Bot) -> float:
     """Return the configured fee rate for the bot mode."""
+    try:
+        config = json.loads(bot.config_json or "{}")
+        configured_fee_rate = float(config.get("fee_rate", 0) or 0)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        configured_fee_rate = 0.0
+
+    if configured_fee_rate > 0:
+        return configured_fee_rate
+
     if bot.mode == "simulation":
-        return float(os.getenv("SIM_FEE_RATE", "0.0025"))
-    return float(os.getenv("LIVE_FEE_RATE", os.getenv("SIM_FEE_RATE", "0.0025")))
+        return float(os.getenv("SIM_MAKER_FEE_RATE", os.getenv("SIM_FEE_RATE", "0.0")))
+    return float(
+        os.getenv(
+            "LIVE_MAKER_FEE_RATE",
+            os.getenv("LIVE_FEE_RATE", os.getenv("SIM_MAKER_FEE_RATE", os.getenv("SIM_FEE_RATE", "0.0"))),
+        )
+    )
+
+
+def _trade_based_pnl(metrics: dict[str, object]) -> float:
+    """Return the PnL value that should be shown in the dashboard.
+
+    Dashboard PnL must be based on executed trades, not mark-to-market equity drift.
+    """
+    try:
+        return float(metrics.get("realized_pnl_quote", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _build_pair_metrics(bot: Bot, event: object, linked: object | None) -> dict | None:
     """Compute realized grid PnL for a linked buy/sell fill pair."""
     if linked is None:
-        return None
-    if getattr(event, "event_type", None) != "order_filled" or getattr(linked, "event_type", None) != "order_filled":
         return None
 
     if getattr(event, "side", None) == "buy" and getattr(linked, "side", None) == "sell":
@@ -60,6 +169,10 @@ def _build_pair_metrics(bot: Bot, event: object, linked: object | None) -> dict 
     elif getattr(event, "side", None) == "sell" and getattr(linked, "side", None) == "buy":
         buy_event, sell_event = linked, event
     else:
+        return None
+
+    # Pair PnL is only meaningful once the linked sell is actually filled.
+    if getattr(sell_event, "event_type", None) != "order_filled":
         return None
 
     buy_price = float(getattr(buy_event, "price", 0) or 0)
@@ -72,8 +185,15 @@ def _build_pair_metrics(bot: Bot, event: object, linked: object | None) -> dict 
     quantity_base = quote_spent / buy_price
     gross_profit = (sell_price - buy_price) * quantity_base
     quote_received_before_fees = quote_spent * (sell_price / buy_price)
-    buy_fee = quote_spent * fee_rate
-    sell_fee = quote_received_before_fees * fee_rate
+    buy_fee_persisted = float(getattr(buy_event, "fee_paid_quote", 0) or 0)
+    sell_fee_persisted = float(getattr(sell_event, "fee_paid_quote", 0) or 0)
+    if buy_fee_persisted > 0 or sell_fee_persisted > 0:
+        buy_fee = buy_fee_persisted
+        sell_fee = sell_fee_persisted
+        fee_rate = float(getattr(sell_event, "fee_rate", 0) or getattr(buy_event, "fee_rate", 0) or fee_rate)
+    else:
+        buy_fee = quote_spent * fee_rate
+        sell_fee = quote_received_before_fees * fee_rate
     total_fees = buy_fee + sell_fee
     realized_pnl = gross_profit - total_fees
 
@@ -133,6 +253,9 @@ def bot_to_response(bot: Bot) -> BotResponse:
     :param bot: The Bot database model instance.
     :return: A BotResponse Pydantic model.
     """
+    latest_metrics = json.loads(bot.latest_metrics_json or "{}")
+    latest_metrics["dashboard_pnl_quote"] = _trade_based_pnl(latest_metrics)
+
     return BotResponse(
         id=bot.id,
         name=bot.name,
@@ -141,7 +264,7 @@ def bot_to_response(bot: Bot) -> BotResponse:
         status=bot.status,
         assigned_agent_id=bot.assigned_agent_id,
         config=json.loads(bot.config_json),
-        latest_metrics=json.loads(bot.latest_metrics_json or "{}"),
+        latest_metrics=latest_metrics,
         created_at=bot.created_at,
         updated_at=bot.updated_at,
     )
@@ -164,6 +287,31 @@ def resolve_agent_url(agent_id: str, db: Session) -> str:
     return agent.base_url
 
 
+def _find_running_agent_for_bot(bot_id: str, db: Session) -> Agent | None:
+    """Best-effort lookup: find an approved online agent currently running this bot."""
+    agents = (
+        db.query(Agent)
+        .filter(Agent.status == "online", Agent.approval_status == "approved")
+        .all()
+    )
+    for agent in agents:
+        try:
+            response = requests.get(f"{agent.base_url}/agent/bots", timeout=2)
+        except requests.RequestException:
+            continue
+        if response.status_code >= 400:
+            continue
+        payload = response.json()
+        if not isinstance(payload, list):
+            continue
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            if item.get("bot_id") == bot_id and bool(item.get("running")):
+                return agent
+    return None
+
+
 @router.post("/bots", responses={400: {"description": "Agent not approved"}, 404: {"description": "Agent not found"}})
 def create_bot(payload: BotCreateRequest, db: DbSession) -> BotResponse:
     """
@@ -173,6 +321,8 @@ def create_bot(payload: BotCreateRequest, db: DbSession) -> BotResponse:
     :param db: Database session (injected).
     :return: BotResponse for the newly created bot.
     """
+    _validate_live_order_size(payload.config)
+
     bot_id = str(uuid.uuid4())
     bot = Bot(
         id=bot_id,
@@ -204,6 +354,67 @@ def list_bots(db: DbSession) -> list[BotResponse]:
     return [bot_to_response(bot) for bot in bots]
 
 
+@router.get("/bots/{bot_id}/logs", responses={400: {"description": "Bot cannot provide logs"}, 404: {"description": "Not found"}, 502: {"description": "Proxy failure"}})
+def get_bot_logs(
+    bot_id: str,
+    db: DbSession,
+    limit: int = 200,
+    category: str | None = None,
+) -> dict:
+    """Proxy bot-specific logs from the bot's assigned agent.
+
+    The manager forwards the request to ``/agent/logs`` with ``bot_id`` so
+    only events for this bot are returned.
+    """
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
+
+    agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first() if bot.assigned_agent_id else None
+    if not agent:
+        inferred_agent = _find_running_agent_for_bot(bot.id, db)
+        if inferred_agent:
+            bot.assigned_agent_id = inferred_agent.id
+            bot.updated_at = datetime.now(UTC)
+            db.commit()
+            agent = inferred_agent
+    if not agent:
+        raise HTTPException(status_code=400, detail="Bot is not assigned to an agent")
+    if agent.approval_status != "approved":
+        raise HTTPException(status_code=400, detail="Only approved agent logs are available")
+
+    safe_limit = max(1, min(limit, 1000))
+    query_params: dict[str, str | int] = {
+        "limit": safe_limit,
+        "bot_id": bot_id,
+    }
+    if category:
+        query_params["category"] = category
+
+    try:
+        response = requests.get(
+            f"{agent.base_url}/agent/logs",
+            params=query_params,
+            timeout=6,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch bot logs: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Agent returned {response.status_code}: {response.text}")
+
+    payload = response.json()
+    logs = payload.get("logs") if isinstance(payload, dict) else []
+    if not isinstance(logs, list):
+        logs = []
+
+    return {
+        "bot_id": bot_id,
+        "agent_id": agent.id,
+        "logs": logs,
+    }
+
+
 @router.post("/bots/{bot_id}/start", responses={400: {"description": "No agent available"}, 404: {"description": "Not found"}, 502: {"description": "Agent failure"}})
 def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
     """
@@ -218,6 +429,8 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
         raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
+
+    _validate_live_order_size(json.loads(bot.config_json))
 
     agent_id = payload.agent_id or bot.assigned_agent_id
     if not agent_id:
@@ -250,6 +463,85 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
     bot.updated_at = datetime.now(UTC)
     db.commit()
     logger.info("Bot %s now initializing on agent %s", bot.id, agent_id)
+    return {"ok": True}
+
+
+@router.post("/bots/{bot_id}/move", responses={400: {"description": "Invalid target agent"}, 404: {"description": "Not found"}, 409: {"description": "Target agent full"}, 502: {"description": "Agent failure"}})
+def move_bot(bot_id: str, payload: MoveBotRequest, db: DbSession) -> dict:
+    """Manually move a bot to another approved online agent.
+
+    If the bot is active, it is stopped on the source agent first,
+    then started on the target agent with the current runner state.
+    """
+    from sqlalchemy import func
+
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
+
+    target = db.query(Agent).filter(Agent.id == payload.agent_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
+    if target.approval_status != "approved" or target.status != "online":
+        raise HTTPException(status_code=400, detail="Target agent must be approved and online")
+
+    source_agent_id = bot.assigned_agent_id
+    if source_agent_id == target.id:
+        return {"ok": True, "message": "Bot is already assigned to this agent"}
+
+    target_load = (
+        db.query(func.count(Bot.id))
+        .filter(Bot.assigned_agent_id == target.id, Bot.status.in_(_ACTIVE_BOT_STATUSES))
+        .scalar()
+        or 0
+    )
+    if target_load >= target.capacity:
+        raise HTTPException(status_code=409, detail="Target agent is at capacity")
+
+    was_active = bot.status in _ACTIVE_BOT_STATUSES
+    if was_active and source_agent_id:
+        source = db.query(Agent).filter(Agent.id == source_agent_id).first()
+        if source and source.id != target.id:
+            ok, message = post_json(
+                f"{source.base_url}/agent/bots/{bot.id}/stop",
+                {"bot_id": bot.id},
+            )
+            if not ok:
+                raise HTTPException(status_code=502, detail=f"Source agent stop failed: {message}")
+
+    if was_active:
+        start_payload: dict = {
+            "bot_id": bot.id,
+            "config": json.loads(bot.config_json),
+        }
+        saved_state = bot.state_json or "{}"
+        if saved_state and saved_state != "{}":
+            start_payload["runner_state"] = json.loads(saved_state)
+
+        ok, message = post_json(
+            f"{target.base_url}/agent/bots/{bot.id}/start",
+            start_payload,
+        )
+        if not ok:
+            raise HTTPException(status_code=502, detail=f"Target agent start failed: {message}")
+        bot.status = "initializing"
+
+    bot.assigned_agent_id = target.id
+    bot.updated_at = datetime.now(UTC)
+    db.commit()
+
+    if source_agent_id:
+        add_agent_event(
+            source_agent_id,
+            "bot_moved_out",
+            f"Bot {bot.name} ({bot.id}) was moved to agent {target.id}.",
+        )
+    add_agent_event(
+        target.id,
+        "bot_moved_in",
+        f"Bot {bot.name} ({bot.id}) was manually assigned to this agent.",
+    )
+    logger.info("Bot %s moved from %s to %s", bot.id, source_agent_id, target.id)
     return {"ok": True}
 
 
@@ -298,21 +590,46 @@ def stop_bot(bot_id: str, db: DbSession) -> dict:
     return result
 
 
-@router.delete("/bots/{bot_id}", responses={404: {"description": "Not found"}, 409: {"description": "Bot is running"}})
-def delete_bot(bot_id: str, db: DbSession) -> dict:
+@router.delete("/bots/{bot_id}", responses={404: {"description": "Not found"}})
+def delete_bot(bot_id: str, db: DbSession, payload: DeleteBotRequest | None = Body(default=None)) -> dict:
     """
-    Delete a stopped bot and its associated event data.
+    Delete a bot and its associated event data.
+
+    Active bots are automatically stopped first.
 
     :param bot_id: Unique identifier of the bot to delete.
     :param db: Database session (injected).
-    :return: Dict with ok status.
-    :raises HTTPException: 404 if bot not found, 409 if bot is still running.
+    :return: Dict with ok status and optional stop warning.
+    :raises HTTPException: 404 if bot not found.
     """
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot:
         raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
+
+    delete_mode = payload.delete_mode if payload else "delete_open_orders"
+
+    stop_warning = None
     if bot.status in _ACTIVE_BOT_STATUSES:
-        raise HTTPException(status_code=409, detail="Cannot delete an active bot – stop it first")
+        if delete_mode == "delete_open_orders":
+            stop_result = stop_bot(bot_id, db)
+            stop_warning = stop_result.get("warning")
+        else:
+            if not bot.assigned_agent_id:
+                raise HTTPException(status_code=409, detail="Bot has no assigned agent for delete preparation")
+            agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
+            if not agent or agent.approval_status != "approved":
+                raise HTTPException(status_code=502, detail="Assigned agent unavailable for delete preparation")
+            ok, message = post_json(
+                f"{agent.base_url}/agent/bots/{bot.id}/prepare-delete",
+                {"bot_id": bot.id, "delete_mode": delete_mode},
+            )
+            if not ok:
+                raise HTTPException(status_code=502, detail=f"Agent delete preparation failed: {message}")
+            bot.status = "stopped"
+            bot.assigned_agent_id = None
+            bot.updated_at = datetime.now(UTC)
+            db.commit()
+
     # Clean up trade events and equity history
     delete_trade_events_for_bot(bot_id)
     from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
@@ -321,7 +638,10 @@ def delete_bot(bot_id: str, db: DbSession) -> dict:
     db.delete(bot)
     db.commit()
     logger.info("Bot %s deleted", bot_id)
-    return {"ok": True}
+    result: dict = {"ok": True, "delete_mode": delete_mode}
+    if stop_warning:
+        result["warning"] = stop_warning
+    return result
 
 
 @router.post("/bots/{bot_id}/budget", responses={404: {"description": "Not found"}, 502: {"description": "Agent failure"}})
@@ -385,6 +705,11 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
     if not bot:
         raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
 
+    # Keep assignment aligned with the reporting agent; this prevents temporary
+    # unassignment from blocking bot-specific logs while the bot is still running.
+    if bot.assigned_agent_id != agent_id:
+        bot.assigned_agent_id = agent_id
+
     snapshot = payload.snapshot
 
     # ── Record equity history for budget trend chart ──
@@ -406,6 +731,8 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                 bot_name=bot.name,
                 side=ev.get("side", "trade"),
                 quote_amount=ev.get("quote_amount", 0),
+                fee_paid_quote=ev.get("fee_paid_quote", 0.0),
+                fee_rate=ev.get("fee_rate", 0.0),
                 price=ev.get("price", snapshot.price),
                 trade_pnl=ev.get("trade_pnl", 0),
                 total_equity=ev.get("total_equity", snapshot.total_equity_quote),
@@ -429,6 +756,8 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                     bot_name=bot.name,
                     side="trade",
                     quote_amount=0,
+                    fee_paid_quote=0.0,
+                    fee_rate=0.0,
                     price=snapshot.price,
                     trade_pnl=trade_pnl,
                     total_equity=snapshot.total_equity_quote,
@@ -463,7 +792,6 @@ def get_single_trade_event(event_id: str) -> dict:
             raise HTTPException(status_code=404, detail="Trade event not found")
         result = {
             "id": ev.id,
-            "order_id": ev.order_id,
             "timestamp": ev.timestamp.isoformat() + "Z" if ev.timestamp else "",
             "bot_id": ev.bot_id,
             "bot_name": ev.bot_name,
@@ -472,6 +800,8 @@ def get_single_trade_event(event_id: str) -> dict:
             "order_id": ev.order_id,
             "side": ev.side,
             "quote_amount": ev.quote_amount,
+            "fee_paid_quote": ev.fee_paid_quote,
+            "fee_rate": ev.fee_rate,
             "price": ev.price,
             "trade_pnl": ev.trade_pnl,
             "total_equity": ev.total_equity,
@@ -491,6 +821,8 @@ def get_single_trade_event(event_id: str) -> dict:
                     "event_type": linked.event_type,
                     "side": linked.side,
                     "quote_amount": linked.quote_amount,
+                    "fee_paid_quote": linked.fee_paid_quote,
+                    "fee_rate": linked.fee_rate,
                     "price": linked.price,
                     "trade_pnl": linked.trade_pnl,
                     "level_index": linked.level_index,
@@ -526,7 +858,7 @@ def get_equity_history(bot_id: str, db: DbSession) -> dict:
         "points": points,
         "starting_budget": starting_budget,
         "total_equity": metrics.get("total_equity_quote", starting_budget),
-        "pnl": metrics.get("unrealized_pnl_quote", 0),
+        "pnl": _trade_based_pnl(metrics),
     }
 
 
@@ -546,7 +878,7 @@ def get_total_equity_history(db: DbSession) -> dict:
         total_starting_budget += budget.get("quote_budget", 0)
         metrics = json.loads(bot.latest_metrics_json or "{}") if bot else {}
         total_equity += metrics.get("total_equity_quote", budget.get("quote_budget", 0))
-        total_pnl += metrics.get("unrealized_pnl_quote", 0)
+        total_pnl += _trade_based_pnl(metrics)
 
     # Merge all bot equity histories by timestamp
     with EQUITY_HISTORY_LOCK:

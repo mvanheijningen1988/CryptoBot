@@ -6,6 +6,7 @@ in-memory SQLite database.  Every test starts with a clean DB.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -489,6 +490,87 @@ class TestAgentLogs:
         assert r.status_code == 404
 
 
+class TestBotLogs:
+    def test_nonexistent_bot_returns_404(self, client):
+        r = client.get("/api/v1/bots/ghost/logs")
+        assert r.status_code == 404
+
+    def test_bot_without_agent_returns_400(self, client):
+        _seed_bot(client, "logs-bot-no-agent", agent_id=None, status="stopped")
+        r = client.get("/api/v1/bots/logs-bot-no-agent/logs")
+        assert r.status_code == 400
+
+    def test_bot_with_unapproved_agent_returns_400(self, client):
+        _seed_agent(client, "logs-agent-pending", approval="pending", status="pending")
+        _seed_bot(client, "logs-bot-pending", agent_id="logs-agent-pending", status="stopped")
+        r = client.get("/api/v1/bots/logs-bot-pending/logs")
+        assert r.status_code == 400
+
+    @patch("manager.app.routes.bots.requests.get")
+    def test_bot_logs_infers_running_agent_when_unassigned(self, mock_get, client):
+        _seed_agent(client, "logs-agent-infer", approval="approved", status="online")
+        _seed_bot(client, "logs-bot-infer", agent_id=None, status="running")
+
+        bots_resp = MagicMock()
+        bots_resp.status_code = 200
+        bots_resp.json.return_value = [{"bot_id": "logs-bot-infer", "running": True}]
+
+        logs_resp = MagicMock()
+        logs_resp.status_code = 200
+        logs_resp.json.return_value = {
+            "agent_id": "logs-agent-infer",
+            "logs": [{"event_type": "bot_start", "bot_id": "logs-bot-infer", "message": "ok"}],
+        }
+
+        def _side_effect(url, *args, **kwargs):  # noqa: ARG001
+            if url.endswith("/agent/bots"):
+                return bots_resp
+            if url.endswith("/agent/logs"):
+                return logs_resp
+            raise AssertionError(f"Unexpected URL {url}")
+
+        mock_get.side_effect = _side_effect
+
+        r = client.get("/api/v1/bots/logs-bot-infer/logs")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["agent_id"] == "logs-agent-infer"
+        assert body["bot_id"] == "logs-bot-infer"
+
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "logs-bot-infer").first()
+        assert bot is not None
+        assert bot.assigned_agent_id == "logs-agent-infer"
+
+    @patch("manager.app.routes.bots.requests.get")
+    def test_bot_logs_are_proxied_with_bot_filter(self, mock_get, client):
+        _seed_agent(client, "logs-agent-ok", approval="approved", status="online")
+        _seed_bot(client, "logs-bot-ok", agent_id="logs-agent-ok", status="running")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "agent_id": "logs-agent-ok",
+            "logs": [{"event_type": "order_opened", "bot_id": "logs-bot-ok", "message": "test"}],
+        }
+        mock_get.return_value = mock_resp
+
+        r = client.get("/api/v1/bots/logs-bot-ok/logs?limit=123&category=trading")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["bot_id"] == "logs-bot-ok"
+        assert body["agent_id"] == "logs-agent-ok"
+        assert isinstance(body["logs"], list)
+        assert body["logs"][0]["bot_id"] == "logs-bot-ok"
+
+        called_url = mock_get.call_args.args[0]
+        called_params = mock_get.call_args.kwargs["params"]
+        assert called_url == "http://agent:8100/agent/logs"
+        assert called_params["bot_id"] == "logs-bot-ok"
+        assert called_params["category"] == "trading"
+        assert called_params["limit"] == 123
+
+
 # ── Bot endpoints ────────────────────────────────────────────────────
 
 
@@ -523,6 +605,98 @@ class TestCreateBot:
         assert body["status"] == "stopped"
         assert body["assigned_agent_id"] is None
 
+    @patch("manager.app.routes.bots.requests.get")
+    def test_create_live_bot_rejects_order_size_below_bitvavo_minimum(self, mock_get, client):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {
+                "market": "BTC-EUR",
+                "minOrderInQuoteAsset": "10",
+                "minOrderInBaseAsset": "0.0002",
+            }
+        ]
+        mock_get.return_value = mock_response
+
+        r = client.post("/api/v1/bots", json={
+            "name": "Live Bot",
+            "config": {
+                "market": "BTC-EUR",
+                "base_currency": "BTC",
+                "quote_currency": "EUR",
+                "mode": "live",
+                "strategy": "static_grid",
+                "grid": {
+                    "lower_price": 48000.0,
+                    "upper_price": 52000.0,
+                    "levels": 5,
+                    "order_size_quote": 5.0,
+                },
+                "budget": {
+                    "quote_budget": 1000.0,
+                    "base_budget": 0.0,
+                    "profit_mode": "compound",
+                    "skim_ratio": 0.5,
+                },
+            },
+        })
+
+        assert r.status_code == 400
+        assert "Minimum required order size is 10.40000000 EUR" in r.json()["detail"]
+
+    @patch("manager.app.routes.bots.requests.get")
+    def test_start_live_bot_rejects_order_size_below_bitvavo_minimum(self, mock_get, client):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {
+                "market": "BTC-EUR",
+                "minOrderInQuoteAsset": "10",
+                "minOrderInBaseAsset": "0.0002",
+            }
+        ]
+        mock_get.return_value = mock_response
+
+        _seed_agent(client, "start-min-agent")
+        db = _get_db(client)
+        bot = Bot(
+            id="start-min-bot",
+            name="Start Min Bot",
+            strategy_type="static_grid",
+            mode="live",
+            status="stopped",
+            assigned_agent_id="start-min-agent",
+            config_json=json.dumps({
+                "market": "BTC-EUR",
+                "base_currency": "BTC",
+                "quote_currency": "EUR",
+                "mode": "live",
+                "strategy": "static_grid",
+                "grid": {
+                    "lower_price": 48000.0,
+                    "upper_price": 52000.0,
+                    "levels": 5,
+                    "order_size_quote": 5.0,
+                },
+                "budget": {
+                    "quote_budget": 1000.0,
+                    "base_budget": 0.0,
+                    "profit_mode": "compound",
+                    "skim_ratio": 0.5,
+                },
+            }),
+            latest_metrics_json="{}",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        db.add(bot)
+        db.commit()
+
+        r = client.post("/api/v1/bots/start-min-bot/start", json={"agent_id": "start-min-agent"})
+
+        assert r.status_code == 400
+        assert "Minimum required order size is 10.40000000 EUR" in r.json()["detail"]
+
 
 class TestListBots:
     def test_empty(self, client):
@@ -536,6 +710,68 @@ class TestListBots:
         r = client.get("/api/v1/bots")
         assert r.status_code == 200
         assert len(r.json()) == 1
+
+    def test_list_bots_exposes_trade_based_dashboard_pnl(self, client):
+        _seed_agent(client, "lb-pnl-agent")
+        _seed_bot(client, "lb-pnl-bot", agent_id="lb-pnl-agent")
+        db = _get_db(client)
+        row = db.query(Bot).filter(Bot.id == "lb-pnl-bot").first()
+        row.latest_metrics_json = json.dumps({
+            "trade_count": 0,
+            "realized_pnl_quote": 0.0,
+            "unrealized_pnl_quote": 42.5,
+            "total_equity_quote": 1042.5,
+        })
+        db.commit()
+
+        r = client.get("/api/v1/bots")
+
+        assert r.status_code == 200
+        assert r.json()[0]["latest_metrics"]["dashboard_pnl_quote"] == pytest.approx(0.0)
+
+
+class TestEquityHistoryPnl:
+    def test_bot_equity_history_returns_trade_based_pnl(self, client):
+        _seed_bot(client, "eq-pnl-bot")
+        db = _get_db(client)
+        row = db.query(Bot).filter(Bot.id == "eq-pnl-bot").first()
+        row.latest_metrics_json = json.dumps({
+            "trade_count": 0,
+            "realized_pnl_quote": 0.0,
+            "unrealized_pnl_quote": 99.0,
+            "total_equity_quote": 1099.0,
+        })
+        db.commit()
+
+        r = client.get("/api/v1/bots/eq-pnl-bot/equity-history")
+
+        assert r.status_code == 200
+        assert r.json()["pnl"] == pytest.approx(0.0)
+
+    def test_total_equity_history_sums_trade_based_pnl(self, client):
+        _seed_bot(client, "eq-total-a")
+        _seed_bot(client, "eq-total-b")
+        db = _get_db(client)
+        first_row = db.query(Bot).filter(Bot.id == "eq-total-a").first()
+        second_row = db.query(Bot).filter(Bot.id == "eq-total-b").first()
+        first_row.latest_metrics_json = json.dumps({
+            "trade_count": 0,
+            "realized_pnl_quote": 0.0,
+            "unrealized_pnl_quote": 50.0,
+            "total_equity_quote": 1050.0,
+        })
+        second_row.latest_metrics_json = json.dumps({
+            "trade_count": 2,
+            "realized_pnl_quote": 7.5,
+            "unrealized_pnl_quote": 80.0,
+            "total_equity_quote": 1080.0,
+        })
+        db.commit()
+
+        r = client.get("/api/v1/bots/equity-history/total")
+
+        assert r.status_code == 200
+        assert r.json()["pnl"] == pytest.approx(7.5)
 
 
 class TestStartBot:
@@ -582,6 +818,112 @@ class TestStopBot:
         _seed_bot(client, "unassigned-bot")
         r = client.post("/api/v1/bots/unassigned-bot/stop")
         assert r.status_code == 200
+
+
+class TestDeleteBot:
+    @patch("manager.app.routes.bots.delete_trade_events_for_bot")
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    def test_delete_running_bot_auto_stops_first(self, mock_post, mock_delete_events, client):
+        _seed_agent(client, "delete-agent")
+        _seed_bot(client, "delete-running-bot", agent_id="delete-agent", status="running")
+
+        r = client.delete("/api/v1/bots/delete-running-bot")
+
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        mock_post.assert_called_once_with(
+            "http://agent:8100/agent/bots/delete-running-bot/stop",
+            {"bot_id": "delete-running-bot"},
+        )
+        mock_delete_events.assert_called_once_with("delete-running-bot")
+
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "delete-running-bot").first()
+        assert bot is None
+
+    @patch("manager.app.routes.bots.delete_trade_events_for_bot")
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    def test_delete_running_bot_as_is_calls_agent_prepare_delete(self, mock_post, mock_delete_events, client):
+        _seed_agent(client, "delete-agent-as-is")
+        _seed_bot(client, "delete-running-bot-as-is", agent_id="delete-agent-as-is", status="running")
+
+        r = client.request(
+            "DELETE",
+            "/api/v1/bots/delete-running-bot-as-is",
+            json={"delete_mode": "delete_as_is"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert r.json()["delete_mode"] == "delete_as_is"
+        mock_post.assert_called_once_with(
+            "http://agent:8100/agent/bots/delete-running-bot-as-is/prepare-delete",
+            {"bot_id": "delete-running-bot-as-is", "delete_mode": "delete_as_is"},
+        )
+        mock_delete_events.assert_called_once_with("delete-running-bot-as-is")
+
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "delete-running-bot-as-is").first()
+        assert bot is None
+
+    @patch("manager.app.routes.bots.delete_trade_events_for_bot")
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    def test_delete_running_bot_transform_to_quote_calls_agent_prepare_delete(self, mock_post, mock_delete_events, client):
+        _seed_agent(client, "delete-agent-quote")
+        _seed_bot(client, "delete-running-bot-quote", agent_id="delete-agent-quote", status="running")
+
+        r = client.request(
+            "DELETE",
+            "/api/v1/bots/delete-running-bot-quote",
+            json={"delete_mode": "transform_to_quote"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert r.json()["delete_mode"] == "transform_to_quote"
+        mock_post.assert_called_once_with(
+            "http://agent:8100/agent/bots/delete-running-bot-quote/prepare-delete",
+            {"bot_id": "delete-running-bot-quote", "delete_mode": "transform_to_quote"},
+        )
+        mock_delete_events.assert_called_once_with("delete-running-bot-quote")
+
+
+class TestMoveBot:
+    def test_move_stopped_bot_reassigns_and_logs(self, client):
+        _seed_agent(client, "move-src")
+        _seed_agent(client, "move-dst")
+        _seed_bot(client, "move-bot", agent_id="move-src", status="stopped")
+
+        r = client.post("/api/v1/bots/move-bot/move", json={"agent_id": "move-dst"})
+        assert r.status_code == 200
+
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "move-bot").first()
+        assert bot is not None
+        assert bot.assigned_agent_id == "move-dst"
+        assert bot.status == "stopped"
+
+        ev = client.get("/api/v1/agent-events")
+        assert ev.status_code == 200
+        kinds = [e["event_type"] for e in ev.json()]
+        assert "bot_moved_in" in kinds
+        assert "bot_moved_out" in kinds
+
+    @patch("manager.app.routes.bots.post_json", side_effect=[(True, "ok"), (True, "ok")])
+    def test_move_active_bot_stops_then_starts(self, mock_post, client):
+        _seed_agent(client, "move-src-active")
+        _seed_agent(client, "move-dst-active")
+        _seed_bot(client, "move-active-bot", agent_id="move-src-active", status="running")
+
+        r = client.post("/api/v1/bots/move-active-bot/move", json={"agent_id": "move-dst-active"})
+        assert r.status_code == 200
+        assert mock_post.call_count == 2
+
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "move-active-bot").first()
+        assert bot is not None
+        assert bot.assigned_agent_id == "move-dst-active"
+        assert bot.status == "initializing"
 
 
 class TestUpdateBudget:
@@ -639,6 +981,35 @@ class TestPushMetrics:
         db = _get_db(client)
         bot = db.query(Bot).filter(Bot.id == "met-bot").first()
         assert bot.status == "running"
+
+    def test_push_metrics_updates_assigned_agent(self, client):
+        _seed_agent(client, "met-assign")
+        _seed_bot(client, "met-assign-bot", agent_id=None)
+
+        r = client.post(
+            "/api/v1/agents/met-assign/bots/met-assign-bot/metrics",
+            json={
+                "snapshot": {
+                    "bot_id": "met-assign-bot",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "price": 50000.0,
+                    "quote_balance": 900.0,
+                    "base_balance": 0.002,
+                    "base_value_in_quote": 100.0,
+                    "total_equity_quote": 1000.0,
+                    "realized_pnl_quote": 10.0,
+                    "unrealized_pnl_quote": 5.0,
+                    "skimmed_quote": 0.0,
+                    "status": "running",
+                },
+            },
+        )
+        assert r.status_code == 200
+
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "met-assign-bot").first()
+        assert bot is not None
+        assert bot.assigned_agent_id == "met-assign"
 
     def test_push_metrics_nonexistent_bot(self, client):
         _seed_agent(client, "met2-agent")
@@ -827,9 +1198,9 @@ class TestPushMetrics:
             assert body["pair_metrics"] is not None
             assert body["pair_metrics"]["quantity_base"] == pytest.approx(100.0)
             assert body["pair_metrics"]["gross_profit_quote"] == pytest.approx(20.0)
-            assert body["pair_metrics"]["total_fees_quote"] == pytest.approx(0.55)
-            assert body["pair_metrics"]["realized_pnl_quote"] == pytest.approx(19.45)
-            assert body["pair_metrics"]["fee_rate"] == pytest.approx(0.0025)
+            assert body["pair_metrics"]["total_fees_quote"] == pytest.approx(0.0)
+            assert body["pair_metrics"]["realized_pnl_quote"] == pytest.approx(20.0)
+            assert body["pair_metrics"]["fee_rate"] == pytest.approx(0.0)
 
     def test_order_fill_updates_existing_order_line_by_order_id(self, client):
         _seed_agent(client, "met5-agent")
@@ -912,6 +1283,60 @@ class TestPushMetrics:
             assert rows[0]["event_type"] == "order_filled"
             assert rows[0]["order_id"] == "ord-abc"
 
+    def test_trade_event_persists_fee_fields(self, client):
+        _seed_agent(client, "met6-agent")
+        _seed_bot(client, "met6-bot", agent_id="met6-agent")
+        from manager.app.main import SessionLocal as TestSessionLocal
+
+        with patch("manager.app.events.SessionLocal", TestSessionLocal), patch("manager.app.database.SessionLocal", TestSessionLocal):
+            resp = client.post(
+                "/api/v1/agents/met6-agent/bots/met6-bot/metrics",
+                json={
+                    "snapshot": {
+                        "bot_id": "met6-bot",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "price": 1.0,
+                        "quote_balance": 900.0,
+                        "base_balance": 100.0,
+                        "base_value_in_quote": 100.0,
+                        "total_equity_quote": 1000.0,
+                        "realized_pnl_quote": 0.0,
+                        "unrealized_pnl_quote": 0.0,
+                        "skimmed_quote": 0.0,
+                        "trade_count": 1,
+                        "status": "running"
+                    },
+                    "trade_events": [
+                        {
+                            "event_type": "order_filled",
+                            "order_id": "ord-fee-1",
+                            "side": "buy",
+                            "quote_amount": 100.0,
+                            "fee_paid_quote": 0.15,
+                            "fee_rate": 0.0015,
+                            "price": 1.0,
+                            "level_index": 1,
+                            "trade_pnl": 0.0,
+                            "total_equity": 1000.0,
+                            "trade_number": 1
+                        }
+                    ]
+                },
+            )
+            assert resp.status_code == 200
+
+            rows = client.get("/api/v1/trade-events?bot_id=met6-bot")
+            assert rows.status_code == 200
+            event = rows.json()[0]
+            assert event["fee_paid_quote"] == pytest.approx(0.15)
+            assert event["fee_rate"] == pytest.approx(0.0015)
+
+            detail = client.get(f"/api/v1/trade-events/{event['id']}")
+            assert detail.status_code == 200
+            body = detail.json()
+            assert body["fee_paid_quote"] == pytest.approx(0.15)
+            assert body["fee_rate"] == pytest.approx(0.0015)
+
 
 # ── Backtest ─────────────────────────────────────────────────────────
 
@@ -991,6 +1416,7 @@ class TestGridPreview:
         assert "is_profitable" in body
         assert "step_size" in body
         assert body["total_trade_paths"] == 4  # levels - 1
+        assert body["trades"][0]["level"] == 0
 
     def test_high_fee_unprofitable(self, client):
         r = client.post("/api/v1/strategy/static-grid/preview", json={
@@ -1100,3 +1526,56 @@ class TestGetBalance:
         r = client.get("/api/v1/balance?symbol=BTC")
         assert r.status_code == 200
         assert r.json()["available"] == "0"
+
+
+class TestMarketFees:
+    @patch.dict("os.environ", {"BITVAVO_API_KEY": "key", "BITVAVO_API_SECRET": "secret"})
+    @patch("manager.app.routes.market.websocket.create_connection")
+    def test_market_fees_ok(self, mock_create_connection, client):
+        class FakeWS:
+            def __init__(self, response_payload):
+                self._response_payload = response_payload
+                self.sent = []
+                self._queue = []
+
+            def send(self, raw):
+                msg = json.loads(raw)
+                self.sent.append(msg)
+                req_id = msg.get("requestId")
+                if req_id is None:
+                    return
+                if msg.get("action") == "authenticate":
+                    self._queue.append({"requestId": req_id, "authenticated": True})
+                else:
+                    self._queue.append({"requestId": req_id, "response": self._response_payload})
+
+            def recv(self):
+                if self._queue:
+                    return json.dumps(self._queue.pop(0))
+                return json.dumps({"requestId": 1, "response": {}})
+
+            def close(self):
+                return None
+
+        mock_create_connection.side_effect = [
+            FakeWS({"tier": "0", "volume": "10000.00", "maker": "0.0015", "taker": "0.0025"}),
+            FakeWS({"fees": {"maker": "0.0016", "taker": "0.0026", "volume": "12000.00"}}),
+        ]
+
+        r = client.get("/api/v1/market/fees?market=BTC-EUR")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["available"] is True
+        assert body["market"] == "BTC-EUR"
+        assert body["market_maker_fee_rate"] == pytest.approx(0.0015)
+        assert body["market_taker_fee_rate"] == pytest.approx(0.0025)
+        assert body["applied_fee_rate"] == pytest.approx(0.0015)
+        assert body["applied_fee_type"] == "maker"
+
+    @patch.dict("os.environ", {"BITVAVO_API_KEY": "", "BITVAVO_API_SECRET": ""})
+    def test_market_fees_without_credentials_returns_unavailable(self, client):
+        r = client.get("/api/v1/market/fees?market=BTC-EUR")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["available"] is False
+        assert body["applied_fee_rate"] == pytest.approx(0.0)

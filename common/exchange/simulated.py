@@ -52,7 +52,7 @@ class SimulatedExchange(Exchange):
         self,
         budget: BudgetConfig,
         market: str | None = None,
-        fee_rate: float = 0.0025,
+        fee_rate: float = 0.0,
     ) -> None:
         """
         Initialise the simulated exchange.
@@ -280,6 +280,7 @@ class SimulatedExchange(Exchange):
         quote_amount: float,
         limit_price: float,
         level_index: int | None = None,
+        client_reference: str | None = None,
     ) -> bool:
         """Place a pending limit order.
 
@@ -294,6 +295,7 @@ class SimulatedExchange(Exchange):
             "quote_amount": quote_amount,
             "limit_price": limit_price,
             "level_index": level_index,
+            "client_reference": client_reference,
         }
         return True
 
@@ -320,11 +322,13 @@ class SimulatedExchange(Exchange):
             if side == "buy":
                 cost = order["quote_amount"]
                 base_bought = (cost / limit_price) * fee_multiplier
+                fee_paid_quote = cost * self.fee_rate
                 self.quote_balance -= cost
                 self.base_balance += base_bought
             else:
                 base_to_sell = order["quote_amount"] / limit_price
                 quote_received = (base_to_sell * limit_price) * fee_multiplier
+                fee_paid_quote = order["quote_amount"] * self.fee_rate
                 self.base_balance -= base_to_sell
                 self.quote_balance += quote_received
 
@@ -336,6 +340,8 @@ class SimulatedExchange(Exchange):
                 "quote_amount": order["quote_amount"],
                 "fill_price": limit_price,
                 "level_index": order["level_index"],
+                "fee_paid_quote": fee_paid_quote,
+                "fee_rate": self.fee_rate,
             })
             to_remove.append(order_id)
 
