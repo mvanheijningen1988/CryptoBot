@@ -8,12 +8,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from threading import Thread
+from uuid import uuid4
+import logging
 
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from common.diagnostics import configure_diagnostics_logging, restore_context, set_context, debug_log
 from manager.app.auth import ensure_admin_user
 from manager.app.database import Base, SessionLocal, engine
 from manager.app.failover import failover_maintenance_loop
@@ -27,6 +31,9 @@ Base.metadata.create_all(bind=engine)
 run_migrations(engine)
 
 # ── Application ─────────────────────────────────────────────────────
+configure_diagnostics_logging("manager")
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="CryptoBot Manager", version=__version__)
 app.add_middleware(
     CORSMiddleware,
@@ -39,6 +46,36 @@ app.add_middleware(
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 app.include_router(v1)
+
+
+@app.middleware("http")
+async def diagnostics_context_middleware(request: Request, call_next):
+    """Attach correlation/request IDs to manager request handling."""
+    correlation_id = request.headers.get("x-correlation-id") or str(uuid4())
+    request_id = str(uuid4())
+    previous = set_context(correlation_id=correlation_id, request_id=request_id, component="manager.http")
+    debug_log(
+        logger,
+        "http_request_start",
+        "Manager request started",
+        method=request.method,
+        path=request.url.path,
+        query=str(request.url.query or ""),
+    )
+    try:
+        response = await call_next(request)
+        response.headers["x-correlation-id"] = correlation_id
+        debug_log(
+            logger,
+            "http_request_end",
+            "Manager request completed",
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+        )
+        return response
+    finally:
+        restore_context(previous)
 
 
 # ── Startup ─────────────────────────────────────────────────────────

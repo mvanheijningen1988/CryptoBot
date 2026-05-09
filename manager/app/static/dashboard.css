@@ -259,6 +259,49 @@ button.danger { background: #dc2626; }
   object-fit: contain;
   flex: 0 0 16px;
 }
+
+.diag-hint {
+  color: #94a3b8;
+  margin-bottom: 10px;
+  font-size: 0.85rem;
+}
+
+.diag-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.diag-actions {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+}
+
+.diag-log-list {
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #0b1220;
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.diag-log-item {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: #d1d5db;
+  padding: 6px 8px;
+  border-bottom: 1px dashed #334155;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diag-log-item:last-child {
+  border-bottom: none;
+}
 .combo-label {
   white-space: nowrap;
   overflow: hidden;

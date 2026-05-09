@@ -78,6 +78,9 @@ let selectedLogBotName = "";
 /** Whether the agent-logs modal is currently visible. */
 let logsModalOpen = false;
 
+/** Whether diagnostics tab is active (controls polling). */
+let diagnosticsTabActive = false;
+
 /** Active Bitvavo WebSocket connection for live market data. */
 let marketSocket = null;
 
@@ -1697,6 +1700,97 @@ async function loadAgentLogs() {
 }
 
 // ──────────────────────────────────────────────────────────────
+// Diagnostics tab (instances + debug logs)
+// ──────────────────────────────────────────────────────────────
+
+function buildDiagnosticsQuery() {
+  const params = new URLSearchParams();
+  params.set("kind", "debug");
+
+  const instanceType = String(document.getElementById("diag_filter_instance_type")?.value || "").trim();
+  const instanceId = String(document.getElementById("diag_filter_instance_id")?.value || "").trim();
+  const component = String(document.getElementById("diag_filter_component")?.value || "").trim();
+  const limit = Number(document.getElementById("diag_filter_limit")?.value || 500);
+
+  if (instanceType) params.set("instance_type", instanceType);
+  if (instanceId) params.set("instance_id", instanceId);
+  if (component) params.set("component", component);
+  params.set("limit", String(Math.max(10, Math.min(limit, 5000))));
+  return params;
+}
+
+async function loadDiagnosticsInstances() {
+  const body = document.getElementById("diag_instances_body");
+  const retentionInfo = document.getElementById("diag_retention_info");
+  if (!body) return;
+
+  try {
+    const payload = await api("/api/v1/debug/instances");
+    const instances = payload.instances || [];
+    const retentionHours = Number(payload.retention_hours || 48);
+    if (retentionInfo) retentionInfo.textContent = `Retention: ${retentionHours}h`;
+    body.innerHTML = "";
+
+    for (const instance of instances) {
+      const tr = document.createElement("tr");
+      const firstSeen = instance.first_seen ? new Date(instance.first_seen).toLocaleString() : "-";
+      const lastSeen = instance.last_seen ? new Date(instance.last_seen).toLocaleString() : "-";
+      tr.innerHTML = `<td>${instance.instance_type || "-"}</td><td>${instance.instance_id || "-"}</td><td>${instance.status || "-"}</td><td>${firstSeen}</td><td>${lastSeen}</td><td>${instance.source || "-"}</td>`;
+      body.appendChild(tr);
+    }
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="6">${t("logs_error")}: ${String(err.message || err)}</td></tr>`;
+  }
+}
+
+async function loadDiagnosticsLogs() {
+  const list = document.getElementById("diag_debug_logs");
+  if (!list) return;
+  const qs = buildDiagnosticsQuery();
+
+  try {
+    const payload = await api(`/api/v1/debug/logs?${qs.toString()}`);
+    const logs = payload.logs || [];
+    list.innerHTML = "";
+    if (!logs.length) {
+      list.textContent = t("logs_none");
+      return;
+    }
+
+    for (const log of logs) {
+      const line = document.createElement("div");
+      line.className = "diag-log-item";
+      const ts = log.timestamp ? new Date(log.timestamp).toLocaleString() : "-";
+      const inst = `${log.instance_type || "-"}:${log.instance_id_resolved || log.instance_id || "-"}`;
+      const corr = log.correlation_id ? ` | corr=${log.correlation_id}` : "";
+      const comp = log.component ? ` | ${log.component}` : "";
+      line.textContent = `${ts} [${log.event || "event"}] [${inst}]${comp}${corr} ${log.message || ""}`;
+      list.appendChild(line);
+    }
+    list.scrollTop = 0;
+  } catch (err) {
+    list.textContent = `${t("logs_error")}: ${String(err.message || err)}`;
+  }
+}
+
+async function downloadDiagnosticsLogs() {
+  const qs = buildDiagnosticsQuery();
+  const resp = await fetch(`/api/v1/debug/logs/download?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${authToken}` },
+  });
+  if (!resp.ok) throw new Error(await resp.text());
+  const blob = await resp.blob();
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = "cryptobot_debug_logs.ndjson";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(href);
+}
+
+// ──────────────────────────────────────────────────────────────
 // Agent events (notification feed)
 // ──────────────────────────────────────────────────────────────
 
@@ -2579,6 +2673,11 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.querySelectorAll(".tab-pane").forEach((p) => p.classList.remove("active"));
     btn.classList.add("active");
     document.getElementById(btn.dataset.tab).classList.add("active");
+    diagnosticsTabActive = btn.dataset.tab === "tab_diagnostics";
+    if (diagnosticsTabActive) {
+      loadDiagnosticsInstances();
+      loadDiagnosticsLogs();
+    }
   };
 });
 
@@ -2711,6 +2810,17 @@ toggleSkimRatio();
 document.getElementById("modal_refresh_agent_logs").onclick = async () => { await loadAgentLogs(); };
 document.getElementById("modal_close_agent_logs").onclick = () => { closeLogsModal(); };
 document.getElementById("modal_log_category").onchange = async () => { if (logsModalOpen) await loadAgentLogs(); };
+document.getElementById("diag_refresh_btn")?.addEventListener("click", async () => {
+  await loadDiagnosticsInstances();
+  await loadDiagnosticsLogs();
+});
+document.getElementById("diag_download_btn")?.addEventListener("click", async () => {
+  try {
+    await downloadDiagnosticsLogs();
+  } catch (err) {
+    showToast(t("logs_error"), String(err.message || err), "warn", 4000);
+  }
+});
 
 // ──────────────────────────────────────────────────────────────
 // Language switcher (flag buttons)
@@ -2881,6 +2991,13 @@ setInterval(async () => { await loadMarketSummary(); }, 60000);
 
 /** Poll agent logs every 2 seconds while the modal is open. */
 setInterval(async () => { if (logsModalOpen) await loadAgentLogs(); }, 2000);
+
+/** Refresh diagnostics panel while active. */
+setInterval(async () => {
+  if (!diagnosticsTabActive) return;
+  await loadDiagnosticsInstances();
+  await loadDiagnosticsLogs();
+}, 8000);
 
 // ──────────────────────────────────────────────────────────────
 // Tooltip positioning (hover-triggered info tips)

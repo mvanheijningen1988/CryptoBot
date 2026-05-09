@@ -19,6 +19,7 @@ from typing import Any
 import requests
 import websocket
 
+from common.diagnostics import debug_log, scoped_context, trace_log
 from common.exchange.base import Exchange
 from common.models import TradeSignal
 
@@ -42,6 +43,7 @@ class BitvavoExchange(Exchange):
         base_currency: str,
         quote_currency: str,
         operator_id: int | None = None,
+        bot_id: str | None = None,
         ws_url: str = "wss://ws.bitvavo.com/v2/",
     ) -> None:
         """
@@ -57,6 +59,7 @@ class BitvavoExchange(Exchange):
         self.api_key = api_key
         self.api_secret = api_secret
         self.operator_id = operator_id
+        self.bot_id = bot_id
         self.market = market
         self.base_currency = base_currency
         self.quote_currency = quote_currency
@@ -186,6 +189,14 @@ class BitvavoExchange(Exchange):
             if self._stop_requested:
                 raise RuntimeError("Bitvavo websocket reconnect skipped: exchange is stopping")
             logger.warning("Bitvavo websocket reconnecting after transport failure: %s", reason)
+            debug_log(
+                logger,
+                "exchange_reconnect",
+                "Bitvavo websocket reconnecting after transport failure",
+                reason=reason,
+                market=self.market,
+                bot_id=self.bot_id,
+            )
             self._close_socket()
             if self._reconnect_backoff_seconds > 0:
                 time.sleep(self._reconnect_backoff_seconds)
@@ -748,6 +759,18 @@ class BitvavoExchange(Exchange):
             payload = dict(body)
             payload["action"] = action
             payload["requestId"] = request_id
+            with scoped_context(bot_id=self.bot_id, component="exchange.bitvavo"):
+                trace_log(
+                    logger,
+                    "exchange_action_send",
+                    "Bitvavo websocket action send attempt",
+                    action=action,
+                    request_id=request_id,
+                    attempt=attempt + 1,
+                    attempts=attempts,
+                    payload=payload,
+                    market=self.market,
+                )
             try:
                 self._send_json(payload)
             except Exception as exc:
@@ -773,6 +796,16 @@ class BitvavoExchange(Exchange):
 
             response = self.pending_responses.pop(request_id, {})
             self.pending_events.pop(request_id, None)
+            with scoped_context(bot_id=self.bot_id, component="exchange.bitvavo"):
+                trace_log(
+                    logger,
+                    "exchange_action_response",
+                    "Bitvavo websocket action response received",
+                    action=action,
+                    request_id=request_id,
+                    market=self.market,
+                    has_error=bool(response.get("errorCode") is not None),
+                )
             return response
 
         if last_error is not None:
@@ -903,6 +936,7 @@ class BitvavoExchange(Exchange):
         if self.running:
             return
         self._stop_requested = False
+        debug_log(logger, "exchange_start", "Starting Bitvavo exchange websocket", market=self.market, bot_id=self.bot_id)
         self._connect_and_authenticate()
         self._load_market_precision()
 
@@ -914,6 +948,7 @@ class BitvavoExchange(Exchange):
         self._stop_requested = True
         self.running = False
         self.authenticated = False
+        debug_log(logger, "exchange_stop", "Stopping Bitvavo exchange websocket", market=self.market, bot_id=self.bot_id)
         self._close_socket()
 
     def _refresh_balances(self) -> None:

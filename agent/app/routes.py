@@ -6,6 +6,7 @@ import logging
 from fastapi import HTTPException
 from fastapi.routing import APIRouter
 
+from common.diagnostics import debug_log, scoped_context, trace_log
 from agent.app.config import AGENT_ID, runner_manager
 from agent.app.schemas import BudgetPayload, DeleteBotPayload, StartBotPayload, StopBotPayload
 from agent.app.version import __version__
@@ -34,14 +35,26 @@ def start_bot(bot_id: str, payload: StartBotPayload) -> dict:
     :param payload: Request body containing bot_id and config.
     :return: Acknowledgement dict.
     """
-    logger.info("START request for bot %s (mode=%s, market=%s)", bot_id, payload.config.mode, payload.config.market)
-    try:
-        runner_manager.start_bot(bot_id, payload.config, runner_state=payload.runner_state)
-    except Exception as exc:
-        logger.exception("Failed to start bot %s", bot_id)
-        raise HTTPException(status_code=500, detail=f"Bot start failed: {exc}") from exc
-    logger.info("Bot %s started successfully", bot_id)
-    return {"ok": True}
+    with scoped_context(agent_id=AGENT_ID, bot_id=bot_id, component="agent.routes.start"):
+        logger.info("START request for bot %s (mode=%s, market=%s)", bot_id, payload.config.mode, payload.config.market)
+        trace_log(
+            logger,
+            "agent_start_request",
+            "Agent received start request",
+            bot_id=bot_id,
+            mode=payload.config.mode,
+            market=payload.config.market,
+            agent_id=AGENT_ID,
+        )
+        try:
+            runner_manager.start_bot(bot_id, payload.config, runner_state=payload.runner_state)
+        except Exception as exc:
+            logger.exception("Failed to start bot %s", bot_id)
+            debug_log(logger, "agent_start_failed", "Agent failed to start bot", bot_id=bot_id, error=str(exc), agent_id=AGENT_ID)
+            raise HTTPException(status_code=500, detail=f"Bot start failed: {exc}") from exc
+        logger.info("Bot %s started successfully", bot_id)
+        debug_log(logger, "agent_start_ok", "Agent started bot", bot_id=bot_id, agent_id=AGENT_ID)
+        return {"ok": True}
 
 
 @router.post("/agent/bots/{bot_id}/stop")
@@ -53,14 +66,17 @@ def stop_bot(bot_id: str, payload: StopBotPayload) -> dict:
     :param payload: Request body containing bot_id.
     :return: Acknowledgement dict.
     """
-    logger.info("STOP request for bot %s", bot_id)
-    try:
-        runner_manager.stop_bot(bot_id)
-    except Exception as exc:
-        logger.exception("Failed to stop bot %s", bot_id)
-        raise HTTPException(status_code=500, detail=f"Bot stop failed: {exc}") from exc
-    logger.info("Bot %s stopped successfully", bot_id)
-    return {"ok": True}
+    with scoped_context(agent_id=AGENT_ID, bot_id=bot_id, component="agent.routes.stop"):
+        logger.info("STOP request for bot %s", bot_id)
+        try:
+            runner_manager.stop_bot(bot_id)
+        except Exception as exc:
+            logger.exception("Failed to stop bot %s", bot_id)
+            debug_log(logger, "agent_stop_failed", "Agent failed to stop bot", bot_id=bot_id, error=str(exc), agent_id=AGENT_ID)
+            raise HTTPException(status_code=500, detail=f"Bot stop failed: {exc}") from exc
+        logger.info("Bot %s stopped successfully", bot_id)
+        debug_log(logger, "agent_stop_ok", "Agent stopped bot", bot_id=bot_id, agent_id=AGENT_ID)
+        return {"ok": True}
 
 
 @router.post("/agent/bots/{bot_id}/budget")
@@ -72,13 +88,16 @@ def update_budget(bot_id: str, payload: BudgetPayload) -> dict:
     :param payload: Request body containing bot_id and new budget.
     :return: Acknowledgement dict.
     """
-    logger.info("BUDGET update for bot %s", bot_id)
-    try:
-        runner_manager.update_budget(bot_id, payload.budget)
-    except Exception as exc:
-        logger.exception("Failed to update budget for bot %s", bot_id)
-        raise HTTPException(status_code=500, detail=f"Budget update failed: {exc}") from exc
-    return {"ok": True}
+    with scoped_context(agent_id=AGENT_ID, bot_id=bot_id, component="agent.routes.budget"):
+        logger.info("BUDGET update for bot %s", bot_id)
+        try:
+            runner_manager.update_budget(bot_id, payload.budget)
+        except Exception as exc:
+            logger.exception("Failed to update budget for bot %s", bot_id)
+            debug_log(logger, "agent_budget_failed", "Agent failed to update bot budget", bot_id=bot_id, error=str(exc), agent_id=AGENT_ID)
+            raise HTTPException(status_code=500, detail=f"Budget update failed: {exc}") from exc
+        debug_log(logger, "agent_budget_ok", "Agent updated bot budget", bot_id=bot_id, agent_id=AGENT_ID)
+        return {"ok": True}
 
 
 @router.get("/agent/bots")

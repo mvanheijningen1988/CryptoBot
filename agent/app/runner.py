@@ -14,9 +14,11 @@ from datetime import datetime, timezone
 import os
 import traceback
 from typing import Literal
+import logging
 
 import requests
 
+from common.diagnostics import debug_log, get_correlation_id, scoped_context, trace_log
 from common import (
     BotConfig,
     BotSnapshot,
@@ -29,6 +31,9 @@ from common import (
     StaticGridStrategy,
     TradeSignal,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentLogStore:
@@ -79,6 +84,16 @@ class AgentLogStore:
             self.logs.insert(0, item)
             if len(self.logs) > self.max_logs:
                 del self.logs[self.max_logs :]
+
+        with scoped_context(bot_id=bot_id, component="agent.log_store"):
+            debug_log(
+                logger,
+                f"agent_log_{event_type}",
+                message,
+                bot_id=bot_id,
+                category=category,
+                data=data or {},
+            )
 
     def get(self, limit: int = 200, bot_id: str | None = None, category: str | None = None) -> list[dict]:
         """
@@ -134,6 +149,7 @@ class BotRunner:
         self.trade_count = 0
         self._pending_trade_events: list[dict] = []
         self.started_at: datetime | None = None
+        self.trace_id = get_correlation_id()
 
     def _wait_for_initial_price(self) -> bool:
         """Block until the exchange provides the first usable price."""
@@ -250,6 +266,7 @@ class BotRunner:
                 api_key=api_key,
                 api_secret=api_secret,
                 operator_id=self._bitvavo_operator_id(),
+                bot_id=self.bot_id,
                 market=config.market,
                 base_currency=config.base_currency,
                 quote_currency=config.quote_currency,
@@ -302,100 +319,116 @@ class BotRunner:
 
     def _startup_and_loop(self, restored: bool) -> None:
         """Connect to the exchange, prime the strategy, then enter the tick loop."""
-        try:
-            self.exchange.start()
+        with scoped_context(
+            correlation_id=self.trace_id,
+            agent_id=self.agent_id,
+            bot_id=self.bot_id,
+            component="agent.runner",
+        ):
+            try:
+                self.exchange.start()
 
-            if not restored:
-                if self.config.mode == "live":
-                    # Keep bot accounting isolated from full-account balances.
-                    self.exchange.quote_balance = float(self.config.budget.quote_budget)
-                    self.exchange.base_balance = float(self.config.budget.base_budget)
-                else:
-                    quote_balance, base_balance = self.exchange.get_balances()
-                    self.exchange.quote_balance = quote_balance
-                    self.exchange.base_balance = base_balance
+                if not restored:
+                    if self.config.mode == "live":
+                        # Keep bot accounting isolated from full-account balances.
+                        self.exchange.quote_balance = float(self.config.budget.quote_budget)
+                        self.exchange.base_balance = float(self.config.budget.base_budget)
+                    else:
+                        quote_balance, base_balance = self.exchange.get_balances()
+                        self.exchange.quote_balance = quote_balance
+                        self.exchange.base_balance = base_balance
 
-            if not self._wait_for_initial_price():
-                return
+                if not self._wait_for_initial_price():
+                    return
 
-            if not restored:
-                self.strategy.on_price(self.price, self.state)
-                self.initial_equity = self.config.budget.quote_budget + self.config.budget.base_budget * self.price
-                synced_levels = self._sync_existing_live_open_orders()
-                if synced_levels:
-                    levels_sorted = sorted(synced_levels)
-                    levels_text = ", ".join(str(level) for level in levels_sorted)
-                    self.log_store.add(
-                        "orders_recovered",
-                        f"Recovered {len(synced_levels)} existing open order(s) from exchange before seeding. Levels: {levels_text}",
-                        bot_id=self.bot_id,
-                        data={"levels": levels_sorted},
-                        category="system",
-                    )
-                # Publish the first running snapshot before submitting initial orders
-                # so the manager UI can leave "initializing" immediately.
-                self._push_snapshot(self._build_snapshot("running"))
-                self._place_all_limit_orders("initial")
-                # Flush initial order_placed events and runner state right away.
-                self._push_snapshot(self._build_snapshot("running"))
-            else:
-                if not self.state.open_orders:
-                    # Restored but no open orders (e.g. crash during fill) — reinitialize grid
-                    self.state.level_index = None
+                if not restored:
                     self.strategy.on_price(self.price, self.state)
+                    self.initial_equity = self.config.budget.quote_budget + self.config.budget.base_budget * self.price
+                    synced_levels = self._sync_existing_live_open_orders()
+                    if synced_levels:
+                        levels_sorted = sorted(synced_levels)
+                        levels_text = ", ".join(str(level) for level in levels_sorted)
+                        self.log_store.add(
+                            "orders_recovered",
+                            f"Recovered {len(synced_levels)} existing open order(s) from exchange before seeding. Levels: {levels_text}",
+                            bot_id=self.bot_id,
+                            data={"levels": levels_sorted},
+                            category="system",
+                        )
+                    # Publish the first running snapshot before submitting initial orders
+                    # so the manager UI can leave "initializing" immediately.
+                    self._push_snapshot(self._build_snapshot("running"))
+                    self._place_all_limit_orders("initial")
+                    # Flush initial order_placed events and runner state right away.
+                    self._push_snapshot(self._build_snapshot("running"))
+                else:
+                    if not self.state.open_orders:
+                        # Restored but no open orders (e.g. crash during fill) — reinitialize grid
+                        self.state.level_index = None
+                        self.strategy.on_price(self.price, self.state)
 
-                synced_levels = self._sync_existing_live_open_orders()
-                if synced_levels:
-                    levels_sorted = sorted(synced_levels)
-                    levels_text = ", ".join(str(level) for level in levels_sorted)
+                    synced_levels = self._sync_existing_live_open_orders()
+                    if synced_levels:
+                        levels_sorted = sorted(synced_levels)
+                        levels_text = ", ".join(str(level) for level in levels_sorted)
+                        self.log_store.add(
+                            "orders_recovered",
+                            f"Recovered {len(synced_levels)} existing open order(s) from exchange before restore. Levels: {levels_text}",
+                            bot_id=self.bot_id,
+                            data={"levels": levels_sorted},
+                            category="system",
+                        )
+
+                    self._push_snapshot(self._build_snapshot("running"))
+                    # Startup reconcile: only post missing levels, never duplicate recovered orders.
+                    self._place_ready_open_orders("restore-startup", log_deferred=True)
+                    self._push_snapshot(self._build_snapshot("running"))
+
+                label = "resumed" if restored else "started"
+                self.log_store.add("bot_start", f"Bot {label}.", bot_id=self.bot_id, category="system")
+                if restored:
                     self.log_store.add(
-                        "orders_recovered",
-                        f"Recovered {len(synced_levels)} existing open order(s) from exchange before restore. Levels: {levels_text}",
+                        "bot_resumed",
+                        "Continuing from saved state: "
+                        f"level={self.state.level_index}, open_orders={len(self.state.open_orders)}, "
+                        f"trades={self.trade_count}, equity={self.initial_equity:.2f}",
                         bot_id=self.bot_id,
-                        data={"levels": levels_sorted},
+                        data={
+                            "level_index": self.state.level_index,
+                            "open_orders": len(self.state.open_orders),
+                            "filled_buys": len(self.state.filled_buys),
+                            "trade_count": self.trade_count,
+                            "initial_equity": round(self.initial_equity, 4),
+                            "price": self.price,
+                        },
                         category="system",
                     )
 
-                self._push_snapshot(self._build_snapshot("running"))
-                # Startup reconcile: only post missing levels, never duplicate recovered orders.
-                self._place_ready_open_orders("restore-startup", log_deferred=True)
-                self._push_snapshot(self._build_snapshot("running"))
-
-            label = "resumed" if restored else "started"
-            self.log_store.add("bot_start", f"Bot {label}.", bot_id=self.bot_id, category="system")
-            if restored:
+                self._loop()
+            except Exception as exc:
+                self.running = False
                 self.log_store.add(
-                    "bot_resumed",
-                    "Continuing from saved state: "
-                    f"level={self.state.level_index}, open_orders={len(self.state.open_orders)}, "
-                    f"trades={self.trade_count}, equity={self.initial_equity:.2f}",
+                    "bot_error",
+                    f"Failed to start: {exc}",
                     bot_id=self.bot_id,
                     data={
-                        "level_index": self.state.level_index,
-                        "open_orders": len(self.state.open_orders),
-                        "filled_buys": len(self.state.filled_buys),
-                        "trade_count": self.trade_count,
-                        "initial_equity": round(self.initial_equity, 4),
-                        "price": self.price,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "traceback": traceback.format_exc(limit=20),
+                        "trace_id": self.trace_id,
                     },
                     category="system",
                 )
-
-            self._loop()
-        except Exception as exc:
-            self.running = False
-            self.log_store.add(
-                "bot_error",
-                f"Failed to start: {exc}",
-                bot_id=self.bot_id,
-                data={
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "traceback": traceback.format_exc(limit=20),
-                },
-                category="system",
-            )
-            raise
+                debug_log(
+                    logging.getLogger(__name__),
+                    "bot_start_failed",
+                    "Bot failed to start in runner thread",
+                    bot_id=self.bot_id,
+                    agent_id=self.agent_id,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                raise
 
     def stop(self) -> None:
         """
@@ -574,16 +607,48 @@ class BotRunner:
             runner_state = self.get_runner_state()
             events = self._pending_trade_events
             self._pending_trade_events = []
-            requests.post(
-                f"{self.manager_url}/api/v1/agents/{self.agent_id}/bots/{self.bot_id}/metrics",
-                json={
-                    "snapshot": snapshot.model_dump(mode="json"),
-                    "runner_state": runner_state.model_dump(mode="json"),
-                    "trade_events": events,
-                },
-                timeout=4,
+            with scoped_context(
+                correlation_id=self.trace_id,
+                agent_id=self.agent_id,
+                bot_id=self.bot_id,
+                component="agent.runner.snapshot",
+            ):
+                trace_log(
+                    logging.getLogger(__name__),
+                    "snapshot_push_attempt",
+                    "Pushing bot snapshot to manager",
+                    bot_id=self.bot_id,
+                    agent_id=self.agent_id,
+                    trade_events=len(events),
+                    status=snapshot.status,
+                )
+                requests.post(
+                    f"{self.manager_url}/api/v1/agents/{self.agent_id}/bots/{self.bot_id}/metrics",
+                    json={
+                        "snapshot": snapshot.model_dump(mode="json"),
+                        "runner_state": runner_state.model_dump(mode="json"),
+                        "trade_events": events,
+                    },
+                    timeout=4,
+                    headers={"x-correlation-id": self.trace_id},
+                )
+                debug_log(
+                    logging.getLogger(__name__),
+                    "snapshot_push_ok",
+                    "Bot snapshot pushed to manager",
+                    bot_id=self.bot_id,
+                    agent_id=self.agent_id,
+                    status=snapshot.status,
+                )
+        except requests.RequestException as exc:
+            debug_log(
+                logging.getLogger(__name__),
+                "snapshot_push_failed",
+                "Bot snapshot push failed",
+                bot_id=self.bot_id,
+                agent_id=self.agent_id,
+                error=str(exc),
             )
-        except requests.RequestException:
             return
 
     def _sync_existing_live_open_orders(self) -> set[int]:

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CryptoBot Manager</title>
-    <link rel="stylesheet" href="/static/dashboard.css?v=20260509r" />
+    <link rel="stylesheet" href="/static/dashboard.css?v=20260509diag1" />
   </head>
   <body>
     <header>
@@ -25,6 +25,7 @@
       <div class="tab-bar">
         <button class="tab-btn active" data-tab="tab_dashboard" data-i18n="tab_dashboard">Dashboard</button>
         <button class="tab-btn" data-tab="tab_agents" data-i18n="tab_agents">Agents</button>
+        <button class="tab-btn" data-tab="tab_diagnostics" data-i18n="tab_diagnostics">Diagnostics</button>
       </div>
 
       <!-- Dashboard tab -->
@@ -131,6 +132,57 @@
             </thead>
             <tbody id="agents_body"></tbody>
           </table>
+        </section>
+      </div>
+
+      <!-- Diagnostics tab -->
+      <div id="tab_diagnostics" class="tab-pane">
+        <section class="card" style="margin-bottom:12px;">
+          <h2 data-i18n="diag_instances_title">Instances (current + historical)</h2>
+          <div id="diag_retention_info" class="diag-hint"></div>
+          <div class="bots-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-i18n="diag_instance_type">Type</th>
+                  <th data-i18n="diag_instance_id">Instance ID</th>
+                  <th data-i18n="diag_status">Status</th>
+                  <th data-i18n="diag_first_seen">First Seen</th>
+                  <th data-i18n="diag_last_seen">Last Seen</th>
+                  <th data-i18n="diag_source">Source</th>
+                </tr>
+              </thead>
+              <tbody id="diag_instances_body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 data-i18n="diag_debug_logs_title">Debug Logs</h2>
+          <div class="diag-controls">
+            <label><span data-i18n="diag_filter_type">Type</span>
+              <select id="diag_filter_instance_type">
+                <option value="" data-i18n="lbl_all">all</option>
+                <option value="manager">manager</option>
+                <option value="agent">agent</option>
+                <option value="bot">bot</option>
+              </select>
+            </label>
+            <label><span data-i18n="diag_filter_instance">Instance</span>
+              <input id="diag_filter_instance_id" placeholder="e.g. agent1 or bot-id" />
+            </label>
+            <label><span data-i18n="diag_filter_component">Component</span>
+              <input id="diag_filter_component" placeholder="exchange/runner/routes" />
+            </label>
+            <label><span data-i18n="diag_filter_limit">Limit</span>
+              <input id="diag_filter_limit" type="number" min="10" max="5000" value="500" />
+            </label>
+            <div class="diag-actions">
+              <button id="diag_refresh_btn" class="secondary" data-i18n="btn_refresh">Refresh now</button>
+              <button id="diag_download_btn" data-i18n="diag_download_btn">Download NDJSON</button>
+            </div>
+          </div>
+          <div id="diag_debug_logs" class="diag-log-list"></div>
         </section>
       </div>
     </main>
@@ -419,7 +471,7 @@
     </dialog>
 
     <!-- Scripts: i18n dictionary must load before dashboard.js -->
-    <script src="/static/i18n.js?v=20260509p"></script>
-    <script src="/static/dashboard.js?v=20260509v"></script>
+    <script src="/static/i18n.js?v=20260509diag1"></script>
+    <script src="/static/dashboard.js?v=20260509diag1"></script>
   </body>
 </html>

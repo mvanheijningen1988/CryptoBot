@@ -17,6 +17,7 @@ const I18N = {
     // Tabs
     tab_dashboard: "Dashboard",
     tab_agents: "Agents",
+    tab_diagnostics: "Diagnostics",
 
     // Dashboard
     btn_new_bot: "+ New Bot",
@@ -212,6 +213,19 @@ const I18N = {
     logs_no_bot_agent: "This bot has no assigned agent yet.",
     logs_error: "Could not fetch logs",
     btn_close: "Close",
+    diag_instances_title: "Instances (current + historical)",
+    diag_instance_type: "Type",
+    diag_instance_id: "Instance ID",
+    diag_status: "Status",
+    diag_first_seen: "First Seen",
+    diag_last_seen: "Last Seen",
+    diag_source: "Source",
+    diag_debug_logs_title: "Debug Logs",
+    diag_filter_type: "Type",
+    diag_filter_instance: "Instance",
+    diag_filter_component: "Component",
+    diag_filter_limit: "Limit",
+    diag_download_btn: "Download NDJSON",
 
     // Auth
     login_title: "Login",
@@ -256,6 +270,7 @@ const I18N = {
     // Tabs
     tab_dashboard: "Dashboard",
     tab_agents: "Agents",
+    tab_diagnostics: "Diagnostiek",
 
     // Dashboard
     btn_new_bot: "+ Nieuwe Bot",
@@ -461,6 +476,19 @@ const I18N = {
     logs_no_bot_agent: "Deze bot heeft nog geen toegewezen agent.",
     logs_error: "Kon logs niet ophalen",
     btn_close: "Sluiten",
+    diag_instances_title: "Instanties (huidig + historisch)",
+    diag_instance_type: "Type",
+    diag_instance_id: "Instantie ID",
+    diag_status: "Status",
+    diag_first_seen: "Eerst gezien",
+    diag_last_seen: "Laatst gezien",
+    diag_source: "Bron",
+    diag_debug_logs_title: "Debug Logs",
+    diag_filter_type: "Type",
+    diag_filter_instance: "Instantie",
+    diag_filter_component: "Component",
+    diag_filter_limit: "Limiet",
+    diag_download_btn: "Download NDJSON",
 
     // Auth
     login_title: "Inloggen",

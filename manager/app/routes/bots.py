@@ -14,6 +14,8 @@ import requests
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from common.diagnostics import debug_log, get_correlation_id, scoped_context, trace_log
+
 logger = logging.getLogger(__name__)
 
 from manager.app.database import get_db
@@ -645,7 +647,11 @@ def _find_running_agent_for_bot(bot_id: str, db: Session) -> Agent | None:
     )
     for agent in agents:
         try:
-            response = requests.get(f"{agent.base_url}/agent/bots", timeout=2)
+            response = requests.get(
+                f"{agent.base_url}/agent/bots",
+                timeout=2,
+                headers={"x-correlation-id": get_correlation_id()},
+            )
         except requests.RequestException:
             continue
         if response.status_code >= 400:
@@ -775,6 +781,7 @@ def get_bot_logs(
             f"{agent.base_url}/agent/logs",
             params=query_params,
             timeout=6,
+            headers={"x-correlation-id": get_correlation_id()},
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"Failed to fetch bot logs: {exc}") from exc
@@ -819,6 +826,15 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
         agent_id = agent.id
 
     agent_url = resolve_agent_url(agent_id, db)
+    with scoped_context(bot_id=bot.id, agent_id=agent_id, component="manager.routes.bots.start"):
+        trace_log(
+            logger,
+            "manager_start_bot_request",
+            "Manager forwarding bot start request to agent",
+            bot_id=bot.id,
+            agent_id=agent_id,
+            agent_url=agent_url,
+        )
     logger.info("Starting bot %s on agent %s (%s)", bot.id, agent_id, agent_url)
     start_payload: dict = {
         "bot_id": bot.id,
@@ -834,6 +850,15 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
         start_payload,
     )
     if not ok:
+        with scoped_context(bot_id=bot.id, agent_id=agent_id, component="manager.routes.bots.start"):
+            debug_log(
+                logger,
+                "manager_start_bot_failed",
+                "Manager received failed bot-start response from agent",
+                bot_id=bot.id,
+                agent_id=agent_id,
+                error=message,
+            )
         logger.error("Agent %s failed to start bot %s: %s", agent_id, bot.id, message)
         raise HTTPException(status_code=502, detail=f"Agent start failed: {message}")
 
@@ -842,6 +867,14 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
     _set_manual_stop_flag(bot, False)
     bot.updated_at = datetime.now(UTC)
     db.commit()
+    with scoped_context(bot_id=bot.id, agent_id=agent_id, component="manager.routes.bots.start"):
+        debug_log(
+            logger,
+            "manager_start_bot_ok",
+            "Manager marked bot as initializing",
+            bot_id=bot.id,
+            agent_id=agent_id,
+        )
     logger.info("Bot %s now initializing on agent %s", bot.id, agent_id)
     return {"ok": True}
 
@@ -1118,6 +1151,17 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
         bot.assigned_agent_id = agent_id
 
     snapshot = payload.snapshot
+    with scoped_context(bot_id=bot_id, agent_id=agent_id, component="manager.routes.bots.metrics"):
+        trace_log(
+            logger,
+            "manager_metrics_ingest",
+            "Manager received metrics snapshot",
+            bot_id=bot_id,
+            agent_id=agent_id,
+            status=snapshot.status,
+            trade_count=snapshot.trade_count,
+            price=snapshot.price,
+        )
 
     # ── Record equity history for budget trend chart ──
     add_equity_point(
@@ -1179,6 +1223,15 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
     _set_full_state(bot, snapshot, payload.runner_state)
     bot.updated_at = datetime.now(UTC)
     db.commit()
+    with scoped_context(bot_id=bot_id, agent_id=agent_id, component="manager.routes.bots.metrics"):
+        debug_log(
+            logger,
+            "manager_metrics_stored",
+            "Manager stored metrics snapshot",
+            bot_id=bot_id,
+            agent_id=agent_id,
+            trade_events=len(payload.trade_events or []),
+        )
     return {"ok": True}
 
 

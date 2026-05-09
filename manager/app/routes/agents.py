@@ -11,6 +11,7 @@ from fastapi import Depends, HTTPException
 from fastapi.routing import APIRouter
 from sqlalchemy.orm import Session
 
+from common.diagnostics import get_correlation_id
 from manager.app.database import get_db
 from manager.app.events import add_agent_event
 from manager.app.failover import detach_bots_for_agent
@@ -302,6 +303,7 @@ def get_agent_logs(
             f"{agent.base_url}/agent/logs",
             params=query_params,
             timeout=6,
+            headers={"x-correlation-id": get_correlation_id()},
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"Failed to fetch agent logs: {exc}") from exc
