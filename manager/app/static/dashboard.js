@@ -87,6 +87,9 @@ let marketSocketMarket = null;
 /** Timer handle for WebSocket reconnection back-off. */
 let marketReconnectTimer = null;
 
+/** Periodic REST refresh timer to keep 24h summary aligned with exchange values. */
+let marketSummaryRefreshTimer = null;
+
 /** Latest aggregated market snapshot used by renderMarketSummary(). */
 let marketSnapshot = null;
 
@@ -95,6 +98,9 @@ const marketMeta = new Map();
 let marketOptions = [];
 let marketHighlightIndex = -1;
 let lastFeeSnapshot = null;
+const cryptoLogoBySymbol = new Map();
+let coinMapLoadPromise = null;
+let marketIconObserver = null;
 const MAX_DECIMALS = 8;
 
 function roundToDecimals(value, decimals = MAX_DECIMALS) {
@@ -178,7 +184,7 @@ function refreshAppSelect(selectEl) {
 
 function initAppSelect(selectEl) {
   if (!selectEl || selectEl.dataset.customized === "1") return;
-  if (selectEl.id === "market") return;
+  if (selectEl.id === "market" || selectEl.id === "profit_mode") return;
 
   selectEl.dataset.customized = "1";
   selectEl.classList.add("app-select-native");
@@ -219,6 +225,70 @@ function normalizeMarketValue(raw) {
     .replace(/\s+/g, "");
 }
 
+function normalizeSymbol(raw) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+async function loadCoinMap() {
+  if (cryptoLogoBySymbol.size > 0) return;
+  if (coinMapLoadPromise) {
+    await coinMapLoadPromise;
+    return;
+  }
+
+  coinMapLoadPromise = (async () => {
+    try {
+      const res = await fetch("/static/assets/coin_map.json", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!Array.isArray(data)) return;
+      for (const item of data) {
+        if (!item || typeof item !== "object") continue;
+        const key = normalizeSymbol(item.symbol || "");
+        const url = String(item.img_url || "").trim();
+        if (!key || !url) continue;
+        if (!cryptoLogoBySymbol.has(key)) {
+          cryptoLogoBySymbol.set(key, url);
+        }
+      }
+    } catch {
+      // Best effort: keep dropdown working even if icon index is unavailable.
+    } finally {
+      coinMapLoadPromise = null;
+    }
+  })();
+
+  await coinMapLoadPromise;
+}
+
+function getMarketIconPath(market) {
+  const meta = marketMeta.get(market) || {};
+  const base = String(meta.base || market.split("-")[0] || "");
+  return cryptoLogoBySymbol.get(normalizeSymbol(base)) || "";
+}
+
+function renderMarketInputIcon() {
+  const input = getMarketInput();
+  const icon = document.getElementById("market_input_icon");
+  const wrap = input?.closest(".combo-wrap");
+  if (!input || !icon || !wrap) return;
+
+  const market = normalizeMarketValue(input.value);
+  const iconPath = getMarketIconPath(market);
+  if (iconPath) {
+    icon.src = iconPath;
+    icon.hidden = false;
+    wrap.classList.add("has-icon");
+  } else {
+    icon.hidden = true;
+    icon.removeAttribute("src");
+    wrap.classList.remove("has-icon");
+  }
+}
+
 function getMarketInput() {
   return document.getElementById("market");
 }
@@ -226,9 +296,54 @@ function getMarketInput() {
 function closeMarketSuggestions() {
   const menu = document.getElementById("market_suggestions");
   if (!menu) return;
+  if (marketIconObserver) {
+    marketIconObserver.disconnect();
+    marketIconObserver = null;
+  }
   menu.classList.remove("open");
   menu.innerHTML = "";
   marketHighlightIndex = -1;
+}
+
+function setupMarketIconLazyLoad(menu) {
+  if (!menu) return;
+  const icons = [...menu.querySelectorAll(".combo-icon[data-src]")];
+  if (!icons.length) return;
+
+  if (marketIconObserver) {
+    marketIconObserver.disconnect();
+    marketIconObserver = null;
+  }
+
+  if (!("IntersectionObserver" in window)) {
+    icons.forEach((icon) => {
+      icon.src = icon.dataset.src;
+      icon.removeAttribute("data-src");
+    });
+    return;
+  }
+
+  marketIconObserver = new IntersectionObserver(
+    (entries, observer) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        const icon = entry.target;
+        const src = icon.dataset.src;
+        if (src) {
+          icon.src = src;
+          icon.removeAttribute("data-src");
+        }
+        observer.unobserve(icon);
+      });
+    },
+    {
+      root: menu,
+      rootMargin: "32px 0px",
+      threshold: 0.01,
+    }
+  );
+
+  icons.forEach((icon) => marketIconObserver.observe(icon));
 }
 
 function renderMarketSuggestions(query = "") {
@@ -251,7 +366,25 @@ function renderMarketSuggestions(query = "") {
     btn.className = "combo-item";
     btn.dataset.market = market;
     btn.dataset.idx = String(idx);
-    btn.textContent = market;
+
+    const iconPath = getMarketIconPath(market);
+    if (iconPath) {
+      const icon = document.createElement("img");
+      icon.className = "combo-icon";
+      icon.dataset.src = iconPath;
+      icon.alt = "";
+      icon.decoding = "async";
+      icon.onerror = () => {
+        icon.remove();
+      };
+      btn.appendChild(icon);
+    }
+
+    const label = document.createElement("span");
+    label.className = "combo-label";
+    label.textContent = market;
+    btn.appendChild(label);
+
     btn.onclick = () => {
       const input = getMarketInput();
       if (!input) return;
@@ -263,6 +396,7 @@ function renderMarketSuggestions(query = "") {
   });
   marketHighlightIndex = 0;
   menu.classList.add("open");
+  setupMarketIconLazyLoad(menu);
   if (input) placeFloatingMenu(input, menu, 260);
 }
 
@@ -280,6 +414,7 @@ function onMarketValueCommitted() {
   const input = getMarketInput();
   if (!input) return;
   input.value = normalizeMarketValue(input.value);
+  renderMarketInputIcon();
   closeMarketSuggestions();
   startMarketRealtime();
   loadBalances();
@@ -304,6 +439,44 @@ function fillTemplate(template, values) {
     output = output.replaceAll(`{${key}}`, String(value));
   }
   return output;
+}
+
+function getNumberLocale() {
+  const override = String(localStorage.getItem("cryptobot_number_locale") || "").trim();
+  if (override && override.toLowerCase() !== "auto") {
+    return override;
+  }
+  return navigator.language || "en-US";
+}
+
+function setNumberLocaleOverride(locale) {
+  const value = String(locale || "").trim();
+  if (!value || value.toLowerCase() === "auto") {
+    localStorage.removeItem("cryptobot_number_locale");
+  } else {
+    localStorage.setItem("cryptobot_number_locale", value);
+  }
+  if (marketSnapshot) {
+    renderMarketSummary(marketSnapshot);
+  }
+}
+
+globalThis.setNumberLocaleOverride = setNumberLocaleOverride;
+
+function getNumberLocaleForLanguage(languageCode) {
+  return languageCode === "nl" ? "nl-NL" : "en-US";
+}
+
+function formatSignedNumber(value, digits = 2) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  const locale = getNumberLocale();
+  const sign = n >= 0 ? "+" : "";
+  return `${sign}${new Intl.NumberFormat(locale, {
+    useGrouping: true,
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(n)}`;
 }
 
 function renderFeeInfo(snapshot) {
@@ -504,9 +677,13 @@ function renderMinimumOrderHint(config = currentConfig()) {
 function formatNumber(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   const n = Number(value);
-  // Show all significant decimals — no rounding
-  const s = n.toString();
-  return s;
+  const maxDigits = Number.isInteger(arguments[1]) && arguments[1] >= 0 ? Number(arguments[1]) : 8;
+  const minDigits = Number.isInteger(arguments[2]) && arguments[2] >= 0 ? Number(arguments[2]) : 0;
+  return new Intl.NumberFormat(getNumberLocale(), {
+    useGrouping: true,
+    minimumFractionDigits: minDigits,
+    maximumFractionDigits: maxDigits,
+  }).format(n);
 }
 
 /** Format seconds into human-readable uptime string. */
@@ -560,7 +737,6 @@ function timeAgo(date) {
 function renderMarketSummary(summary) {
   const lastEl = document.getElementById("market_last_price");
   const changeEl = document.getElementById("market_change");
-  const volBaseEl = document.getElementById("market_volume_base");
   const volQuoteEl = document.getElementById("market_volume_quote");
 
   const last = Number(summary.last_price ?? summary.last ?? 0);
@@ -576,8 +752,8 @@ function renderMarketSummary(summary) {
     diffPct = open > 0 ? (diffAbs / open) * 100 : 0;
   }
 
-  lastEl.textContent = formatNumber(last, 8);
-  changeEl.textContent = `${diffAbs >= 0 ? "+" : ""}${formatNumber(diffAbs, 8)} (${diffPct >= 0 ? "+" : ""}${formatNumber(diffPct, 4)}%)`;
+  lastEl.textContent = formatNumber(last);
+  changeEl.textContent = `${formatSignedNumber(diffAbs, 6)} (${formatSignedNumber(diffPct, 2)}%)`;
 
   // Colour-code positive / negative
   changeEl.classList.remove("market-positive", "market-negative");
@@ -585,15 +761,14 @@ function renderMarketSummary(summary) {
   lastEl.classList.remove("market-positive", "market-negative");
   lastEl.classList.add(diffAbs >= 0 ? "market-positive" : "market-negative");
 
-  volBaseEl.textContent = formatNumber(volumeBase, 8);
-  volQuoteEl.textContent = formatNumber(volumeQuote, 2);
+  volQuoteEl.textContent = formatNumber(volumeQuote, 0);
 }
 
 /**
  * Reset all four market-stat elements to "N/A" and remove colour classes.
  */
 function resetMarketSummaryToNA() {
-  for (const id of ["market_last_price", "market_change", "market_volume_base", "market_volume_quote"]) {
+  for (const id of ["market_last_price", "market_change", "market_volume_quote"]) {
     const el = document.getElementById(id);
     el.textContent = "N/A";
     el.classList.remove("market-positive", "market-negative");
@@ -608,6 +783,7 @@ async function loadMarkets() {
   const input = getMarketInput();
   if (!input) return;
   try {
+    await loadCoinMap();
     const markets = await api("/api/v1/markets?status=trading");
     const current = normalizeMarketValue(input.value);
     marketMeta.clear();
@@ -621,6 +797,7 @@ async function loadMarkets() {
     if (current && marketMeta.has(current)) input.value = current;
     else if (marketMeta.has("BTC-EUR")) input.value = "BTC-EUR";
     else if (marketOptions.length) input.value = marketOptions[0];
+    renderMarketInputIcon();
     renderMarketSuggestions(input.value);
     closeMarketSuggestions();
     renderMinimumOrderHint();
@@ -661,6 +838,9 @@ async function loadBalances() {
   const market = normalizeMarketValue(getMarketInput()?.value);
   const quoteEl = document.getElementById("avail_quote");
   const baseEl = document.getElementById("avail_base");
+  const budgetInputEl = document.getElementById("quote_budget");
+  const budgetSliderEl = document.getElementById("quote_budget_slider");
+  const budgetSliderMaxEl = document.getElementById("quote_budget_slider_max");
   quoteEl.textContent = "-";
   baseEl.textContent = "-";
   if (!market) return;
@@ -677,9 +857,17 @@ async function loadBalances() {
     const availQuote = Number(quoteData.available);
     baseEl.textContent = `${formatNumber(Number(baseData.available))} ${baseSym}`;
     quoteEl.textContent = `${formatNumber(availQuote)} ${quoteSym}`;
+    if (budgetSliderEl) {
+      budgetSliderEl.min = "0";
+      budgetSliderEl.max = String(Math.max(availQuote, 0));
+      budgetSliderEl.step = "0.00000001";
+      const currentBudget = Number(budgetInputEl?.value || 0);
+      budgetSliderEl.value = String(Math.min(Math.max(currentBudget, 0), availQuote));
+    }
+    if (budgetSliderMaxEl) budgetSliderMaxEl.textContent = formatNumber(availQuote, 0);
 
     // Pre-fill budget with full available balance
-    document.getElementById("quote_budget").value = formatNumber(availQuote);
+    if (budgetInputEl) budgetInputEl.value = String(availQuote);
     syncBudgetAndOrderSize("budget");
   } catch (err) {
     console.error("Failed to load balances", err);
@@ -698,6 +886,10 @@ async function loadBalances() {
  */
 function closeMarketSocket() {
   if (marketReconnectTimer) { clearTimeout(marketReconnectTimer); marketReconnectTimer = null; }
+  if (marketSummaryRefreshTimer) {
+    clearInterval(marketSummaryRefreshTimer);
+    marketSummaryRefreshTimer = null;
+  }
   if (marketSocket) {
     try { marketSocket.onopen = null; marketSocket.onmessage = null; marketSocket.onclose = null; marketSocket.onerror = null; marketSocket.close(); } catch { /* socket already closed */ }
   }
@@ -760,6 +952,11 @@ function startMarketRealtime() {
 
   // Also load REST summary immediately (WS may take a moment)
   loadMarketSummary();
+  // Keep 24h open/volume aligned with exchange by periodic REST refresh.
+  marketSummaryRefreshTimer = setInterval(() => {
+    if (normalizeMarketValue(getMarketInput()?.value) !== market) return;
+    loadMarketSummary();
+  }, 15000);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -889,7 +1086,15 @@ let _budgetCalcSource = "";
 function syncBudgetAndOrderSize(source) {
   const levels = Number(document.getElementById("levels").value) || 1;
   const budgetEl = document.getElementById("quote_budget");
+  const budgetSliderEl = document.getElementById("quote_budget_slider");
   const sizeEl = document.getElementById("order_size_quote");
+
+  const syncSlider = () => {
+    if (!budgetSliderEl) return;
+    const sliderMax = Number(budgetSliderEl.max || 0) || 0;
+    const budget = Number(budgetEl.value) || 0;
+    budgetSliderEl.value = String(Math.min(Math.max(budget, 0), sliderMax || budget));
+  };
 
   if (source === "budget") {
     _budgetCalcSource = "budget";
@@ -897,12 +1102,14 @@ function syncBudgetAndOrderSize(source) {
     if (budget > 0 && levels > 0) {
       sizeEl.value = String(roundToDecimals(budget / levels));
     }
+    syncSlider();
   } else if (source === "size") {
     _budgetCalcSource = "size";
     const size = Number(sizeEl.value) || 0;
     if (size > 0 && levels > 0) {
       budgetEl.value = String(roundToDecimals(size * levels));
     }
+    syncSlider();
   } else if (source === "levels") {
     // Recalculate based on whichever the user last touched
     if (_budgetCalcSource === "budget") {
@@ -916,11 +1123,18 @@ function syncBudgetAndOrderSize(source) {
         budgetEl.value = String(roundToDecimals(size * levels));
       }
     }
+    syncSlider();
   }
   scheduleGridCheck();
 }
 
 document.getElementById("quote_budget").addEventListener("input", () => syncBudgetAndOrderSize("budget"));
+document.getElementById("quote_budget_slider")?.addEventListener("input", (e) => {
+  const budgetEl = document.getElementById("quote_budget");
+  if (!budgetEl) return;
+  budgetEl.value = String(Number(e.target.value || 0));
+  syncBudgetAndOrderSize("budget");
+});
 document.getElementById("order_size_quote").addEventListener("input", () => syncBudgetAndOrderSize("size"));
 document.getElementById("levels").addEventListener("input", () => syncBudgetAndOrderSize("levels"));
 bindMaxDecimalInput("lower_price");
@@ -1160,6 +1374,9 @@ window.addEventListener("resize", () => {
 });
 
 document.addEventListener("scroll", (e) => {
+  if (e.target?.closest?.(".combo-wrap") || e.target?.closest?.("#market_suggestions")) {
+    return;
+  }
   if (e.target.closest(".modal") || e.target === document) {
     closeAllAppSelects();
     closeMarketSuggestions();
@@ -1433,9 +1650,14 @@ async function loadAgentLogs() {
   if (!selectedAgentId && !selectedLogBotId) { list.innerHTML = `<div class="log-item">${t("logs_no_agent")}</div>`; return; }
 
   const limit = Number(document.getElementById("modal_agent_logs_limit").value || "200");
-  const category = document.getElementById("modal_log_category").value;
+  const categoryEl = document.getElementById("modal_log_category");
+  let category = categoryEl.value;
+  if (category === "trading") {
+    category = "";
+    categoryEl.value = "";
+  }
   const qs = new URLSearchParams({ limit: String(Math.max(1, Math.min(limit, 1000))) });
-  if (category) qs.set("category", category);
+  if (category === "system") qs.set("category", category);
 
   try {
     const url = selectedLogBotId
@@ -1563,8 +1785,9 @@ async function loadTradeEvents() {
       const pnlStr = ev.trade_pnl >= 0 ? `+${formatNumber(ev.trade_pnl)}` : formatNumber(ev.trade_pnl);
       const icon = isFill ? "✅" : "🔄";
       const label = isFill ? t("toast_order_filled") : `#${ev.trade_number}`;
+      const fillParts = isFill && Number(ev.fill_count || 0) > 0 ? ` | ${t("lbl_fill_parts")}: ${Number(ev.fill_count)}` : "";
       item.className = `event-item ${sideClass}`;
-      item.innerHTML = `<div><strong>${icon} ${label}</strong> ${ev.bot_name} ${ev.side.toUpperCase()} @ ${formatNumber(ev.price)} &mdash; <span class="${pnlClass}">${pnlStr}</span> | ${t("lbl_equity")}: ${formatNumber(ev.total_equity)}</div><div class="event-time">${timeLabel}</div>`;
+      item.innerHTML = `<div><strong>${icon} ${label}</strong> ${ev.bot_name} ${ev.side.toUpperCase()} @ ${formatNumber(ev.price)} &mdash; <span class="${pnlClass}">${pnlStr}</span> | ${t("lbl_equity")}: ${formatNumber(ev.total_equity)}${fillParts}</div><div class="event-time">${timeLabel}</div>`;
     }
     list.appendChild(item);
   }
@@ -1816,6 +2039,9 @@ async function openOrderDetail(eventId) {
     html += `<div class="od-row"><span class="od-label">${t("th_market")}</span><span>${ev.market || ev.bot_name || "-"}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(ev.price)}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_amount")}</span><span>${formatNumber(ev.quote_amount)}</span></div>`;
+    if (ev.event_type === "order_filled") {
+      html += `<div class="od-row"><span class="od-label">${t("lbl_fill_parts")}</span><span>${Number(ev.fill_count || 0) > 0 ? Number(ev.fill_count) : "-"}</span></div>`;
+    }
     html += `<div class="od-row"><span class="od-label">${t("th_fee_amount")}</span><span>${Number(ev.fee_paid_quote || 0) > 0 ? formatNumber(ev.fee_paid_quote) : "-"}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_time")}</span><span>${new Date(ev.timestamp).toLocaleString()}</span></div>`;
     if (ev.side !== "buy") {
@@ -1855,6 +2081,9 @@ async function openOrderDetail(eventId) {
       html += `<div class="od-row"><span class="od-label">${t("th_side")}</span><span class="${loSideClass}">${lo.side.toUpperCase()}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(lo.price)}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_amount")}</span><span>${formatNumber(lo.quote_amount)}</span></div>`;
+      if (lo.event_type === "order_filled") {
+        html += `<div class="od-row"><span class="od-label">${t("lbl_fill_parts")}</span><span>${Number(lo.fill_count || 0) > 0 ? Number(lo.fill_count) : "-"}</span></div>`;
+      }
       html += `<div class="od-row"><span class="od-label">${t("th_fee_amount")}</span><span>${Number(lo.fee_paid_quote || 0) > 0 ? formatNumber(lo.fee_paid_quote) : "-"}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_time")}</span><span>${new Date(lo.timestamp).toLocaleString()}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("lbl_pnl")}</span><span>${loPnlStr}</span></div>`;
@@ -2320,6 +2549,7 @@ marketInputEl?.addEventListener("focus", () => {
 });
 marketInputEl?.addEventListener("input", () => {
   marketInputEl.value = normalizeMarketValue(marketInputEl.value);
+  renderMarketInputIcon();
   renderMarketSuggestions(marketInputEl.value);
   if (marketMeta.has(marketInputEl.value)) {
     onMarketValueCommitted();
@@ -2359,7 +2589,20 @@ marketInputEl?.addEventListener("blur", () => {
  * Only "skim" mode uses a ratio.
  */
 function toggleSkimRatio() {
-  document.getElementById("skim_ratio_label").style.display = document.getElementById("profit_mode").value === "skim" ? "block" : "none";
+  const createModalBody = document.querySelector("#create_bot_modal .modal-body");
+  const prevScrollTop = createModalBody ? createModalBody.scrollTop : 0;
+
+  const skimRatioLabel = document.getElementById("skim_ratio_label");
+  const skimRatioInput = document.getElementById("skim_ratio");
+  const isSkim = document.getElementById("profit_mode").value === "skim";
+  skimRatioLabel.classList.toggle("is-hidden", !isSkim);
+  skimRatioInput.disabled = !isSkim;
+
+  if (createModalBody) {
+    requestAnimationFrame(() => {
+      createModalBody.scrollTop = prevScrollTop;
+    });
+  }
 }
 document.getElementById("profit_mode").addEventListener("change", toggleSkimRatio);
 document.getElementById("mode")?.addEventListener("change", () => {
@@ -2389,10 +2632,12 @@ document.querySelectorAll(".lang-flag").forEach((btn) => {
   btn.onclick = async () => {
     lang = btn.dataset.lang;
     localStorage.setItem("cryptobot_lang", lang);
+    setNumberLocaleOverride(getNumberLocaleForLanguage(lang));
     updateLangFlags();
     applyTranslations();
     refreshLogsModalTitle();
     renderFeeInfo(lastFeeSnapshot);
+    if (marketSnapshot) renderMarketSummary(marketSnapshot);
     refreshAllAppSelects();
     try { await api("/api/v1/auth/locale", { method: "POST", body: JSON.stringify({ locale: lang }) }); } catch { /* best-effort locale sync */ }
   };

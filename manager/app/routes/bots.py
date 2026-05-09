@@ -45,6 +45,22 @@ _AGENT_NOT_APPROVED = "Agent is not approved"
 _ACTIVE_BOT_STATUSES = ("initializing", "running")
 
 
+def _load_bot_state_flags(bot: Bot) -> dict:
+    """Load manager-side bot state flags from state_json."""
+    try:
+        data = json.loads(bot.state_json or "{}")
+        return data if isinstance(data, dict) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _set_manual_stop_flag(bot: Bot, value: bool) -> None:
+    """Persist the manual stop marker for stale-metrics protection."""
+    flags = _load_bot_state_flags(bot)
+    flags["manual_stop"] = bool(value)
+    bot.state_json = json.dumps(flags)
+
+
 def _config_value(obj: object, key: str, default: object = None) -> object:
     """Read a config field from either a model-like object or a dict."""
     if isinstance(obj, dict):
@@ -460,6 +476,7 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
 
     bot.assigned_agent_id = agent_id
     bot.status = "initializing"
+    _set_manual_stop_flag(bot, False)
     bot.updated_at = datetime.now(UTC)
     db.commit()
     logger.info("Bot %s now initializing on agent %s", bot.id, agent_id)
@@ -582,6 +599,7 @@ def stop_bot(bot_id: str, db: DbSession) -> dict:
 
     bot.status = "stopped"
     bot.assigned_agent_id = None
+    _set_manual_stop_flag(bot, True)
     bot.updated_at = datetime.now(UTC)
     db.commit()
     result: dict = {"ok": True}
@@ -627,6 +645,7 @@ def delete_bot(bot_id: str, db: DbSession, payload: DeleteBotRequest | None = Bo
                 raise HTTPException(status_code=502, detail=f"Agent delete preparation failed: {message}")
             bot.status = "stopped"
             bot.assigned_agent_id = None
+            _set_manual_stop_flag(bot, True)
             bot.updated_at = datetime.now(UTC)
             db.commit()
 
@@ -705,6 +724,13 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
     if not bot:
         raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
 
+    # Ignore stale snapshots from a bot that was manually stopped/unassigned.
+    # Without this guard, a late "running" snapshot can resurrect the bot and
+    # make failover logic reassign it automatically.
+    state_flags = _load_bot_state_flags(bot)
+    if bot.status == "stopped" and not bot.assigned_agent_id and bool(state_flags.get("manual_stop")):
+        return {"ok": True, "ignored": "bot_manually_stopped"}
+
     # Keep assignment aligned with the reporting agent; this prevents temporary
     # unassignment from blocking bot-specific logs while the bot is still running.
     if bot.assigned_agent_id != agent_id:
@@ -731,6 +757,7 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                 bot_name=bot.name,
                 side=ev.get("side", "trade"),
                 quote_amount=ev.get("quote_amount", 0),
+                fill_count=ev.get("fill_count", 0),
                 fee_paid_quote=ev.get("fee_paid_quote", 0.0),
                 fee_rate=ev.get("fee_rate", 0.0),
                 price=ev.get("price", snapshot.price),
@@ -756,6 +783,7 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                     bot_name=bot.name,
                     side="trade",
                     quote_amount=0,
+                    fill_count=0,
                     fee_paid_quote=0.0,
                     fee_rate=0.0,
                     price=snapshot.price,
@@ -800,6 +828,7 @@ def get_single_trade_event(event_id: str) -> dict:
             "order_id": ev.order_id,
             "side": ev.side,
             "quote_amount": ev.quote_amount,
+            "fill_count": ev.fill_count,
             "fee_paid_quote": ev.fee_paid_quote,
             "fee_rate": ev.fee_rate,
             "price": ev.price,
@@ -821,6 +850,7 @@ def get_single_trade_event(event_id: str) -> dict:
                     "event_type": linked.event_type,
                     "side": linked.side,
                     "quote_amount": linked.quote_amount,
+                    "fill_count": linked.fill_count,
                     "fee_paid_quote": linked.fee_paid_quote,
                     "fee_rate": linked.fee_rate,
                     "price": linked.price,

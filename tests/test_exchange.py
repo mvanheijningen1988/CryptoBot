@@ -681,6 +681,7 @@ class TestBitvavoTrackedOrders:
         assert len(fills) == 1
         assert fills[0]["order_id"] == "our-1"
         assert fills[0]["quote_amount"] == pytest.approx(100.0)
+        assert fills[0]["fill_count"] == 1
         assert fills[0]["fee_paid_quote"] == pytest.approx(0.15)
         assert fills[0]["fee_rate"] == pytest.approx(0.0015)
         assert "our-1" not in ex._limit_orders
@@ -733,7 +734,9 @@ class TestBitvavoTrackedOrders:
             }
         }
 
-        with patch.object(ex, "_call_action", side_effect=[partial_response, final_response]), patch.object(ex, "_refresh_balances"):
+        with patch.object(ex, "_get_open_orders", return_value=[]), patch.object(
+            ex, "_call_action", side_effect=[partial_response, final_response]
+        ), patch.object(ex, "_refresh_balances"):
             first = ex.get_filled_orders()
             assert first == []
             assert "our-2" in ex._limit_orders
@@ -742,8 +745,152 @@ class TestBitvavoTrackedOrders:
 
         assert len(second) == 1
         assert second[0]["order_id"] == "our-2"
+        assert second[0]["fill_count"] == 2
         assert second[0]["fee_paid_quote"] == pytest.approx(0.18)
         assert "our-2" not in ex._limit_orders
+
+    def test_get_filled_orders_reconciles_with_open_orders_endpoint(self):
+        ex = self._make_exchange()
+        ex._open_order_refresh_interval_seconds = 0.0
+        ex._limit_orders["our-open"] = {
+            "side": "buy",
+            "quote_amount": 100.0,
+            "limit_price": 100.0,
+            "level_index": 0,
+            "client_order_id": "cid-open",
+            "exchange_order_id": "ex-open",
+        }
+        ex._limit_orders["our-closed"] = {
+            "side": "sell",
+            "quote_amount": 120.0,
+            "limit_price": 120.0,
+            "level_index": 1,
+            "client_order_id": "cid-closed",
+            "exchange_order_id": "ex-closed",
+        }
+        ex._exchange_order_map["ex-open"] = "our-open"
+        ex._exchange_order_map["ex-closed"] = "our-closed"
+
+        open_orders = [
+            {
+                "orderId": "ex-open",
+                "operatorId": None,
+                "side": "buy",
+                "price": "100.0",
+                "status": "new",
+                "clientOrderId": "cid-open",
+            }
+        ]
+
+        def _call(action, body, timeout=6.0):  # noqa: ARG001
+            assert action == "privateGetOrder"
+            assert body.get("orderId") == "ex-closed"
+            return {
+                "response": {
+                    "orderId": "ex-closed",
+                    "status": "filled",
+                    "filledAmount": "1.0",
+                    "filledAmountQuote": "120.0",
+                    "feePaid": "0.12",
+                    "feeCurrency": "EUR",
+                    "fills": [
+                        {
+                            "amount": "0.4",
+                            "price": "120.0",
+                            "fee": "0.048",
+                            "feeCurrency": "EUR",
+                        },
+                        {
+                            "amount": "0.6",
+                            "price": "120.0",
+                            "fee": "0.072",
+                            "feeCurrency": "EUR",
+                        },
+                    ],
+                }
+            }
+
+        with patch.object(ex, "_get_open_orders", return_value=open_orders), patch.object(
+            ex, "_call_action", side_effect=_call
+        ), patch.object(ex, "_refresh_balances"):
+            fills = ex.get_filled_orders()
+
+        assert len(fills) == 1
+        assert fills[0]["order_id"] == "our-closed"
+        assert fills[0]["quote_amount"] == pytest.approx(120.0)
+        assert "our-open" in ex._limit_orders
+        assert "our-closed" not in ex._limit_orders
+
+    def test_reconcile_planned_level_orders_emits_fill_for_filled_non_open_order(self):
+        ex = self._make_exchange()
+        ex._planned_level_reconcile_interval_seconds = 0.0
+
+        level_index = 1
+        expected_client_order_id = ex._client_order_id(f"sync-{level_index}", f"level-{level_index}")
+
+        order_response = {
+            "response": {
+                "orderId": "ex-reconcile-1",
+                "clientOrderId": expected_client_order_id,
+                "status": "filled",
+                "side": "buy",
+                "price": "100.0",
+                "filledAmount": "1.0",
+                "filledAmountQuote": "100.0",
+                "feePaid": "0.10",
+                "feeCurrency": "EUR",
+                "fills": [
+                    {
+                        "amount": "0.4",
+                        "price": "100.0",
+                        "fee": "0.04",
+                        "feeCurrency": "EUR",
+                    },
+                    {
+                        "amount": "0.6",
+                        "price": "100.0",
+                        "fee": "0.06",
+                        "feeCurrency": "EUR",
+                    },
+                ],
+            }
+        }
+
+        def _call(action, body, timeout=6.0):  # noqa: ARG001
+            assert action == "privateGetOrder"
+            assert body.get("clientOrderId") == expected_client_order_id
+            return order_response
+
+        with patch.object(ex, "_get_open_orders", return_value=[]), patch.object(ex, "_call_action", side_effect=_call):
+            fills = ex.reconcile_planned_level_orders(
+                planned_open_orders={level_index: "buy"},
+                level_prices=[90.0, 100.0, 110.0],
+                quote_amount=100.0,
+            )
+
+        assert len(fills) == 1
+        assert fills[0]["level_index"] == level_index
+        assert fills[0]["quote_amount"] == pytest.approx(100.0)
+        assert fills[0]["fill_count"] == 2
+        assert fills[0]["fee_paid_quote"] == pytest.approx(0.10)
+
+    def test_reconcile_planned_level_orders_skips_still_open_orders(self):
+        ex = self._make_exchange()
+        ex._planned_level_reconcile_interval_seconds = 0.0
+
+        level_index = 0
+        expected_client_order_id = ex._client_order_id(f"sync-{level_index}", f"level-{level_index}")
+        open_orders = [{"orderId": "ex-open-1", "clientOrderId": expected_client_order_id, "status": "new", "side": "buy", "price": "90.0", "operatorId": 42}]
+
+        with patch.object(ex, "_get_open_orders", return_value=open_orders), patch.object(ex, "_call_action") as mock_call:
+            fills = ex.reconcile_planned_level_orders(
+                planned_open_orders={level_index: "buy"},
+                level_prices=[90.0, 100.0],
+                quote_amount=100.0,
+            )
+
+        assert fills == []
+        mock_call.assert_not_called()
 
 
 class TestBitvavoPlaceLimitOrder:

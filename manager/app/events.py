@@ -48,6 +48,7 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
                     level_index: int | None = None,
                     market: str = "",
                     order_id: str | None = None,
+                    fill_count: int = 0,
                     fee_paid_quote: float = 0.0,
                     fee_rate: float = 0.0) -> str:
     """Persist a trade-related event to the database. Returns the event ID.
@@ -84,6 +85,7 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
         row.event_type = event_type
         row.side = side
         row.quote_amount = quote_amount
+        row.fill_count = int(fill_count or 0)
         row.fee_paid_quote = fee_paid_quote
         row.fee_rate = fee_rate
         row.price = price
@@ -162,6 +164,7 @@ def get_trade_events(bot_id: str | None = None, limit: int = 200) -> list[dict]:
                 "event_type": r.event_type,
                 "side": r.side,
                 "quote_amount": r.quote_amount,
+                "fill_count": r.fill_count,
                 "fee_paid_quote": r.fee_paid_quote,
                 "fee_rate": r.fee_rate,
                 "price": r.price,

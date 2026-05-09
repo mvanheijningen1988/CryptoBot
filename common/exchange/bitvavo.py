@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import threading
 import time
 import uuid
@@ -83,6 +84,15 @@ class BitvavoExchange(Exchange):
         self._amount_decimals = 6
         self._quote_decimals = 6
         self._last_sync_matches: list[dict[str, Any]] = []
+        self._open_order_refresh_interval_seconds = float(
+            os.getenv("BITVAVO_OPEN_ORDERS_RECONCILE_SECONDS", "5")
+        )
+        self._last_open_order_refresh_at = 0.0
+        self._planned_level_reconcile_interval_seconds = float(
+            os.getenv("BITVAVO_PLANNED_LEVEL_RECONCILE_SECONDS", "15")
+        )
+        self._last_planned_level_reconcile_at = 0.0
+        self._processed_exchange_order_ids: set[str] = set()
 
     def _extract_action_response(self, response: dict[str, Any]) -> dict[str, Any]:
         """Return the response body for websocket action replies."""
@@ -221,6 +231,8 @@ class BitvavoExchange(Exchange):
     def _build_fill_from_order_status(self, order_id: str, order_info: dict[str, Any], order_state: dict[str, Any]) -> dict[str, Any]:
         """Create the persisted fill payload from Bitvavo order details."""
         fills = order_state.get("fills") if isinstance(order_state.get("fills"), list) else []
+        fill_count = len([fill for fill in fills if isinstance(fill, dict)])
+        status = str(order_state.get("status", "") or "")
         total_base = 0.0
         total_quote = 0.0
         fee_from_fills_quote = 0.0
@@ -250,6 +262,9 @@ class BitvavoExchange(Exchange):
         if fee_paid_quote == 0 and fee_from_fills_quote > 0:
             fee_paid_quote = fee_from_fills_quote
         fee_rate = (fee_paid_quote / quote_amount) if quote_amount > 0 else 0.0
+        effective_fill_count = fill_count
+        if effective_fill_count == 0 and status == "filled" and quote_amount > 0:
+            effective_fill_count = 1
 
         return {
             "order_id": order_id,
@@ -257,6 +272,7 @@ class BitvavoExchange(Exchange):
             "quote_amount": quote_amount,
             "fill_price": fill_price,
             "level_index": order_info.get("level_index"),
+            "fill_count": effective_fill_count,
             "fee_paid_quote": fee_paid_quote,
             "fee_rate": fee_rate,
         }
@@ -372,6 +388,93 @@ class BitvavoExchange(Exchange):
         """Return diagnostics for the most recent open-order sync."""
         return [dict(item) for item in self._last_sync_matches]
 
+    def _mark_exchange_order_processed(self, exchange_order_id: str) -> None:
+        """Remember finalized exchange orders to avoid duplicate fill emission."""
+        if not exchange_order_id:
+            return
+        self._processed_exchange_order_ids.add(exchange_order_id)
+        if len(self._processed_exchange_order_ids) > 10000:
+            self._processed_exchange_order_ids = set(list(self._processed_exchange_order_ids)[-5000:])
+
+    def reconcile_planned_level_orders(
+        self,
+        planned_open_orders: dict[int, str],
+        level_prices: list[float],
+        quote_amount: float,
+    ) -> list[dict[str, Any]]:
+        """Reconcile planned level orders against Bitvavo and return newly finalized fills."""
+        if not self.authenticated:
+            raise RuntimeError(self._not_authenticated_error)
+
+        now = time.time()
+        if now - self._last_planned_level_reconcile_at < self._planned_level_reconcile_interval_seconds:
+            return []
+        self._last_planned_level_reconcile_at = now
+
+        try:
+            open_items = self._get_open_orders()
+        except Exception:
+            return []
+
+        open_by_client_order_id = self._index_open_orders_by_client_order_id(open_items)
+        fills: list[dict[str, Any]] = []
+
+        for level_index in sorted(planned_open_orders.keys()):
+            if level_index < 0 or level_index >= len(level_prices):
+                continue
+
+            planned_side = str(planned_open_orders[level_index]).lower()
+            expected_reference = self._grid_level_reference(level_index)
+            expected_client_order_id = self._client_order_id(f"sync-{level_index}", expected_reference)
+
+            if expected_client_order_id in open_by_client_order_id:
+                continue
+
+            # If locally tracked, regular order polling handles this order path.
+            tracked_locally = any(
+                int(info.get("level_index", -1)) == level_index
+                for info in self._limit_orders.values()
+            )
+            if tracked_locally:
+                continue
+
+            try:
+                response = self._call_action(
+                    "privateGetOrder",
+                    {"market": self.market, "clientOrderId": expected_client_order_id},
+                    timeout=6.0,
+                )
+            except Exception:
+                continue
+
+            if response.get("errorCode") is not None:
+                continue
+
+            order_state = self._extract_action_response(response)
+            if not isinstance(order_state, dict):
+                continue
+
+            status = str(order_state.get("status", "") or "")
+            exchange_order_id = str(order_state.get("orderId", "") or "")
+            if exchange_order_id and exchange_order_id in self._processed_exchange_order_ids:
+                continue
+
+            if status != "filled":
+                continue
+
+            order_info = {
+                "side": str(order_state.get("side", "") or planned_side).lower(),
+                "quote_amount": quote_amount,
+                "limit_price": self._to_float(order_state.get("price")) or level_prices[level_index],
+                "level_index": level_index,
+            }
+            logical_id = exchange_order_id or expected_client_order_id
+            fill = self._build_fill_from_order_status(f"reconciled-{logical_id}", order_info, order_state)
+            fills.append(fill)
+            self._mark_exchange_order_processed(exchange_order_id)
+
+        return fills
+
     def _get_open_orders(self) -> list[dict[str, Any]]:
         """Fetch current open orders, with fallback for legacy/changed action names."""
         open_body = {"market": self.market}
@@ -406,8 +509,8 @@ class BitvavoExchange(Exchange):
         order_info = self._limit_orders.get(order_id)
         if not order_info:
             return None
+        exchange_oid = str(order_info.get("exchange_order_id", "") or "")
 
-        exchange_oid = order_info.get("exchange_order_id", "")
         request_body: dict[str, Any] = {"market": self.market}
         if exchange_oid:
             request_body["orderId"] = exchange_oid
@@ -424,11 +527,70 @@ class BitvavoExchange(Exchange):
         if status == "filled":
             fill = self._build_fill_from_order_status(order_id, order_info, order_state)
             self._remove_tracked_order(order_id)
+            self._mark_exchange_order_processed(exchange_oid)
             return fill
 
         if status in {"canceled", "expired"}:
             self._remove_tracked_order(order_id)
+            self._mark_exchange_order_processed(exchange_oid)
         return None
+
+    def _reconcile_tracked_orders_with_open_orders(self) -> set[str]:
+        """Reconcile tracked orders against Bitvavo open orders before detail polling."""
+        if not self._limit_orders:
+            return set()
+
+        now = time.time()
+        if now - self._last_open_order_refresh_at < self._open_order_refresh_interval_seconds:
+            return set()
+        self._last_open_order_refresh_at = now
+
+        try:
+            open_items = self._get_open_orders()
+        except Exception:
+            return set()
+
+        open_exchange_ids: set[str] = set()
+        open_client_order_ids: set[str] = set()
+        for item in open_items:
+            if not isinstance(item, dict):
+                continue
+            if not self._operator_matches(item):
+                continue
+            status = str(item.get("status", "") or "")
+            if status and not self._is_open_order_status(status):
+                continue
+
+            exchange_oid = str(item.get("orderId", "") or "")
+            if exchange_oid:
+                open_exchange_ids.add(exchange_oid)
+
+            client_order_id = str(item.get("clientOrderId", "") or "")
+            if client_order_id:
+                open_client_order_ids.add(client_order_id)
+
+        missing_order_ids: list[str] = []
+        checked_order_ids: set[str] = set()
+        for order_id, order_info in self._limit_orders.items():
+            exchange_oid = str(order_info.get("exchange_order_id", "") or "")
+            client_order_id = str(order_info.get("client_order_id", "") or "")
+            still_open = (exchange_oid and exchange_oid in open_exchange_ids) or (
+                client_order_id and client_order_id in open_client_order_ids
+            )
+            if still_open:
+                continue
+            missing_order_ids.append(order_id)
+
+        for order_id in missing_order_ids:
+            checked_order_ids.add(order_id)
+            try:
+                fill = self._sync_tracked_order(order_id)
+            except Exception:
+                continue
+            if fill is not None:
+                with self._fills_lock:
+                    self._fills.append(fill)
+        return checked_order_ids
 
     def _next_request_id(self) -> int:
         """Thread-safe auto-incrementing request ID."""
@@ -875,7 +1037,11 @@ class BitvavoExchange(Exchange):
 
     def get_filled_orders(self) -> list[dict[str, Any]]:
         """Return finalized fills and keep polling active Bitvavo orders."""
+        reconciled_order_ids = self._reconcile_tracked_orders_with_open_orders()
+
         for order_id in tuple(self._limit_orders):
+            if order_id in reconciled_order_ids:
+                continue
             try:
                 fill = self._sync_tracked_order(order_id)
             except Exception:

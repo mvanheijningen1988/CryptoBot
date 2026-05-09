@@ -1011,6 +1011,43 @@ class TestPushMetrics:
         assert bot is not None
         assert bot.assigned_agent_id == "met-assign"
 
+    def test_push_metrics_ignored_for_manually_stopped_bot(self, client):
+        _seed_agent(client, "met-stop-agent")
+        _seed_bot(client, "met-stop-bot", agent_id=None, status="stopped")
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "met-stop-bot").first()
+        bot.state_json = json.dumps({"manual_stop": True})
+        db.commit()
+
+        r = client.post(
+            "/api/v1/agents/met-stop-agent/bots/met-stop-bot/metrics",
+            json={
+                "snapshot": {
+                    "bot_id": "met-stop-bot",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "price": 100.0,
+                    "quote_balance": 900.0,
+                    "base_balance": 1.0,
+                    "base_value_in_quote": 100.0,
+                    "total_equity_quote": 1000.0,
+                    "realized_pnl_quote": 0.0,
+                    "unrealized_pnl_quote": 0.0,
+                    "skimmed_quote": 0.0,
+                    "trade_count": 1,
+                    "status": "running",
+                },
+            },
+        )
+
+        assert r.status_code == 200
+        assert r.json().get("ignored") == "bot_manually_stopped"
+
+        db = _get_db(client)
+        bot = db.query(Bot).filter(Bot.id == "met-stop-bot").first()
+        assert bot is not None
+        assert bot.status == "stopped"
+        assert bot.assigned_agent_id is None
+
     def test_push_metrics_nonexistent_bot(self, client):
         _seed_agent(client, "met2-agent")
         r = client.post(
@@ -1312,6 +1349,7 @@ class TestPushMetrics:
                             "order_id": "ord-fee-1",
                             "side": "buy",
                             "quote_amount": 100.0,
+                            "fill_count": 3,
                             "fee_paid_quote": 0.15,
                             "fee_rate": 0.0015,
                             "price": 1.0,
@@ -1330,12 +1368,14 @@ class TestPushMetrics:
             event = rows.json()[0]
             assert event["fee_paid_quote"] == pytest.approx(0.15)
             assert event["fee_rate"] == pytest.approx(0.0015)
+            assert event["fill_count"] == 3
 
             detail = client.get(f"/api/v1/trade-events/{event['id']}")
             assert detail.status_code == 200
             body = detail.json()
             assert body["fee_paid_quote"] == pytest.approx(0.15)
             assert body["fee_rate"] == pytest.approx(0.0015)
+            assert body["fill_count"] == 3
 
 
 # ── Backtest ─────────────────────────────────────────────────────────

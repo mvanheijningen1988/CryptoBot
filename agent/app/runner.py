@@ -61,6 +61,11 @@ class AgentLogStore:
         :param data: Optional extra data dict attached to the entry.
         :param category: Log category ('system' or 'trading').
         """
+        # Agent logs are operational only; detailed trading events are
+        # exposed via bot trade-events and should not pollute agent logs.
+        if category == "trading":
+            return
+
         item = {
             "id": str(uuid.uuid4()),
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -141,7 +146,7 @@ class BotRunner:
             except Exception as exc:
                 self.log_store.add(
                     "price_wait_error",
-                    f"Waiting for initial price failed for bot {self.bot_id}: {exc}",
+                    f"Waiting for initial price failed: {exc}",
                     bot_id=self.bot_id,
                     category="system",
                 )
@@ -256,7 +261,7 @@ class BotRunner:
                         f"Recovered {len(synced_levels)} existing open order(s) from exchange before seeding.",
                         bot_id=self.bot_id,
                         data={"levels": sorted(synced_levels)},
-                        category="trading",
+                        category="system",
                     )
                 # Publish the first running snapshot before submitting initial orders
                 # so the manager UI can leave "initializing" immediately.
@@ -264,29 +269,33 @@ class BotRunner:
                 self._place_all_limit_orders("initial")
                 # Flush initial order_placed events and runner state right away.
                 self._push_snapshot(self._build_snapshot("running"))
-            elif not self.state.open_orders:
-                # Restored but no open orders (e.g. crash during fill) — reinitialize grid
-                self.state.level_index = None
-                self.strategy.on_price(self.price, self.state)
+            else:
+                if not self.state.open_orders:
+                    # Restored but no open orders (e.g. crash during fill) — reinitialize grid
+                    self.state.level_index = None
+                    self.strategy.on_price(self.price, self.state)
+
                 synced_levels = self._sync_existing_live_open_orders()
                 if synced_levels:
                     self.log_store.add(
                         "orders_recovered",
-                        f"Recovered {len(synced_levels)} existing open order(s) from exchange before re-seeding.",
+                        f"Recovered {len(synced_levels)} existing open order(s) from exchange before restore.",
                         bot_id=self.bot_id,
                         data={"levels": sorted(synced_levels)},
-                        category="trading",
+                        category="system",
                     )
+
                 self._push_snapshot(self._build_snapshot("running"))
-                self._place_all_limit_orders("initial")
+                # Startup reconcile: only post missing levels, never duplicate recovered orders.
+                self._place_ready_open_orders("restore-startup", log_deferred=True)
                 self._push_snapshot(self._build_snapshot("running"))
 
             label = "resumed" if restored else "started"
-            self.log_store.add("bot_start", f"Bot {self.bot_id} {label}.", bot_id=self.bot_id, category="system")
+            self.log_store.add("bot_start", f"Bot {label}.", bot_id=self.bot_id, category="system")
             if restored:
                 self.log_store.add(
                     "bot_resumed",
-                    f"Bot {self.bot_id} continuing from saved state: "
+                    "Continuing from saved state: "
                     f"level={self.state.level_index}, open_orders={len(self.state.open_orders)}, "
                     f"trades={self.trade_count}, equity={self.initial_equity:.2f}",
                     bot_id=self.bot_id,
@@ -306,7 +315,7 @@ class BotRunner:
             self.running = False
             self.log_store.add(
                 "bot_error",
-                f"Bot {self.bot_id} failed to start: {exc}",
+                f"Failed to start: {exc}",
                 bot_id=self.bot_id,
                 data={
                     "error": str(exc),
@@ -330,7 +339,7 @@ class BotRunner:
             self.exchange.cancel_all_orders()
         self.exchange.stop()
         suffix = " (open orders kept)" if not cancel_orders else ""
-        self.log_store.add("bot_stop", f"Bot {self.bot_id} stopped{suffix}.", bot_id=self.bot_id, category="system")
+        self.log_store.add("bot_stop", f"Bot stopped{suffix}.", bot_id=self.bot_id, category="system")
 
     def prepare_delete(self, delete_mode: Literal["delete_open_orders", "delete_as_is", "transform_to_base", "transform_to_quote"]) -> dict:
         """Execute bot delete preparation on the connected exchange before stopping."""
@@ -352,10 +361,10 @@ class BotRunner:
             self.exchange.stop()
             self.log_store.add(
                 "bot_delete_prepared",
-                f"Bot {self.bot_id} prepared for delete: cancelled open orders and stopped.",
+                "Prepared for delete: cancelled open orders and stopped.",
                 bot_id=self.bot_id,
                 data=details,
-                category="trading",
+                category="system",
             )
             return details
 
@@ -363,10 +372,10 @@ class BotRunner:
             self.exchange.stop()
             self.log_store.add(
                 "bot_delete_prepared",
-                f"Bot {self.bot_id} prepared for delete: keeping open orders and balances as-is.",
+                "Prepared for delete: keeping open orders and balances as-is.",
                 bot_id=self.bot_id,
                 data=details,
-                category="trading",
+                category="system",
             )
             return details
 
@@ -404,10 +413,10 @@ class BotRunner:
         self.exchange.stop()
         self.log_store.add(
             "bot_delete_prepared",
-            f"Bot {self.bot_id} prepared for delete with mode {delete_mode}.",
+            f"Prepared for delete with mode {delete_mode}.",
             bot_id=self.bot_id,
             data=details,
-            category="trading",
+            category="system",
         )
         return details
 
@@ -422,7 +431,7 @@ class BotRunner:
             self.exchange.base_balance = budget.base_budget
         self.log_store.add(
             "budget_update",
-            f"Budget updated for bot {self.bot_id}.",
+            "Budget updated.",
             bot_id=self.bot_id,
             data={"quote_budget": budget.quote_budget, "base_budget": budget.base_budget},
             category="system",
@@ -514,7 +523,7 @@ class BotRunner:
             f"Syncing existing open orders on exchange for {len(planned_levels)} planned level(s).",
             bot_id=self.bot_id,
             data={"levels": planned_levels},
-            category="trading",
+            category="system",
         )
         synced_levels = self.exchange.sync_open_orders_for_levels(
             planned_open_orders=self.state.open_orders,
@@ -532,7 +541,7 @@ class BotRunner:
             f"Exchange open-order sync completed: matched {len(synced_levels)} level(s).",
             bot_id=self.bot_id,
             data={"matched_levels": sorted(synced_levels), "matches": recovery_details},
-            category="trading",
+            category="system",
         )
         for match in recovery_details:
             level_idx = match.get("level_index")
@@ -544,7 +553,7 @@ class BotRunner:
                 f"Recovered open order for level {level_idx} ({ref}) via {method}: {exchange_order_id}",
                 bot_id=self.bot_id,
                 data=match,
-                category="trading",
+                category="system",
             )
         return synced_levels
 
@@ -715,7 +724,7 @@ class BotRunner:
             except Exception as exc:
                 self.log_store.add(
                     "price_error",
-                    f"Price retrieval failed for bot {self.bot_id}: {exc}",
+                    f"Price retrieval failed: {exc}",
                     bot_id=self.bot_id,
                     category="system",
                 )
@@ -725,6 +734,17 @@ class BotRunner:
             # Process fills — loop until no more cascading fills
             while True:
                 fills = self.exchange.get_filled_orders()
+                if self.config.mode == "live" and isinstance(self.exchange, BitvavoExchange):
+                    try:
+                        reconciled_fills = self.exchange.reconcile_planned_level_orders(
+                            planned_open_orders=self.state.open_orders,
+                            level_prices=self.strategy.levels,
+                            quote_amount=self.config.grid.order_size_quote,
+                        )
+                    except Exception:
+                        reconciled_fills = []
+                    if reconciled_fills:
+                        fills.extend(reconciled_fills)
                 if not fills:
                     break
 
@@ -732,19 +752,22 @@ class BotRunner:
                     idx = fill["level_index"]
                     side = fill["side"]
                     fill_price = fill["fill_price"]
+                    fill_count = int(fill.get("fill_count", 0) or 0)
+                    fill_parts_suffix = f" in {fill_count} part(s)" if fill_count > 0 else ""
 
                     # Remove from strategy state
                     self.state.open_orders.pop(idx, None)
 
                     self.log_store.add(
                         "order_filled",
-                        f"Filled: {side.upper()} {fill['quote_amount']:.2f} at level {idx} (price {fill_price:.6f})",
+                        f"Filled: {side.upper()} {fill['quote_amount']:.2f} at level {idx} (price {fill_price:.6f}){fill_parts_suffix}",
                         bot_id=self.bot_id,
                         data={
                             "side": side,
                             "quote_amount": fill["quote_amount"],
                             "level_index": idx,
                             "fill_price": fill_price,
+                            "fill_count": fill_count,
                         },
                         category="trading",
                     )
@@ -772,11 +795,12 @@ class BotRunner:
 
                     self.log_store.add(
                         "trade_executed",
-                        f"{side.upper()} {fill['quote_amount']:.2f} at {fill_price:.6f} | pnl: {trade_pnl:+.4f}",
+                        f"{side.upper()} {fill['quote_amount']:.2f} at {fill_price:.6f}{fill_parts_suffix} | pnl: {trade_pnl:+.4f}",
                         bot_id=self.bot_id,
                         data={
                             "side": side,
                             "quote_amount": fill["quote_amount"],
+                            "fill_count": fill_count,
                             "price": fill_price,
                             "trade_pnl_quote": round(trade_pnl, 6),
                             "realized_pnl_quote": round(self.realized_pnl, 6),
@@ -789,6 +813,7 @@ class BotRunner:
                         "order_id": fill.get("order_id"),
                         "side": side,
                         "quote_amount": fill["quote_amount"],
+                        "fill_count": fill_count,
                         "fee_paid_quote": round(float(fill.get("fee_paid_quote", 0.0) or 0.0), 8),
                         "fee_rate": round(float(fill.get("fee_rate", 0.0) or 0.0), 8),
                         "price": fill_price,

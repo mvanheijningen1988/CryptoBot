@@ -212,6 +212,20 @@ button.danger { background: #dc2626; }
 .combo-wrap input {
   margin-top: 4px;
 }
+.combo-wrap.has-icon input {
+  padding-left: 32px;
+}
+.market-input-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(calc(-50% + 1px));
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  pointer-events: none;
+  z-index: 2;
+}
 .combo-menu {
   display: none;
   position: fixed;
@@ -233,8 +247,22 @@ button.danger { background: #dc2626; }
   background: transparent;
   color: var(--text);
   text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   cursor: pointer;
   font-size: 0.86rem;
+}
+.combo-icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  flex: 0 0 16px;
+}
+.combo-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .combo-item:hover,
 .combo-item.active {
@@ -333,6 +361,97 @@ button.danger { background: #dc2626; }
 
 .balance-hint { font-size: 0.78rem; color: #94a3b8; margin-top: 2px; margin-bottom: 2px; }
 .balance-hint .bal-val { color: var(--accent); font-weight: 600; }
+
+.quote-budget-slider-wrap {
+  margin-top: 6px;
+  margin-bottom: 2px;
+}
+
+.quote-budget-slider-wrap input[type="range"] {
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+}
+
+#quote_budget_slider {
+  height: 18px;
+}
+
+#quote_budget_slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #334155 0%, #1e293b 100%);
+  border: 1px solid #475569;
+}
+
+#quote_budget_slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 50%;
+  border: 1px solid #0e7490;
+  background: radial-gradient(circle at 35% 30%, #67e8f9 0%, #22d3ee 45%, #0891b2 100%);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.18), 0 2px 7px rgba(8, 145, 178, 0.45);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+#quote_budget_slider:hover::-webkit-slider-thumb,
+#quote_budget_slider:focus-visible::-webkit-slider-thumb {
+  transform: scale(1.08);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.24), 0 3px 10px rgba(8, 145, 178, 0.55);
+}
+
+#quote_budget_slider::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #334155 0%, #1e293b 100%);
+  border: 1px solid #475569;
+}
+
+#quote_budget_slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid #0e7490;
+  background: radial-gradient(circle at 35% 30%, #67e8f9 0%, #22d3ee 45%, #0891b2 100%);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.18), 0 2px 7px rgba(8, 145, 178, 0.45);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+#quote_budget_slider:hover::-moz-range-thumb,
+#quote_budget_slider:focus-visible::-moz-range-thumb {
+  transform: scale(1.08);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.24), 0 3px 10px rgba(8, 145, 178, 0.55);
+}
+
+#quote_budget_slider:focus-visible {
+  outline: none;
+}
+
+.quote-budget-slider-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+#skim_ratio_label {
+  display: block;
+  opacity: 1;
+  visibility: visible;
+}
+
+#skim_ratio_label.is-hidden {
+  display: none;
+  pointer-events: none;
+}
 
 .fee-info-title {
   margin-top: 10px;
@@ -736,6 +855,14 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 }
 .suggest-range-row button { flex: 0 0 auto; }
 
+#btn_suggest_range {
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  white-space: nowrap;
+  padding: 6px 12px;
+}
+
 /* ── Agent logs ── */
 
 .logs-list {
@@ -777,6 +904,22 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 .modal-title { margin: 0; }
 .modal-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
 .modal-body { padding: 10px 14px; overflow: auto; }
+
+#create_bot_modal[open] {
+  align-items: flex-start;
+  padding: clamp(10px, 3vh, 28px) 0;
+}
+
+#create_bot_modal .modal {
+  margin: 0;
+  height: min(900px, calc(100vh - clamp(20px, 6vh, 56px)));
+}
+
+#create_bot_modal .modal-body {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overflow-anchor: none;
+}
 
 .delete-mode-list {
   display: grid;

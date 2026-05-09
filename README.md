@@ -109,8 +109,9 @@ docker compose up --build
 
 Logcategorieen die nu gebruikt worden:
 
-- `system`: startup, registratie, heartbeat status, bot lifecycle, budget updates
-- `trading`: trade uitvoeringen en overgeslagen trades
+- `system`: startup, registratie, heartbeat status, bot lifecycle, budget updates, exchange-sync/reconcile status
+
+Let op: trading-details worden niet meer in agent logs opgeslagen; die lopen via de bot trade-events in de manager.
 
 ## Live Bitvavo integratie (volgende fase)
 
@@ -121,6 +122,13 @@ Benodigde env vars voor live mode in agent:
 - `LIVE_EXCHANGE_PROVIDER=bitvavo`
 - `BITVAVO_API_KEY=...`
 - `BITVAVO_API_SECRET=...`
+
+Optionele reconcile tuning (seconden):
+
+- `BITVAVO_OPEN_ORDERS_RECONCILE_SECONDS=5`
+- `BITVAVO_PLANNED_LEVEL_RECONCILE_SECONDS=15`
+
+De bot reconcilieert periodiek vanuit de exchange (open orders + orderstatus per level via `clientOrderId`) zodat fills en orderstatus vanuit Bitvavo als bron worden overgenomen.
 
 Voor extra hardening kun je hierna toevoegen:
 
@@ -149,4 +157,28 @@ Voor extra hardening kun je hierna toevoegen:
 - API auth tussen manager en agents
 - TLS/HTTPS en netwerksegmentatie
 - audit logging voor start/stop/config wijzigingen
+
+## Market icon sync (manager)
+
+De manager synchroniseert periodiek `coin_map.json` naar `manager/app/static/assets/coin_map.json` en gebruikt daarna de `img_url` per symbol voor iconen in de market dropdown.
+
+Configureerbare env vars:
+
+- `COIN_MAP_SOURCE_URL` (default: `https://raw.githubusercontent.com/ErikThiart/cryptocurrency-icons/refs/heads/master/coin_map.json`)
+- `COIN_MAP_SYNC_INTERVAL_SECONDS` (default: `86400` = 1x per dag)
+- `COIN_MAP_HTTP_TIMEOUT_SECONDS` (default: `20`)
+
+## Number formatting (UI)
+
+Getallen in de UI gebruiken browser-locale via `Intl.NumberFormat`.
+
+- Default: browser taal/regio (bijv. `nl-NL` of `en-US`)
+- Override: zet `localStorage["cryptobot_number_locale"]` naar een locale code (bijv. `"nl-NL"`, `"en-US"`)
+- Reset naar browser-default: verwijder de key of zet `"auto"`
+
+In de browser console:
+
+- `setNumberLocaleOverride("nl-NL")`
+- `setNumberLocaleOverride("en-US")`
+- `setNumberLocaleOverride("auto")`
 

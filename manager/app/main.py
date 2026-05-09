@@ -19,6 +19,7 @@ from manager.app.database import Base, SessionLocal, engine
 from manager.app.failover import failover_maintenance_loop
 from manager.app.migrations import run_migrations
 from manager.app.routes import v1
+from manager.app.services.coin_map_sync import coin_map_sync_loop
 from manager.app.version import __version__
 
 # ── Database bootstrap ──────────────────────────────────────────────
@@ -51,6 +52,8 @@ def startup_event() -> None:
         db.close()
     thread = Thread(target=failover_maintenance_loop, args=(SessionLocal,), daemon=True)
     thread.start()
+    coin_map_thread = Thread(target=coin_map_sync_loop, daemon=True)
+    coin_map_thread.start()
 
 
 # ── Top-level pages & health ────────────────────────────────────────

@@ -126,6 +126,7 @@ def _ensure_trade_events_table(engine: Engine) -> None:
                         event_type VARCHAR(32) NOT NULL,
                         side VARCHAR(8) NOT NULL,
                         quote_amount FLOAT DEFAULT 0.0,
+                        fill_count INTEGER DEFAULT 0,
                         price FLOAT DEFAULT 0.0,
                         trade_pnl FLOAT DEFAULT 0.0,
                         total_equity FLOAT DEFAULT 0.0,
@@ -187,6 +188,10 @@ def _add_trade_event_columns(engine: Engine) -> None:
             if "fee_rate" not in columns:
                 conn.exec_driver_sql(
                     "ALTER TABLE trade_events ADD COLUMN fee_rate FLOAT DEFAULT 0.0"
+                )
+            if "fill_count" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE trade_events ADD COLUMN fill_count INTEGER DEFAULT 0"
                 )
             conn.commit()
         except Exception:

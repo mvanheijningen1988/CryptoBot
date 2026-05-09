@@ -113,9 +113,10 @@ def test_runner_waits_for_real_price_before_initial_orders(monkeypatch):
     assert snapshots[1]["pending_events"] == 2
     assert runner.price == pytest.approx(100.0)
     event_types = [entry.get("event_type") for entry in runner.log_store.logs]
-    assert "orders_batch_planned" in event_types
-    assert "order_posting" in event_types
-    assert "order_opened" in event_types
+    assert "bot_start" in event_types
+    assert "orders_batch_planned" not in event_types
+    assert "order_posting" not in event_types
+    assert "order_opened" not in event_types
 
 
 def test_build_exchange_uses_configured_simulation_fee_rate():
@@ -155,7 +156,7 @@ def test_runner_only_posts_buy_orders_below_current_price(monkeypatch):
 
     assert [order["level_index"] for order in exchange.placed_orders] == [0]
     waiting_logs = [entry for entry in runner.log_store.logs if entry.get("event_type") == "order_waiting"]
-    assert any(log.get("data", {}).get("reason") == "buy_above_market" for log in waiting_logs)
+    assert waiting_logs == []
 
 
 def test_runner_waits_with_sell_orders_until_enough_base(monkeypatch):
@@ -176,4 +177,47 @@ def test_runner_waits_with_sell_orders_until_enough_base(monkeypatch):
 
     assert [order["level_index"] for order in exchange.placed_orders] == [4]
     waiting_logs = [entry for entry in runner.log_store.logs if entry.get("event_type") == "order_waiting"]
-    assert any(log.get("data", {}).get("reason") == "insufficient_base" for log in waiting_logs)
+    assert waiting_logs == []
+
+
+def test_restored_live_runner_takes_over_existing_exchange_orders(monkeypatch):
+    class _RecoveredLiveExchange(_StubExchange):
+        def __init__(self) -> None:
+            super().__init__([100.0])
+            self.synced_levels: set[int] = set()
+
+        def has_tracked_level_order(self, level_index: int, side: str, limit_price: float) -> bool:  # noqa: ARG002
+            return level_index in self.synced_levels
+
+    exchange = _RecoveredLiveExchange()
+    config = _config().model_copy(update={"mode": "live"})
+    sync_calls = {"count": 0}
+
+    def _fake_sync(self):
+        sync_calls["count"] += 1
+        exchange.synced_levels = set(self.state.open_orders.keys())
+        return set(exchange.synced_levels)
+
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, cfg: exchange)
+    monkeypatch.setattr(BotRunner, "_sync_existing_live_open_orders", _fake_sync)
+    monkeypatch.setattr(BotRunner, "_loop", lambda self: None)
+    monkeypatch.setattr("agent.app.runner.time.sleep", lambda _: None)
+
+    runner = BotRunner("bot-live-restore", config, "http://manager:8000", "agent-1", AgentLogStore())
+    runner.restore_runner_state(
+        runner.get_runner_state().model_copy(
+            update={
+                "open_orders": {0: "buy", 1: "buy"},
+                "price": 100.0,
+                "quote_balance": 1000.0,
+                "base_balance": 0.0,
+            }
+        )
+    )
+    runner.running = True
+
+    runner._startup_and_loop(restored=True)
+
+    assert sync_calls["count"] == 1
+    assert exchange.synced_levels == {0, 1}
+    assert exchange.placed_orders == []
