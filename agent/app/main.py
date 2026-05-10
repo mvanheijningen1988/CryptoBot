@@ -39,7 +39,7 @@ async def diagnostics_context_middleware(request: Request, call_next):
     debug_log(
         logger,
         "http_request_start",
-        "Agent request started",
+        f"Agent request started: {request.method} {request.url.path}?{request.url.query or ''}",
         method=request.method,
         path=request.url.path,
         query=str(request.url.query or ""),
@@ -51,7 +51,7 @@ async def diagnostics_context_middleware(request: Request, call_next):
         debug_log(
             logger,
             "http_request_end",
-            "Agent request completed",
+            f"Agent request completed: {request.method} {request.url.path} -> {response.status_code}",
             method=request.method,
             path=request.url.path,
             status_code=response.status_code,

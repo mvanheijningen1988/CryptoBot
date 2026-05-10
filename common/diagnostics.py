@@ -259,12 +259,17 @@ def scoped_context(**kwargs: str | None) -> Iterator[None]:
 
 def trace_log(logger: logging.Logger, event: str, message: str, **fields: Any) -> None:
     """Emit one trace-level diagnostics entry."""
+    trace_fields = dict(fields)
+    payload_value = trace_fields.get("payload")
+    if not isinstance(payload_value, dict):
+        trace_fields["payload"] = dict(trace_fields)
+
     logger.debug(
         message,
         extra={
             "diag_kind": "trace",
             "diag_event": event,
-            "diag_fields": fields,
+            "diag_fields": trace_fields,
         },
     )
 

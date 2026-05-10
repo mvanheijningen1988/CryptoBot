@@ -180,6 +180,44 @@ def test_runner_waits_with_sell_orders_until_enough_base(monkeypatch):
     assert waiting_logs == []
 
 
+def test_runner_removes_exchange_cancelled_order_before_pending_repost(monkeypatch):
+    class _CancelledExchange(_StubExchange):
+        def __init__(self) -> None:
+            super().__init__([100.0])
+            self._cancelled_orders = [{
+                "order_id": "cancel-1",
+                "exchange_order_id": "ex-1",
+                "client_order_id": "client-1",
+                "side": "buy",
+                "status": "canceled",
+                "quote_amount": 100.0,
+                "price": 90.0,
+                "level_index": 0,
+            }]
+
+        def get_cancelled_orders(self) -> list[dict]:
+            cancelled_orders = list(self._cancelled_orders)
+            self._cancelled_orders.clear()
+            return cancelled_orders
+
+    exchange = _CancelledExchange()
+
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+
+    runner = BotRunner("bot-cancel-sync", _config(), "http://manager:8000", "agent-1", AgentLogStore())
+    runner.price = 100.0
+    runner.state.open_orders = {0: "buy"}
+
+    removed_count = runner._process_cancelled_orders("pending-sync")
+    runner._place_ready_open_orders("pending")
+
+    assert removed_count == 1
+    assert runner.state.open_orders == {}
+    assert exchange.placed_orders == []
+    assert runner._pending_trade_events[0]["event_type"] == "order_cancelled"
+    assert runner._pending_trade_events[0]["level_index"] == 0
+
+
 def test_restored_live_runner_takes_over_existing_exchange_orders(monkeypatch):
     class _RecoveredLiveExchange(_StubExchange):
         def __init__(self) -> None:

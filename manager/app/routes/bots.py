@@ -11,6 +11,7 @@ from typing import Annotated
 from fastapi import Body, Depends, HTTPException
 from fastapi.routing import APIRouter
 import requests
+from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -263,6 +264,110 @@ def _count_filled_events(bot_id: str) -> int:
         db.close()
 
 
+def _sum_filled_trade_pnl(bot_id: str, db: Session | None = None) -> float:
+    """Return the total persisted trade PnL across filled events for one bot."""
+    owns_session = db is None
+    if db is None:
+        from manager.app.database import SessionLocal
+        db = SessionLocal()
+
+    try:
+        total = (
+            db.query(func.coalesce(func.sum(TradeEvent.trade_pnl), 0.0))
+            .filter(TradeEvent.bot_id == bot_id, TradeEvent.event_type == "order_filled")
+            .scalar()
+        )
+        return float(total or 0.0)
+    except SQLAlchemyError:
+        return 0.0
+    finally:
+        if owns_session:
+            db.close()
+
+
+def _compute_live_unrealized_pnl_from_fills(
+    bot_id: str,
+    current_price: float,
+    db: Session | None = None,
+) -> tuple[float, float, float]:
+    """Compute unrealized PnL for remaining open base inventory from filled events.
+
+    Returns a tuple of:
+    - unrealized_pnl_quote
+    - open_base_amount
+    - average_buy_price_for_open_base
+    """
+    if current_price <= 0:
+        return 0.0, 0.0, 0.0
+
+    owns_session = db is None
+    if db is None:
+        from manager.app.database import SessionLocal
+        db = SessionLocal()
+
+    try:
+        fills = (
+            db.query(TradeEvent)
+            .filter(TradeEvent.bot_id == bot_id, TradeEvent.event_type == "order_filled")
+            .order_by(TradeEvent.timestamp.asc(), TradeEvent.id.asc())
+            .all()
+        )
+    except SQLAlchemyError:
+        return 0.0, 0.0, 0.0
+    finally:
+        if owns_session:
+            db.close()
+
+    # FIFO lots: each entry tracks remaining base qty and quote cost basis.
+    lots: list[dict[str, float]] = []
+
+    for fill in fills:
+        side = str(fill.side or "").lower()
+        quote_amount = float(fill.quote_amount or 0.0)
+        fill_price = float(fill.price or 0.0)
+        fee_paid_quote = float(fill.fee_paid_quote or 0.0)
+        if quote_amount <= 0 or fill_price <= 0:
+            continue
+
+        base_amount = quote_amount / fill_price
+
+        if side == "buy":
+            # Mirror runner/accounting behavior: fee is accounted by receiving less base.
+            net_base = max(0.0, base_amount - (fee_paid_quote / fill_price if fee_paid_quote > 0 else 0.0))
+            if net_base > 0:
+                lots.append({"qty": net_base, "cost": quote_amount})
+            continue
+
+        if side == "sell":
+            remaining_to_close = max(0.0, base_amount)
+            lot_idx = 0
+            while remaining_to_close > 1e-12 and lot_idx < len(lots):
+                lot = lots[lot_idx]
+                lot_qty = float(lot.get("qty", 0.0) or 0.0)
+                lot_cost = float(lot.get("cost", 0.0) or 0.0)
+                if lot_qty <= 1e-12:
+                    lot_idx += 1
+                    continue
+
+                take_qty = min(lot_qty, remaining_to_close)
+                unit_cost = lot_cost / lot_qty if lot_qty > 0 else 0.0
+                lot["qty"] = lot_qty - take_qty
+                lot["cost"] = max(0.0, lot_cost - (unit_cost * take_qty))
+                remaining_to_close -= take_qty
+                if lot["qty"] <= 1e-12:
+                    lot_idx += 1
+
+    open_base = sum(max(0.0, float(l.get("qty", 0.0) or 0.0)) for l in lots)
+    open_cost_quote = sum(max(0.0, float(l.get("cost", 0.0) or 0.0)) for l in lots)
+    if open_base <= 0:
+        return 0.0, 0.0, 0.0
+
+    avg_buy_price = open_cost_quote / open_base if open_base > 0 else 0.0
+    open_value_quote = open_base * float(current_price)
+    unrealized_pnl = open_value_quote - open_cost_quote
+    return unrealized_pnl, open_base, avg_buy_price
+
+
 def _reconstruct_live_balances_from_fills(
     bot_id: str,
     start_quote: float,
@@ -304,7 +409,8 @@ def _reconstruct_live_balances_from_fills(
             quote_balance -= quote_amount
             base_balance += max(0.0, base_amount - (fee_paid_quote / fill_price if fee_paid_quote > 0 else 0.0))
         elif side == "sell":
-            base_balance = max(0.0, base_balance - base_amount)
+            # Keep signed base inventory so unmatched sells cannot create artificial quote profit.
+            base_balance -= base_amount
             quote_balance += max(0.0, quote_amount - fee_paid_quote)
 
     return quote_balance, base_balance, len(fills)
@@ -365,7 +471,8 @@ def _apply_fill_to_balances(quote_balance: float, base_balance: float, fill: Tra
         quote_balance -= quote_amount
         base_balance += max(0.0, base_amount - (fee_paid_quote / fill_price if fee_paid_quote > 0 else 0.0))
     elif side == "sell":
-        base_balance = max(0.0, base_balance - base_amount)
+        # Keep signed base inventory so chart/equity reconstruction remains value-consistent.
+        base_balance -= base_amount
         quote_balance += max(0.0, quote_amount - fee_paid_quote)
     return quote_balance, base_balance
 
@@ -498,15 +605,35 @@ def _normalized_metrics_for_bot(bot: Bot, db: Session | None = None) -> tuple[di
             if filled_count > current_trade_count:
                 latest_metrics["trade_count"] = filled_count
 
-    price = float(latest_metrics.get("price", 0.0) or 0.0)
-    quote_balance = float(latest_metrics.get("quote_balance", 0.0) or 0.0)
-    base_balance = float(latest_metrics.get("base_balance", 0.0) or 0.0)
-    mtm_equity = quote_balance + base_balance * price
-    if mtm_equity > 0:
-        latest_metrics["total_equity_quote"] = mtm_equity
-        latest_metrics["unrealized_pnl_quote"] = mtm_equity - starting_equity
+    # Dashboard convention (requested):
+    # - PnL = completed trade result + unrealized result on open base inventory.
+    # - Equity = start budget + that total PnL.
+    if bot.mode == "live":
+        trade_pnl_total = _sum_filled_trade_pnl(bot.id, db)
+        current_price = float(latest_metrics.get("price", 0.0) or 0.0)
+        unrealized_pnl, open_base_amount, open_base_avg_buy_price = _compute_live_unrealized_pnl_from_fills(
+            bot.id,
+            current_price,
+            db,
+        )
+        total_pnl = trade_pnl_total + unrealized_pnl
+        total_equity = float(budget.get("quote_budget", 0.0) or 0.0) + total_pnl
+        latest_metrics["dashboard_pnl_quote"] = total_pnl
+        latest_metrics["realized_pnl_quote"] = trade_pnl_total
+        latest_metrics["unrealized_pnl_quote"] = unrealized_pnl
+        latest_metrics["total_equity_quote"] = total_equity
+        latest_metrics["open_base_amount"] = open_base_amount
+        latest_metrics["open_base_avg_buy_price"] = open_base_avg_buy_price
+    else:
+        price = float(latest_metrics.get("price", 0.0) or 0.0)
+        quote_balance = float(latest_metrics.get("quote_balance", 0.0) or 0.0)
+        base_balance = float(latest_metrics.get("base_balance", 0.0) or 0.0)
+        mtm_equity = quote_balance + base_balance * price
+        if mtm_equity > 0:
+            latest_metrics["total_equity_quote"] = mtm_equity
+            latest_metrics["unrealized_pnl_quote"] = mtm_equity - starting_equity
+        latest_metrics["dashboard_pnl_quote"] = _trade_based_pnl(latest_metrics, starting_equity)
 
-    latest_metrics["dashboard_pnl_quote"] = _trade_based_pnl(latest_metrics, starting_equity)
     return latest_metrics, float(budget.get("quote_budget", 0.0) or 0.0)
 
 

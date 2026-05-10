@@ -252,7 +252,6 @@ async function loadCoinMap() {
         if (!item || typeof item !== "object") continue;
         const key = normalizeSymbol(item.symbol || "");
         const url = String(item.img_url || "").trim();
-        if (!key || !url) continue;
         if (!cryptoLogoBySymbol.has(key)) {
           cryptoLogoBySymbol.set(key, url);
         }
@@ -690,6 +689,16 @@ function formatNumber(value) {
     minimumFractionDigits: minDigits,
     maximumFractionDigits: maxDigits,
   }).format(n);
+}
+
+function formatPnlWithPercent(pnlValue, startBudget) {
+  const pnl = Number(pnlValue || 0);
+  const start = Number(startBudget || 0);
+  const amount = formatNumber(pnl);
+  if (!(start > 0)) return amount;
+  const pct = (pnl / start) * 100;
+  const pctStr = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
+  return `${amount} (${pctStr})`;
 }
 
 /** Format seconds into human-readable uptime string. */
@@ -1209,6 +1218,7 @@ async function loadBots() {
   for (const bot of bots) {
     const m = bot.latest_metrics || {};
     const pnl = Number(m.dashboard_pnl_quote ?? m.realized_pnl_quote ?? 0);
+    const startBudget = Number(bot.config?.budget?.quote_budget || 0);
     const trades = Number(m.trade_count || 0);
     const runtime = formatUptime(m.runtime_seconds || 0);
     const lastPrice = Number(m.price || 0);
@@ -1250,7 +1260,7 @@ async function loadBots() {
       cells[5].textContent = priceStr;
       cells[6].textContent = formatNumber(m.total_equity_quote || 0);
       cells[7].className = pnl >= 0 ? "pnl-positive" : "pnl-negative";
-      cells[7].textContent = formatNumber(pnl);
+      cells[7].textContent = formatPnlWithPercent(pnl, startBudget);
       cells[8].textContent = trades;
       cells[9].textContent = runtime;
       // cells[10] is the actions dropdown — leave it untouched
@@ -1261,7 +1271,7 @@ async function loadBots() {
       const acts = isViewer
         ? "<td>-</td>"
         : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="sync">${t("btn_sync_exchange")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="bot_logs">${t("btn_bot_log")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
-      tr.innerHTML = `<td>${nameHtml}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${agentTitle}">${agentHtml}</td><td>${priceStr}</td><td>${formatNumber(m.total_equity_quote || 0)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${formatNumber(pnl)}</td><td>${trades}</td><td>${runtime}</td>${acts}`;
+      tr.innerHTML = `<td>${nameHtml}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${agentTitle}">${agentHtml}</td><td>${priceStr}</td><td>${formatNumber(m.total_equity_quote || 0)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${formatPnlWithPercent(pnl, startBudget)}</td><td>${trades}</td><td>${runtime}</td>${acts}`;
       body.appendChild(tr);
       _wireUpBotRow(tr, bots);
     }
@@ -1338,16 +1348,20 @@ function _wireUpBotRow(tr, bots) {
 
 // Close menus on outside click (register once)
 document.addEventListener("click", (e) => {
+  const target = e.target;
+  const targetEl = target instanceof Element ? target : null;
   closeAllAppSelects();
   document.querySelectorAll(".action-menu.open").forEach((m) => m.classList.remove("open"));
   document.querySelectorAll(".agent-move-dropdown.open").forEach((m) => m.classList.remove("open"));
-  if (!e.target.closest(".combo-wrap")) {
+  if (!targetEl?.closest(".combo-wrap")) {
     closeMarketSuggestions();
   }
 });
 
 document.addEventListener("click", async (e) => {
-  const trigger = e.target.closest(".agent-move-pill");
+  const target = e.target;
+  const targetEl = target instanceof Element ? target : null;
+  const trigger = targetEl?.closest(".agent-move-pill");
   if (trigger) {
     const wrap = trigger.closest(".agent-move-dropdown");
     if (!wrap) return;
@@ -1359,7 +1373,7 @@ document.addEventListener("click", async (e) => {
     return;
   }
 
-  const moveBtn = e.target.closest(".agent-move-item");
+  const moveBtn = targetEl?.closest(".agent-move-item");
   if (!moveBtn || moveBtn.disabled) return;
   e.stopPropagation();
   const botId = moveBtn.dataset.moveBotId;
@@ -1387,10 +1401,12 @@ window.addEventListener("resize", () => {
 });
 
 document.addEventListener("scroll", (e) => {
-  if (e.target?.closest?.(".combo-wrap") || e.target?.closest?.("#market_suggestions")) {
+  const target = e.target;
+  const targetEl = target instanceof Element ? target : null;
+  if (targetEl?.closest(".combo-wrap") || targetEl?.closest("#market_suggestions")) {
     return;
   }
-  if (e.target.closest(".modal") || e.target === document) {
+  if (targetEl?.closest(".modal") || target === document) {
     closeAllAppSelects();
     closeMarketSuggestions();
   }
@@ -1756,6 +1772,17 @@ async function loadDiagnosticsLogs() {
   const list = document.getElementById("diag_debug_logs");
   if (!list) return;
   const qs = buildDiagnosticsQuery();
+  const maxInlineJsonChars = 1200;
+
+  function stringifyForInline(value) {
+    try {
+      const text = JSON.stringify(value);
+      if (text.length <= maxInlineJsonChars) return text;
+      return `${text.slice(0, maxInlineJsonChars)}… [truncated in UI; full payload available in download]`;
+    } catch {
+      return "[unserializable]";
+    }
+  }
 
   try {
     const payload = await api(`/api/v1/debug/logs?${qs.toString()}`);
@@ -1773,7 +1800,15 @@ async function loadDiagnosticsLogs() {
       const inst = `${log.instance_type || "-"}:${log.instance_id_resolved || log.instance_id || "-"}`;
       const corr = log.correlation_id ? ` | corr=${log.correlation_id}` : "";
       const comp = log.component ? ` | ${log.component}` : "";
-      line.textContent = `${ts} [${log.event || "event"}] [${inst}]${comp}${corr} ${log.message || ""}`;
+      const fields = log.fields && typeof log.fields === "object" ? log.fields : {};
+      const payload = fields.payload && typeof fields.payload === "object" ? fields.payload : null;
+      const payloadText = payload ? ` | payload=${stringifyForInline(payload)}` : "";
+      const fieldsWithoutPayload = { ...fields };
+      delete fieldsWithoutPayload.payload;
+      const fieldsText = Object.keys(fieldsWithoutPayload).length
+        ? ` | fields=${stringifyForInline(fieldsWithoutPayload)}`
+        : "";
+      line.textContent = `${ts} [${log.event || "event"}] [${inst}]${comp}${corr} ${log.message || ""}${fieldsText}${payloadText}`;
       list.appendChild(line);
     }
     list.scrollTop = 0;

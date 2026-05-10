@@ -87,6 +87,8 @@ class BitvavoExchange(Exchange):
         self._exchange_order_map: dict[str, str] = {}  # exchange_order_id → our order_id
         self._fills: list[dict[str, Any]] = []
         self._fills_lock = threading.Lock()
+        self._cancelled_orders: list[dict[str, Any]] = []
+        self._cancelled_orders_lock = threading.Lock()
         self._not_authenticated_error = "Bitvavo websocket is not authenticated"
         self._price_decimals = 6
         self._amount_decimals = 6
@@ -330,6 +332,44 @@ class BitvavoExchange(Exchange):
         exchange_oid = order_info.get("exchange_order_id", "")
         if exchange_oid:
             self._exchange_order_map.pop(exchange_oid, None)
+
+    def _queue_cancelled_order(
+        self,
+        order_id: str,
+        order_info: dict[str, Any],
+        order_state: dict[str, Any],
+        status: str,
+    ) -> None:
+        """Store one externally cancelled or expired order for runner reconciliation."""
+        cancelled = {
+            "order_id": order_id,
+            "exchange_order_id": str(order_state.get("orderId", "") or order_info.get("exchange_order_id", "")),
+            "client_order_id": str(order_state.get("clientOrderId", "") or order_info.get("client_order_id", "")),
+            "client_reference": str(order_info.get("client_reference", "") or ""),
+            "status": status,
+            "side": str(order_state.get("side", "") or order_info.get("side", "")).lower(),
+            "quote_amount": float(order_info.get("quote_amount", 0.0) or 0.0),
+            "price": self._to_float(order_state.get("price")) or self._to_float(order_info.get("limit_price")),
+            "level_index": order_info.get("level_index"),
+        }
+        with scoped_context(bot_id=self.bot_id, component="exchange.bitvavo"):
+            debug_log(
+                logger,
+                "exchange_external_order_cancel_detected",
+                "Bitvavo detected external order cancellation for tracked bot order",
+                bot_id=self.bot_id,
+                market=self.market,
+                order_id=cancelled["order_id"],
+                exchange_order_id=cancelled["exchange_order_id"],
+                client_order_id=cancelled["client_order_id"],
+                client_reference=cancelled["client_reference"],
+                side=cancelled["side"],
+                level_index=cancelled["level_index"],
+                price=cancelled["price"],
+                status=cancelled["status"],
+            )
+        with self._cancelled_orders_lock:
+            self._cancelled_orders.append(cancelled)
 
     def _grid_level_reference(self, level_index: int | None) -> str | None:
         """Return the stable logical reference for one open grid level."""
@@ -646,6 +686,7 @@ class BitvavoExchange(Exchange):
             return fill
 
         if status in {"canceled", "expired"}:
+            self._queue_cancelled_order(order_id, order_info, order_state, status)
             self._remove_tracked_order(order_id)
             self._mark_exchange_order_processed(exchange_oid)
         return None
@@ -916,7 +957,7 @@ class BitvavoExchange(Exchange):
 
         if message.get("event") == "order":
             status = message.get("status", "")
-            if status in ("filled", "partiallyFilled"):
+            if status in ("filled", "partiallyFilled", "canceled", "expired"):
                 self._handle_fill_event(message)
             return
 
@@ -1196,6 +1237,13 @@ class BitvavoExchange(Exchange):
         self._refresh_balances()
         return fills
 
+    def get_cancelled_orders(self) -> list[dict[str, Any]]:
+        """Return cancelled or expired tracked orders since the last call."""
+        with self._cancelled_orders_lock:
+            cancelled_orders = list(self._cancelled_orders)
+            self._cancelled_orders.clear()
+        return cancelled_orders
+
     def has_tracked_level_order(self, level_index: int, side: str, limit_price: float) -> bool:
         """Return whether a matching open order is already tracked locally."""
         expected_side = str(side).lower()
@@ -1275,6 +1323,38 @@ class BitvavoExchange(Exchange):
             matched_levels.add(level_index)
 
         return matched_levels
+
+    def discover_open_orders_for_levels(self, level_prices: list[float]) -> dict[int, str]:
+        """Return current exchange open orders mapped to grid levels.
+
+        This is used during live restore to realign local runner state with
+        what is actually open on the exchange.
+        """
+        if not self.authenticated:
+            raise RuntimeError(self._not_authenticated_error)
+
+        items = self._get_open_orders()
+        if not items:
+            return {}
+
+        by_side_price = self._index_open_orders_by_side_price(items)
+        discovered: dict[int, str] = {}
+
+        for level_index, level_price in enumerate(level_prices):
+            price_key = self._price_key(level_price)
+            buy_candidates = by_side_price.get(("buy", price_key), [])
+            sell_candidates = by_side_price.get(("sell", price_key), [])
+
+            if buy_candidates and not sell_candidates:
+                discovered[level_index] = "buy"
+                continue
+            if sell_candidates and not buy_candidates:
+                discovered[level_index] = "sell"
+                continue
+            # Ambiguous (both sides present at same rounded level) or none:
+            # leave unresolved and let existing restore state handle it.
+
+        return discovered
 
     def cancel_all_orders(self) -> None:
         """Cancel all pending limit orders on Bitvavo."""

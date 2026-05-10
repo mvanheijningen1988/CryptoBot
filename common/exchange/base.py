@@ -91,6 +91,10 @@ class Exchange(ABC):
         """
         return []
 
+    def get_cancelled_orders(self) -> list[dict[str, Any]]:
+        """Return orders cancelled or expired since the last call."""
+        return []
+
     def has_tracked_level_order(self, level_index: int, side: str, limit_price: float) -> bool:
         """Return whether a matching open order is already tracked locally."""
         return False

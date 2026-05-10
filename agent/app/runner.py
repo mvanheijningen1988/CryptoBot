@@ -358,6 +358,7 @@ class BotRunner:
                     # Publish the first running snapshot before submitting initial orders
                     # so the manager UI can leave "initializing" immediately.
                     self._push_snapshot(self._build_snapshot("running"))
+                    self._process_cancelled_orders("startup-sync")
                     self._place_all_limit_orders("initial")
                     # Flush initial order_placed events and runner state right away.
                     self._push_snapshot(self._build_snapshot("running"))
@@ -366,6 +367,27 @@ class BotRunner:
                         # Restored but no open orders (e.g. crash during fill) — reinitialize grid
                         self.state.level_index = None
                         self.strategy.on_price(self.price, self.state)
+
+                    if self.config.mode == "live" and isinstance(self.exchange, BitvavoExchange):
+                        # Live restore must prefer exchange truth over stale persisted open_orders.
+                        try:
+                            discovered_open_orders = self.exchange.discover_open_orders_for_levels(self.strategy.levels)
+                        except Exception:
+                            discovered_open_orders = {}
+
+                        if discovered_open_orders:
+                            previous_open_orders = dict(self.state.open_orders)
+                            self.state.open_orders = {int(k): v for k, v in discovered_open_orders.items()}
+                            self.log_store.add(
+                                "orders_state_reconciled",
+                                "Reconciled restored open orders with exchange state.",
+                                bot_id=self.bot_id,
+                                data={
+                                    "previous_open_orders": previous_open_orders,
+                                    "exchange_open_orders": dict(self.state.open_orders),
+                                },
+                                category="system",
+                            )
 
                     synced_levels = self._sync_existing_live_open_orders()
                     if synced_levels:
@@ -381,6 +403,7 @@ class BotRunner:
 
                     self._push_snapshot(self._build_snapshot("running"))
                     # Startup reconcile: only post missing levels, never duplicate recovered orders.
+                    self._process_cancelled_orders("restore-startup-sync")
                     self._place_ready_open_orders("restore-startup", log_deferred=True)
                     self._push_snapshot(self._build_snapshot("running"))
 
@@ -554,6 +577,7 @@ class BotRunner:
         quote_balance, base_balance = self.exchange.get_balances()
         self.exchange.quote_balance = quote_balance
         self.exchange.base_balance = base_balance
+        self._process_cancelled_orders("manual-sync")
 
         # Re-check pending planned orders against fresh balances/market state.
         self._place_ready_open_orders("manual-sync", log_deferred=True)
@@ -763,6 +787,96 @@ class BotRunner:
                     )
                 continue
             self._place_limit_order(idx, context)
+
+    def _process_cancelled_orders(self, context: str = "") -> int:
+        """Apply external exchange cancellations to local state before repost checks."""
+        get_cancelled_orders = getattr(self.exchange, "get_cancelled_orders", None)
+        if not callable(get_cancelled_orders):
+            return 0
+
+        cancelled_orders = list(get_cancelled_orders() or [])
+        if not cancelled_orders:
+            return 0
+
+        removed_count = 0
+        for cancelled in cancelled_orders:
+            level_index = cancelled.get("level_index")
+            if level_index is None:
+                continue
+            try:
+                level_index = int(level_index)
+            except (TypeError, ValueError):
+                continue
+
+            side = str(cancelled.get("side", "") or "").lower()
+            current_side = str(self.state.open_orders.get(level_index, "") or "").lower()
+            if not current_side or (side and current_side != side):
+                with scoped_context(bot_id=self.bot_id, component="agent.runner"):
+                    debug_log(
+                        logger,
+                        "runner_exchange_cancel_ignored",
+                        "Runner ignored external exchange cancellation because local state no longer matched",
+                        bot_id=self.bot_id,
+                        context=context,
+                        side=side,
+                        current_side=current_side,
+                        level_index=level_index,
+                        order_id=cancelled.get("order_id"),
+                        exchange_order_id=cancelled.get("exchange_order_id"),
+                        client_order_id=cancelled.get("client_order_id"),
+                        status=cancelled.get("status"),
+                    )
+                continue
+
+            self.state.open_orders.pop(level_index, None)
+            removed_count += 1
+            limit_price = self.strategy.levels[level_index]
+            status = str(cancelled.get("status", "canceled") or "canceled").lower()
+            with scoped_context(bot_id=self.bot_id, component="agent.runner"):
+                debug_log(
+                    logger,
+                    "runner_exchange_cancel_applied",
+                    "Runner removed local open order after external exchange cancellation",
+                    bot_id=self.bot_id,
+                    context=context,
+                    side=current_side,
+                    level_index=level_index,
+                    price=limit_price,
+                    order_id=cancelled.get("order_id"),
+                    exchange_order_id=cancelled.get("exchange_order_id"),
+                    client_order_id=cancelled.get("client_order_id"),
+                    status=status,
+                    remaining_open_levels=sorted(self.state.open_orders.keys()),
+                )
+            self.log_store.add(
+                "order_cancelled",
+                f"Exchange {status}: removed {current_side.upper()} at level {level_index} (price {limit_price:.6f}) from bot state.",
+                bot_id=self.bot_id,
+                data={
+                    "context": context,
+                    "order_id": cancelled.get("order_id"),
+                    "exchange_order_id": cancelled.get("exchange_order_id"),
+                    "client_order_id": cancelled.get("client_order_id"),
+                    "side": current_side,
+                    "level_index": level_index,
+                    "price": limit_price,
+                    "status": status,
+                },
+                category="trading",
+            )
+            self._pending_trade_events.append({
+                "event_type": "order_cancelled",
+                "order_id": cancelled.get("order_id"),
+                "side": current_side,
+                "quote_amount": round(float(cancelled.get("quote_amount", self.config.grid.order_size_quote) or self.config.grid.order_size_quote), 8),
+                "price": round(float(cancelled.get("price", limit_price) or limit_price), 8),
+                "level_index": level_index,
+                "trade_pnl": 0,
+                "total_equity": round(self._calculate_total_equity(), 4),
+                "trade_number": self.trade_count,
+            })
+
+        return removed_count
 
     def _place_limit_order(self, level_idx: int, context: str = "") -> None:
         """Place a single limit order on the exchange for a grid level."""
@@ -1001,6 +1115,8 @@ class BotRunner:
             total_equity = self._calculate_total_equity()
             self._apply_profit_mode(total_equity)
             total_equity = self._calculate_total_equity()
+
+            self._process_cancelled_orders("pending-sync")
 
             # Re-check waiting orders as market price / balances change.
             self._place_ready_open_orders("pending")
