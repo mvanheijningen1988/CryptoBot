@@ -2276,34 +2276,289 @@ document.getElementById("equity_chart")?.addEventListener("mouseleave", hideEqui
 // Orders overview table
 // ──────────────────────────────────────────────────────────────
 
+const _ordersTableState = {
+  events: [],
+  sorters: [{ field: "timestamp", dir: "desc" }],
+  filters: {},
+};
+
+function _ordersFieldValue(ev, field) {
+  if (!ev) return null;
+  if (field === "market") return ev.market || ev.bot_name || "";
+  return ev[field];
+}
+
+function _ordersFieldDisplayValue(ev, field) {
+  const value = _ordersFieldValue(ev, field);
+  if (field === "timestamp") return value ? new Date(value).toLocaleString() : "";
+  if (["price", "quote_amount", "fee_paid_quote", "trade_pnl"].includes(field)) {
+    if (field === "trade_pnl" && Number(value || 0) === 0) return "-";
+    if (field === "fee_paid_quote" && Number(value || 0) <= 0) return "-";
+    return formatNumber(value);
+  }
+  if (field === "side") return String(value || "").toUpperCase();
+  if (field === "event_type") {
+    return value === "order_placed" ? t("lbl_placed")
+      : value === "order_filled" ? t("lbl_filled")
+      : value === "order_cancelled" ? t("lbl_cancelled")
+      : String(value || "");
+  }
+  return String(value || "");
+}
+
+function _ordersCompare(a, b, field) {
+  const av = _ordersFieldValue(a, field);
+  const bv = _ordersFieldValue(b, field);
+  if (field === "timestamp") return new Date(av || 0).getTime() - new Date(bv || 0).getTime();
+  if (["price", "quote_amount", "fee_paid_quote", "trade_pnl"].includes(field)) {
+    return Number(av || 0) - Number(bv || 0);
+  }
+  return String(av || "").localeCompare(String(bv || ""), undefined, { sensitivity: "base" });
+}
+
+function _setOrderSorter(field, dir, mode = "primary") {
+  const current = _ordersTableState.sorters.filter((s) => s.field !== field);
+  if (mode === "secondary") {
+    current.push({ field, dir });
+    _ordersTableState.sorters = current;
+    return;
+  }
+  _ordersTableState.sorters = [{ field, dir }, ...current];
+}
+
+function _clearOrderSorter(field) {
+  const remaining = _ordersTableState.sorters.filter((s) => s.field !== field);
+  _ordersTableState.sorters = remaining.length ? remaining : [{ field: "timestamp", dir: "desc" }];
+}
+
+function _filteredAndSortedOrderEvents() {
+  const entries = _ordersTableState.events.filter((ev) => {
+    for (const [field, rawFilter] of Object.entries(_ordersTableState.filters)) {
+      const filterValue = String(rawFilter || "").trim().toLowerCase();
+      if (!filterValue) continue;
+      const haystack = _ordersFieldDisplayValue(ev, field).toLowerCase();
+      if (!haystack.includes(filterValue)) return false;
+    }
+    return true;
+  });
+
+  entries.sort((left, right) => {
+    for (const sorter of _ordersTableState.sorters) {
+      const cmp = _ordersCompare(left, right, sorter.field);
+      if (cmp !== 0) return sorter.dir === "asc" ? cmp : -cmp;
+    }
+    return _ordersCompare(left, right, "timestamp") * -1;
+  });
+  return entries;
+}
+
+function _closeOrdersHeaderMenu() {
+  const menu = document.getElementById("orders_header_menu");
+  if (menu) menu.classList.remove("open");
+}
+
+function _ensureOrdersHeaderMenu() {
+  let menu = document.getElementById("orders_header_menu");
+  if (menu) return menu;
+  menu = document.createElement("div");
+  menu.id = "orders_header_menu";
+  menu.className = "orders-header-menu";
+  document.body.appendChild(menu);
+  return menu;
+}
+
+function _updateOrdersHeaderState() {
+  document.querySelectorAll(".orders-table th[data-order-field]").forEach((th) => {
+    const field = th.dataset.orderField || "";
+    const sortIndex = _ordersTableState.sorters.findIndex((s) => s.field === field);
+    const sorter = sortIndex >= 0 ? _ordersTableState.sorters[sortIndex] : null;
+    th.classList.toggle("orders-sort-asc", sortIndex === 0 && sorter?.dir === "asc");
+    th.classList.toggle("orders-sort-desc", sortIndex === 0 && sorter?.dir === "desc");
+    th.classList.toggle("orders-sort-secondary", sortIndex > 0);
+    th.classList.toggle("orders-filtered", Boolean(String(_ordersTableState.filters[field] || "").trim()));
+  });
+}
+
+function _renderOrdersActiveChips() {
+  const container = document.getElementById("orders_active_chips");
+  const resetBtn = document.getElementById("orders_reset_all");
+  if (!container) return;
+
+  const chips = [];
+  const isDefaultSort = _ordersTableState.sorters.length === 1
+    && _ordersTableState.sorters[0]?.field === "timestamp"
+    && _ordersTableState.sorters[0]?.dir === "desc";
+
+  if (!isDefaultSort) {
+    for (const sorter of _ordersTableState.sorters) {
+      const th = document.querySelector(`.orders-table th[data-order-field="${sorter.field}"]`);
+      const label = (th?.textContent || sorter.field).trim();
+      chips.push(`<span class="orders-chip">Sort: ${label} ${sorter.dir === "asc" ? "↑" : "↓"}<button type="button" data-chip-type="sort" data-field="${sorter.field}">×</button></span>`);
+    }
+  }
+  for (const [field, value] of Object.entries(_ordersTableState.filters)) {
+    const filterValue = String(value || "").trim();
+    if (!filterValue) continue;
+    const th = document.querySelector(`.orders-table th[data-order-field="${field}"]`);
+    const label = (th?.textContent || field).trim();
+    chips.push(`<span class="orders-chip">Filter: ${label} contains \"${filterValue.replace(/"/g, "&quot;")}\"<button type="button" data-chip-type="filter" data-field="${field}">×</button></span>`);
+  }
+
+  container.innerHTML = chips.join("");
+  if (resetBtn) {
+    resetBtn.disabled = chips.length === 0;
+  }
+
+  container.querySelectorAll("button[data-chip-type]").forEach((btn) => {
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      const field = btn.dataset.field || "";
+      if (btn.dataset.chipType === "sort") {
+        _clearOrderSorter(field);
+      } else {
+        delete _ordersTableState.filters[field];
+      }
+      _renderOrdersTable();
+    };
+  });
+}
+
+function _openOrdersHeaderMenu(th) {
+  const field = th?.dataset?.orderField;
+  if (!field) return;
+
+  const menu = _ensureOrdersHeaderMenu();
+  const currentFilter = String(_ordersTableState.filters[field] || "");
+  menu.innerHTML = `
+    <div class="orders-header-title">${th.textContent.trim()}</div>
+    <div class="orders-header-actions orders-header-actions-4">
+      <button type="button" data-sort="asc" data-sort-mode="primary">${lang === "nl" ? "Primair ↑" : "Primary ↑"}</button>
+      <button type="button" data-sort="desc" data-sort-mode="primary">${lang === "nl" ? "Primair ↓" : "Primary ↓"}</button>
+      <button type="button" data-sort="asc" data-sort-mode="secondary">${lang === "nl" ? "Ook ↑" : "Also ↑"}</button>
+      <button type="button" data-sort="desc" data-sort-mode="secondary">${lang === "nl" ? "Ook ↓" : "Also ↓"}</button>
+    </div>
+    <label>
+      <span>${lang === "nl" ? "Filter bevat" : "Filter contains"}</span>
+      <input id="orders_header_filter_input" type="text" value="${currentFilter.replace(/"/g, "&quot;")}" />
+    </label>
+    <div class="orders-header-actions">
+      <button type="button" data-action="apply-filter">${lang === "nl" ? "Filter toepassen" : "Apply filter"}</button>
+      <button type="button" data-action="clear-filter">${lang === "nl" ? "Filter wissen" : "Clear filter"}</button>
+      <button type="button" data-action="clear-sort">${lang === "nl" ? "Sortering wissen" : "Clear sort"}</button>
+    </div>
+  `;
+
+  const rect = th.getBoundingClientRect();
+  menu.classList.add("open");
+  const menuRect = menu.getBoundingClientRect();
+  let left = rect.left;
+  if (left + menuRect.width > globalThis.innerWidth - 8) {
+    left = globalThis.innerWidth - menuRect.width - 8;
+  }
+  left = Math.max(8, left);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${Math.min(globalThis.innerHeight - menuRect.height - 8, rect.bottom + 6)}px`;
+
+  menu.querySelectorAll("button[data-sort]").forEach((btn) => {
+    btn.onclick = () => {
+      _setOrderSorter(
+        field,
+        btn.dataset.sort === "asc" ? "asc" : "desc",
+        btn.dataset.sortMode === "secondary" ? "secondary" : "primary",
+      );
+      _renderOrdersTable();
+      _closeOrdersHeaderMenu();
+    };
+  });
+
+  const input = menu.querySelector("#orders_header_filter_input");
+  menu.querySelector("button[data-action='apply-filter']").onclick = () => {
+    _ordersTableState.filters[field] = input?.value || "";
+    _renderOrdersTable();
+    _closeOrdersHeaderMenu();
+  };
+  menu.querySelector("button[data-action='clear-filter']").onclick = () => {
+    delete _ordersTableState.filters[field];
+    _renderOrdersTable();
+    _closeOrdersHeaderMenu();
+  };
+  menu.querySelector("button[data-action='clear-sort']").onclick = () => {
+    _clearOrderSorter(field);
+    _renderOrdersTable();
+    _closeOrdersHeaderMenu();
+  };
+  input?.focus();
+  input?.select();
+}
+
+function _renderOrdersTable() {
+  const body = document.getElementById("orders_body");
+  if (!body) return;
+
+  const events = _filteredAndSortedOrderEvents();
+  body.innerHTML = "";
+  for (const ev of events) {
+    const tr = document.createElement("tr");
+    tr.style.cursor = "pointer";
+    const ts = new Date(ev.timestamp).toLocaleString();
+    const typeClass = ev.event_type === "order_placed" ? "order-type-placed"
+      : ev.event_type === "order_filled" ? "order-type-filled"
+      : "order-type-cancelled";
+    const typeLabel = ev.event_type === "order_placed" ? `📋 ${t("lbl_placed")}`
+      : ev.event_type === "order_filled" ? `✅ ${t("lbl_filled")}`
+      : ev.event_type === "order_cancelled" ? `❌ ${t("lbl_cancelled")}`
+      : String(ev.event_type || "");
+    const pnlStr = ev.trade_pnl !== 0 ? ((ev.trade_pnl >= 0 ? "+" : "") + formatNumber(ev.trade_pnl)) : "-";
+    const pnlClass = ev.trade_pnl > 0 ? "pnl-positive" : ev.trade_pnl < 0 ? "pnl-negative" : "";
+    const sideClass = ev.side === "buy" ? "order-buy" : ev.side === "sell" ? "order-sell" : "";
+    const marketLabel = ev.market || ev.bot_name || "-";
+    const feeStr = Number(ev.fee_paid_quote || 0) > 0 ? formatNumber(ev.fee_paid_quote) : "-";
+    tr.innerHTML = `<td>${ts}</td><td>${marketLabel}</td><td class="${typeClass}">${typeLabel}</td><td class="${sideClass}">${ev.side.toUpperCase()}</td><td>${formatNumber(ev.price)}</td><td>${formatNumber(ev.quote_amount)}</td><td>${feeStr}</td><td class="${pnlClass}">${pnlStr}</td>`;
+    tr.onclick = () => openOrderDetail(ev.id);
+    body.appendChild(tr);
+  }
+
+  _updateOrdersHeaderState();
+  _renderOrdersActiveChips();
+}
+
+function _initOrdersHeaderControls() {
+  document.querySelectorAll(".orders-table th[data-order-field]").forEach((th) => {
+    if (th.dataset.orderHeaderBound === "1") return;
+    th.dataset.orderHeaderBound = "1";
+    th.addEventListener("click", (event) => {
+      event.stopPropagation();
+      _openOrdersHeaderMenu(th);
+    });
+  });
+
+  const resetBtn = document.getElementById("orders_reset_all");
+  if (resetBtn && resetBtn.dataset.bound !== "1") {
+    resetBtn.dataset.bound = "1";
+    resetBtn.addEventListener("click", () => {
+      _ordersTableState.filters = {};
+      _ordersTableState.sorters = [{ field: "timestamp", dir: "desc" }];
+      _renderOrdersTable();
+      _closeOrdersHeaderMenu();
+    });
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest("#orders_header_menu") || target?.closest(".orders-table th[data-order-field]")) return;
+  _closeOrdersHeaderMenu();
+});
+
 /** Load all order events into the Orders tab table. */
 async function loadOrders() {
   const body = document.getElementById("orders_body");
   if (!body) return;
   try {
     const rawEvents = await api("/api/v1/trade-events");
-    const events = rawEvents.filter((ev) => ev?.event_type !== "trade");
-    body.innerHTML = "";
-    for (const ev of events) {
-      const tr = document.createElement("tr");
-      tr.style.cursor = "pointer";
-      const ts = new Date(ev.timestamp).toLocaleString();
-      const typeClass = ev.event_type === "order_placed" ? "order-type-placed"
-        : ev.event_type === "order_filled" ? "order-type-filled"
-        : "order-type-cancelled";
-      const typeLabel = ev.event_type === "order_placed" ? `📋 ${t("lbl_placed")}`
-        : ev.event_type === "order_filled" ? `✅ ${t("lbl_filled")}`
-        : ev.event_type === "order_cancelled" ? `❌ ${t("lbl_cancelled")}`
-        : `🔄 ${t("toast_trade")}`;
-      const pnlStr = ev.trade_pnl !== 0 ? ((ev.trade_pnl >= 0 ? "+" : "") + formatNumber(ev.trade_pnl)) : "-";
-      const pnlClass = ev.trade_pnl > 0 ? "pnl-positive" : ev.trade_pnl < 0 ? "pnl-negative" : "";
-      const sideClass = ev.side === "buy" ? "order-buy" : ev.side === "sell" ? "order-sell" : "";
-      const marketLabel = ev.market || ev.bot_name || "-";
-      const feeStr = Number(ev.fee_paid_quote || 0) > 0 ? formatNumber(ev.fee_paid_quote) : "-";
-      tr.innerHTML = `<td>${ts}</td><td>${marketLabel}</td><td class="${typeClass}">${typeLabel}</td><td class="${sideClass}">${ev.side.toUpperCase()}</td><td>${formatNumber(ev.price)}</td><td>${formatNumber(ev.quote_amount)}</td><td>${feeStr}</td><td class="${pnlClass}">${pnlStr}</td>`;
-      tr.onclick = () => openOrderDetail(ev.id);
-      body.appendChild(tr);
-    }
+    _ordersTableState.events = rawEvents.filter((ev) => ev?.event_type !== "trade");
+    _initOrdersHeaderControls();
+    _renderOrdersTable();
   } catch { /* ignore */ }
 }
 
