@@ -1195,7 +1195,8 @@ async function loadBots() {
   // Populate the equity chart bot selector (preserve selection)
   const chartSelect = document.getElementById("equity_chart_bot");
   if (chartSelect) {
-    const currentVal = chartSelect.value;
+    const savedVal = localStorage.getItem("cryptobot_equity_chart_bot") || "";
+    const currentVal = chartSelect.value || savedVal || (bots.length ? "__total__" : "");
     chartSelect.innerHTML = `<option value="">${t("lbl_select_bot")}</option><option value="__total__"${currentVal === "__total__" ? " selected" : ""}>${t("lbl_total_all_bots")}</option>`;
     for (const bot of bots) {
       const opt = document.createElement("option");
@@ -1204,6 +1205,10 @@ async function loadBots() {
       if (bot.id === currentVal) opt.selected = true;
       chartSelect.appendChild(opt);
     }
+    if (![...chartSelect.options].some((opt) => opt.value === currentVal)) {
+      chartSelect.value = bots.length ? "__total__" : "";
+    }
+    localStorage.setItem("cryptobot_equity_chart_bot", chartSelect.value || "");
     refreshAppSelect(chartSelect);
   }
 
@@ -1954,6 +1959,91 @@ document.querySelectorAll(".ntab-btn").forEach((btn) => {
 // Equity trend chart (pure Canvas 2D)
 // ──────────────────────────────────────────────────────────────
 
+let _equityChartMarkers = [];
+
+function hideEquityChartTooltip() {
+  const tip = document.getElementById("equity_chart_tooltip");
+  if (tip) tip.style.display = "none";
+}
+
+function ensureEquityChartTooltip() {
+  let tip = document.getElementById("equity_chart_tooltip");
+  if (tip) return tip;
+  tip = document.createElement("div");
+  tip.id = "equity_chart_tooltip";
+  tip.className = "tip-popup info-popup";
+  tip.style.display = "none";
+  document.body.appendChild(tip);
+  return tip;
+}
+
+function formatTooltipExactNumber(value, maxDecimals = 12) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+
+  const abs = Math.abs(n);
+  let raw = String(abs);
+  if (/[eE]/.test(raw)) raw = abs.toFixed(maxDecimals + 2);
+
+  let [intPart, fracPart = ""] = raw.split(".");
+  if (fracPart.length > maxDecimals) fracPart = fracPart.slice(0, maxDecimals);
+  fracPart = fracPart.replace(/0+$/, "");
+
+  const intFormatted = new Intl.NumberFormat(getNumberLocale(), {
+    useGrouping: true,
+    maximumFractionDigits: 0,
+  }).format(Number(intPart || "0"));
+  const decimalSep = (1.1).toLocaleString(getNumberLocale()).replace(/[0-9]/g, "").charAt(0) || ".";
+  const sign = n < 0 ? "-" : "";
+
+  return fracPart ? `${sign}${intFormatted}${decimalSep}${fracPart}` : `${sign}${intFormatted}`;
+}
+
+function updateEquityChartTooltip(marker, event) {
+  const tip = ensureEquityChartTooltip();
+  if (!marker || !event) {
+    hideEquityChartTooltip();
+    return;
+  }
+
+  const pointDate = new Date(marker.t);
+  const pointTime = Number.isNaN(pointDate.getTime()) ? String(marker.t || "-") : pointDate.toLocaleString();
+  const pointPnl = Number(marker.v || 0) - Number(marker.startingBudget || 0);
+  const timeLabel = lang === "nl" ? "Tijd" : "Time";
+  const equityLabel = lang === "nl" ? "Equity" : "Equity";
+  const pnlLabel = "PnL";
+  const priceLabel = lang === "nl" ? "Prijs" : "Price";
+
+  const rows = [
+    `<div class="tip-row">${timeLabel}: ${pointTime}</div>`,
+    `<div class="tip-row">${equityLabel}: ${formatTooltipExactNumber(marker.v)}</div>`,
+    `<div class="tip-row" style="color:${pointPnl >= 0 ? "#22c55e" : "#ef4444"}">${pnlLabel}: ${pointPnl >= 0 ? "+" : ""}${formatTooltipExactNumber(pointPnl)}</div>`,
+  ];
+  if (Number(marker.price || 0) > 0) {
+    rows.push(`<div class="tip-row">${priceLabel}: ${formatTooltipExactNumber(marker.price)}</div>`);
+  }
+
+  tip.innerHTML = `
+    <div class="tip-title">${formatTooltipExactNumber(marker.v)}</div>
+    <div class="tip-body">${rows.join("")}</div>
+  `;
+  tip.style.display = "block";
+
+  const margin = 12;
+  const tipRect = tip.getBoundingClientRect();
+  let left = event.clientX + 14;
+  let top = event.clientY - tipRect.height - 14;
+
+  if (left + tipRect.width > globalThis.innerWidth - margin) {
+    left = event.clientX - tipRect.width - 14;
+  }
+  if (left < margin) left = margin;
+  if (top < margin) top = event.clientY + 14;
+
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+}
+
 /**
  * Draw a line chart of equity over time on the canvas element.
  *
@@ -1965,6 +2055,7 @@ function drawEquityChart(data, startingBudget) {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
+  _equityChartMarkers = [];
 
   // Size canvas to CSS size at device pixel ratio
   const rect = canvas.getBoundingClientRect();
@@ -1977,6 +2068,7 @@ function drawEquityChart(data, startingBudget) {
   ctx.clearRect(0, 0, W, H);
 
   if (!data || data.length < 2) {
+    hideEquityChartTooltip();
     ctx.fillStyle = "#94a3b8";
     ctx.font = "14px sans-serif";
     ctx.textAlign = "center";
@@ -2019,7 +2111,7 @@ function drawEquityChart(data, startingBudget) {
   for (let i = 0; i <= 4; i++) {
     const v = minV + (range * i) / 4;
     const y = pad.top + plotH - (i / 4) * plotH;
-    ctx.fillText(formatNumber(v), pad.left - 6, y + 4);
+    ctx.fillText(formatNumber(v, 2, 2), pad.left - 6, y + 4);
     if (i > 0 && i < 4) {
       ctx.save();
       ctx.strokeStyle = "#1e293b";
@@ -2061,6 +2153,24 @@ function drawEquityChart(data, startingBudget) {
   ctx.lineWidth = 2;
   ctx.stroke();
 
+  // Draw small points so every datapoint can be hovered.
+  ctx.fillStyle = "rgba(96, 165, 250, 0.45)";
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    const d = data[i] || {};
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, i === 0 || i === points.length - 1 ? 3 : 2, 0, Math.PI * 2);
+    ctx.fill();
+    _equityChartMarkers.push({
+      x: p.x,
+      y: p.y,
+      t: d.t,
+      v: Number(d.v || 0),
+      price: Number(d.p || 0),
+      startingBudget: Number(startingBudget || 0),
+    });
+  }
+
   // Draw starting budget reference line (green dotted)
   if (startingBudget != null) {
     const budgetY = pad.top + plotH - ((startingBudget - minV) / range) * plotH;
@@ -2098,10 +2208,17 @@ async function loadEquityChart() {
       ? "/api/v1/bots/equity-history/total"
       : `/api/v1/bots/${botId}/equity-history`;
     const resp = await api(url);
-    const points = resp.points || [];
+    const points = Array.isArray(resp.points) ? [...resp.points] : [];
     const startingBudget = resp.starting_budget || 0;
     const pnl = resp.pnl || 0;
     const totalEquity = resp.total_equity || 0;
+
+    // Keep the trend endpoint anchored to the same normalized equity that is
+    // shown in the bots table/info panel.
+    if (points.length > 0) {
+      const last = points[points.length - 1] || {};
+      points[points.length - 1] = { ...last, v: Number(totalEquity || 0) };
+    }
 
     // Update info labels above chart
     if (infoDiv) {
@@ -2121,7 +2238,38 @@ async function loadEquityChart() {
 }
 
 // Redraw chart when the bot selector changes
-document.getElementById("equity_chart_bot")?.addEventListener("change", loadEquityChart);
+document.getElementById("equity_chart_bot")?.addEventListener("change", () => {
+  const chartSelect = document.getElementById("equity_chart_bot");
+  localStorage.setItem("cryptobot_equity_chart_bot", chartSelect?.value || "");
+  loadEquityChart();
+});
+document.getElementById("equity_chart")?.addEventListener("mousemove", (e) => {
+  const canvas = e.target instanceof HTMLCanvasElement ? e.target : null;
+  if (!canvas || !_equityChartMarkers.length) {
+    hideEquityChartTooltip();
+    return;
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  let best = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (const marker of _equityChartMarkers) {
+    const dx = marker.x - mx;
+    const dy = marker.y - my;
+    const distance = Math.hypot(dx, dy);
+    if (distance < bestDistance) {
+      best = marker;
+      bestDistance = distance;
+    }
+  }
+
+  if (best && bestDistance <= 12) updateEquityChartTooltip(best, e);
+  else hideEquityChartTooltip();
+});
+document.getElementById("equity_chart")?.addEventListener("mouseleave", hideEquityChartTooltip);
 
 // ──────────────────────────────────────────────────────────────
 // Orders overview table

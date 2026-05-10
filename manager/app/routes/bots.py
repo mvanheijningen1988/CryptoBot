@@ -477,6 +477,53 @@ def _apply_fill_to_balances(quote_balance: float, base_balance: float, fill: Tra
     return quote_balance, base_balance
 
 
+def _apply_fill_to_open_lots(lots: list[dict[str, float]], fill: TradeEvent) -> None:
+    """Apply one fill event to FIFO open lots used for unrealized PnL."""
+    side = str(fill.side or "").lower()
+    quote_amount = float(fill.quote_amount or 0.0)
+    fill_price = float(fill.price or 0.0)
+    fee_paid_quote = float(fill.fee_paid_quote or 0.0)
+    if quote_amount <= 0 or fill_price <= 0:
+        return
+
+    base_amount = quote_amount / fill_price
+    if side == "buy":
+        net_base = max(0.0, base_amount - (fee_paid_quote / fill_price if fee_paid_quote > 0 else 0.0))
+        if net_base > 0:
+            lots.append({"qty": net_base, "cost": quote_amount})
+        return
+
+    if side == "sell":
+        remaining_to_close = max(0.0, base_amount)
+        lot_idx = 0
+        while remaining_to_close > 1e-12 and lot_idx < len(lots):
+            lot = lots[lot_idx]
+            lot_qty = float(lot.get("qty", 0.0) or 0.0)
+            lot_cost = float(lot.get("cost", 0.0) or 0.0)
+            if lot_qty <= 1e-12:
+                lot_idx += 1
+                continue
+
+            take_qty = min(lot_qty, remaining_to_close)
+            unit_cost = lot_cost / lot_qty if lot_qty > 0 else 0.0
+            lot["qty"] = lot_qty - take_qty
+            lot["cost"] = max(0.0, lot_cost - (unit_cost * take_qty))
+            remaining_to_close -= take_qty
+            if lot["qty"] <= 1e-12:
+                lot_idx += 1
+
+
+def _unrealized_from_open_lots(lots: list[dict[str, float]], point_price: float) -> float:
+    """Compute unrealized PnL from remaining open lots at a given price."""
+    if point_price <= 0:
+        return 0.0
+    open_base = sum(max(0.0, float(l.get("qty", 0.0) or 0.0)) for l in lots)
+    if open_base <= 0:
+        return 0.0
+    open_cost_quote = sum(max(0.0, float(l.get("cost", 0.0) or 0.0)) for l in lots)
+    return open_base * point_price - open_cost_quote
+
+
 def _rebuild_live_equity_points_from_fills(
     bot_id: str,
     points: list[dict[str, object]],
@@ -484,7 +531,11 @@ def _rebuild_live_equity_points_from_fills(
     start_base: float,
     db: Session | None = None,
 ) -> list[dict[str, object]]:
-    """Recompute live equity chart points from bot-scoped fills and per-point prices."""
+    """Recompute live equity points using dashboard-equity convention.
+
+    Equity convention (same as bots table):
+    start budget + cumulative realized trade PnL + unrealized PnL on open lots.
+    """
     if not points:
         return points
 
@@ -509,21 +560,23 @@ def _rebuild_live_equity_points_from_fills(
             continue
         parsed_fills.append((ts, fill))
 
-    quote_balance = float(start_quote)
-    base_balance = float(start_base)
+    # start_base is intentionally excluded from dashboard-equity convention.
+    _ = start_base
+    realized_pnl = 0.0
+    open_lots: list[dict[str, float]] = []
     fill_idx = 0
     rebuilt: list[dict[str, object]] = []
 
     for point_ts, point in parsed_points:
         while fill_idx < len(parsed_fills) and parsed_fills[fill_idx][0] <= point_ts:
             _, fill = parsed_fills[fill_idx]
-            quote_balance, base_balance = _apply_fill_to_balances(quote_balance, base_balance, fill)
+            realized_pnl += float(fill.trade_pnl or 0.0)
+            _apply_fill_to_open_lots(open_lots, fill)
             fill_idx += 1
 
         point_price = float(point.get("p", 0.0) or 0.0)
-        point_equity = float(point.get("v", 0.0) or 0.0)
-        if point_price > 0:
-            point_equity = quote_balance + base_balance * point_price
+        unrealized_pnl = _unrealized_from_open_lots(open_lots, point_price)
+        point_equity = float(start_quote) + realized_pnl + unrealized_pnl
 
         rebuilt.append({
             "t": point.get("t"),
@@ -540,13 +593,15 @@ def _build_live_equity_points_from_fills(
     start_base: float,
     db: Session | None = None,
 ) -> list[dict[str, object]]:
-    """Build a minimal live equity series from persisted fill events."""
+    """Build live equity series from fills using dashboard-equity convention."""
     fills = _list_filled_events(bot_id, db)
     if not fills:
         return []
 
-    quote_balance = float(start_quote)
-    base_balance = float(start_base)
+    # start_base is intentionally excluded from dashboard-equity convention.
+    _ = start_base
+    realized_pnl = 0.0
+    open_lots: list[dict[str, float]] = []
     points: list[dict[str, object]] = []
     seen_start = False
 
@@ -558,15 +613,19 @@ def _build_live_equity_points_from_fills(
         if ts and not seen_start:
             points.append({
                 "t": ts,
-                "v": quote_balance + base_balance * fill_price,
+                "v": float(start_quote),
                 "p": fill_price,
             })
             seen_start = True
-        quote_balance, base_balance = _apply_fill_to_balances(quote_balance, base_balance, fill)
+
+        realized_pnl += float(fill.trade_pnl or 0.0)
+        _apply_fill_to_open_lots(open_lots, fill)
+        unrealized_pnl = _unrealized_from_open_lots(open_lots, fill_price)
+
         if ts:
             points.append({
                 "t": ts,
-                "v": quote_balance + base_balance * fill_price,
+                "v": float(start_quote) + realized_pnl + unrealized_pnl,
                 "p": fill_price,
             })
 
