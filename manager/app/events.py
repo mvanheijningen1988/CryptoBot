@@ -102,6 +102,26 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
                 .first()
             )
 
+        # Recovery/re-sync can change local order IDs (e.g. existing-*/reconciled-*).
+        # In that case, promote the latest still-open placed row on the same
+        # side+level to filled/cancelled instead of creating duplicates.
+        if (
+            row is None
+            and event_type in {"order_filled", "order_cancelled"}
+            and level_index is not None
+        ):
+            row = (
+                db.query(TradeEvent)
+                .filter(
+                    TradeEvent.bot_id == bot_id,
+                    TradeEvent.event_type == "order_placed",
+                    TradeEvent.side == side,
+                    TradeEvent.level_index == level_index,
+                )
+                .order_by(TradeEvent.timestamp.desc())
+                .first()
+            )
+
         if row is None:
             row = TradeEvent(id=event_id, bot_id=bot_id, bot_name=bot_name)
             db.add(row)
@@ -183,6 +203,20 @@ def get_trade_events(bot_id: str | None = None, limit: int = 200) -> list[dict]:
         if bot_id:
             q = q.filter(TradeEvent.bot_id == bot_id)
         rows = q.limit(limit).all()
+        # Remove stale placed rows that were superseded by newer terminal events
+        # after recovery/re-sync changed local order IDs.
+        terminal_keys: set[tuple[str, str, int]] = set()
+        filtered_rows: list[TradeEvent] = []
+        for r in rows:
+            side = str(r.side or "").lower()
+            if r.level_index is not None and side in {"buy", "sell"}:
+                key = (r.bot_id, side, int(r.level_index))
+                if r.event_type in {"order_filled", "order_cancelled"}:
+                    terminal_keys.add(key)
+                elif r.event_type == "order_placed" and key in terminal_keys:
+                    continue
+            filtered_rows.append(r)
+
         return [
             {
                 "id": r.id,
@@ -204,7 +238,7 @@ def get_trade_events(bot_id: str | None = None, limit: int = 200) -> list[dict]:
                 "level_index": r.level_index,
                 "linked_order_id": r.linked_order_id,
             }
-            for r in rows
+            for r in filtered_rows
         ]
     finally:
         db.close()

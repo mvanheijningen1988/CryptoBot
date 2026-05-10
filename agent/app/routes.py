@@ -8,7 +8,7 @@ from fastapi.routing import APIRouter
 
 from common.diagnostics import debug_log, scoped_context, trace_log
 from agent.app.config import AGENT_ID, runner_manager
-from agent.app.schemas import BudgetPayload, DeleteBotPayload, StartBotPayload, StopBotPayload
+from agent.app.schemas import BudgetPayload, DeleteBotPayload, StartBotPayload, StopBotPayload, SyncBotPayload
 from agent.app.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,28 @@ def update_budget(bot_id: str, payload: BudgetPayload) -> dict:
             raise HTTPException(status_code=500, detail=f"Budget update failed: {exc}") from exc
         debug_log(logger, "agent_budget_ok", "Agent updated bot budget", bot_id=bot_id, agent_id=AGENT_ID)
         return {"ok": True}
+
+
+@router.post("/agent/bots/{bot_id}/sync")
+def sync_bot(bot_id: str, payload: SyncBotPayload) -> dict:
+    """Force a bot to sync state with exchange and immediately push a fresh snapshot."""
+    with scoped_context(agent_id=AGENT_ID, bot_id=bot_id, component="agent.routes.sync"):
+        logger.info("SYNC request for bot %s", bot_id)
+        trace_log(
+            logger,
+            "agent_sync_request",
+            "Agent received bot sync request",
+            bot_id=bot_id,
+            agent_id=AGENT_ID,
+        )
+        try:
+            details = runner_manager.sync_bot(bot_id)
+        except Exception as exc:
+            logger.exception("Failed to sync bot %s", bot_id)
+            debug_log(logger, "agent_sync_failed", "Agent failed to sync bot", bot_id=bot_id, error=str(exc), agent_id=AGENT_ID)
+            raise HTTPException(status_code=500, detail=f"Bot sync failed: {exc}") from exc
+        debug_log(logger, "agent_sync_ok", "Agent synced bot with exchange", bot_id=bot_id, agent_id=AGENT_ID, details=details)
+        return {"ok": True, "details": details}
 
 
 @router.get("/agent/bots")

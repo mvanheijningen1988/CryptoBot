@@ -202,6 +202,13 @@ class BitvavoExchange(Exchange):
                 time.sleep(self._reconnect_backoff_seconds)
             self._connect_and_authenticate()
 
+    def ensure_authenticated(self) -> None:
+        """Ensure websocket transport is authenticated, reconnecting if needed."""
+        if self.authenticated and self.ws and self.running:
+            return
+        self._reconnect_transport("authentication required")
+        self._load_market_precision()
+
     def _extract_action_response(self, response: dict[str, Any]) -> dict[str, Any]:
         """Return the response body for websocket action replies."""
         body = response.get("response")

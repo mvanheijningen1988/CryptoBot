@@ -541,6 +541,42 @@ class BotRunner:
             category="system",
         )
 
+    def sync_with_exchange(self) -> dict:
+        """Force-sync balances/open orders with exchange and push a fresh snapshot."""
+        if not self.running:
+            raise RuntimeError("Bot is not running")
+
+        synced_levels: set[int] = set()
+        if self.config.mode == "live" and isinstance(self.exchange, BitvavoExchange):
+            self.exchange.ensure_authenticated()
+            synced_levels = self._sync_existing_live_open_orders()
+
+        quote_balance, base_balance = self.exchange.get_balances()
+        self.exchange.quote_balance = quote_balance
+        self.exchange.base_balance = base_balance
+
+        # Re-check pending planned orders against fresh balances/market state.
+        self._place_ready_open_orders("manual-sync", log_deferred=True)
+
+        snapshot = self._build_snapshot("running")
+        self._push_snapshot(snapshot)
+
+        details = {
+            "quote_balance": round(float(quote_balance), 8),
+            "base_balance": round(float(base_balance), 8),
+            "price": round(float(self.price or 0.0), 8),
+            "status": snapshot.status,
+            "synced_levels": sorted(int(level) for level in synced_levels),
+        }
+        self.log_store.add(
+            "exchange_sync",
+            "Manual exchange sync completed.",
+            bot_id=self.bot_id,
+            data=details,
+            category="system",
+        )
+        return details
+
     def get_runner_state(self) -> RunnerState:
         """Capture the full runner state for persistence / failover."""
         return RunnerState(
@@ -1040,6 +1076,13 @@ class RunnerManager:
         if not runner:
             return
         runner.update_budget(budget)
+
+    def sync_bot(self, bot_id: str) -> dict:
+        """Force a running bot to sync balances/open orders with the exchange."""
+        runner = self.runners.get(bot_id)
+        if not runner:
+            raise RuntimeError("Bot is not running on this agent")
+        return runner.sync_with_exchange()
 
     def list_bots(self) -> list[dict]:
         """

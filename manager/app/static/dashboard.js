@@ -1260,7 +1260,7 @@ async function loadBots() {
       tr.dataset.botId = bot.id;
       const acts = isViewer
         ? "<td>-</td>"
-        : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="bot_logs">${t("btn_bot_log")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
+        : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="sync">${t("btn_sync_exchange")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="bot_logs">${t("btn_bot_log")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
       tr.innerHTML = `<td>${nameHtml}</td><td>${market}</td><td>${modeLabel}</td><td>${statusHtml}</td><td title="${agentTitle}">${agentHtml}</td><td>${priceStr}</td><td>${formatNumber(m.total_equity_quote || 0)}</td><td class="${pnl >= 0 ? "pnl-positive" : "pnl-negative"}">${formatNumber(pnl)}</td><td>${trades}</td><td>${runtime}</td>${acts}`;
       body.appendChild(tr);
       _wireUpBotRow(tr, bots);
@@ -1302,6 +1302,9 @@ function _wireUpBotRow(tr, bots) {
           await api(`/api/v1/bots/${botId}/start`, { method: "POST", body: JSON.stringify({}) });
         } else if (action === "stop") {
           await api(`/api/v1/bots/${botId}/stop`, { method: "POST" });
+        } else if (action === "sync") {
+          await api(`/api/v1/bots/${botId}/sync`, { method: "POST" });
+          showToast(t("btn_sync_exchange"), t("toast_sync_done"), "info", 3000);
         } else if (action === "chart") {
           openTradeChart(bot);
           return;
@@ -1324,9 +1327,11 @@ function _wireUpBotRow(tr, bots) {
         showToast(t("btn_" + action) || action, err.message || String(err), "warn", 5000);
       }
       await loadBots();
+      await loadAgents();
       await loadOrders();
       await loadTradeEvents();
       await loadEquityChart();
+      await loadMarketSummary();
     };
   });
 }
@@ -1575,8 +1580,12 @@ async function loadAgents() {
 function _buildAgentBotTable(agent) {
   let html = `<table class="sub-table"><thead><tr><th>${t("th_name")}</th><th>${t("th_market")}</th><th>${t("th_status")}</th><th>${t("th_trades")}</th><th>Runtime</th><th>${t("th_quote_balance")}</th><th>${t("th_base_balance")}</th></tr></thead><tbody>`;
   for (const bot of agent.bots) {
-    const runtime = formatUptime(bot.latest_metrics?.runtime_seconds ?? 0);
-    html += `<tr><td>${bot.name}</td><td>${bot.market}</td><td>${bot.status}</td><td>${bot.trade_count}</td><td>${runtime}</td><td>${formatNumber(bot.quote_balance)}</td><td>${formatNumber(bot.base_balance)}</td></tr>`;
+    const runtimeSeconds = bot.runtime_seconds ?? bot.latest_metrics?.runtime_seconds ?? 0;
+    const runtime = formatUptime(runtimeSeconds);
+    const tradeCount = bot.trade_count ?? bot.latest_metrics?.trade_count ?? 0;
+    const quoteBalance = bot.quote_balance ?? bot.latest_metrics?.quote_balance ?? null;
+    const baseBalance = bot.base_balance ?? bot.latest_metrics?.base_balance ?? null;
+    html += `<tr><td>${bot.name}</td><td>${bot.market}</td><td>${bot.status}</td><td>${tradeCount}</td><td>${runtime}</td><td>${formatNumber(quoteBalance)}</td><td>${formatNumber(baseBalance)}</td></tr>`;
   }
   html += `</tbody></table>`;
   return html;

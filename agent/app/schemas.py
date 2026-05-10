@@ -29,6 +29,12 @@ class BudgetPayload(BaseModel):
     budget: BudgetConfig
 
 
+class SyncBotPayload(BaseModel):
+    """Request body for forcing a bot/exchange state sync."""
+
+    bot_id: str
+
+
 DeleteBotMode = Literal[
     "delete_open_orders",
     "delete_as_is",

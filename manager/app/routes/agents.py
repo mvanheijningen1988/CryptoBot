@@ -16,6 +16,7 @@ from manager.app.database import get_db
 from manager.app.events import add_agent_event
 from manager.app.failover import detach_bots_for_agent
 from manager.app.models import Agent, Bot
+from manager.app.routes.bots import _normalized_metrics_for_bot
 from manager.app.schemas import AgentHeartbeatRequest, AgentRegisterRequest
 
 router = APIRouter()
@@ -223,17 +224,17 @@ def list_agents(db: DbSession) -> list[dict]:
 
     bots_by_agent: dict[str, list[dict]] = {}
     for bot in all_bots:
-        metrics = json.loads(bot.latest_metrics_json or "{}")
+        metrics, _ = _normalized_metrics_for_bot(bot, db)
         config = json.loads(bot.config_json or "{}")
         bots_by_agent.setdefault(bot.assigned_agent_id, []).append({
             "id": bot.id,
             "name": bot.name,
             "status": bot.status,
             "market": config.get("market", "-"),
-            "trade_count": metrics.get("trade_count", 0),
-            "runtime_seconds": metrics.get("runtime_seconds", 0),
-            "quote_balance": metrics.get("quote_balance", 0),
-            "base_balance": metrics.get("base_balance", 0),
+            "trade_count": int(metrics.get("trade_count", 0) or 0),
+            "runtime_seconds": float(metrics.get("runtime_seconds", 0) or 0),
+            "quote_balance": float(metrics.get("quote_balance", 0) or 0),
+            "base_balance": float(metrics.get("base_balance", 0) or 0),
         })
 
     return [

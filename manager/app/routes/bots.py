@@ -1119,6 +1119,68 @@ def update_budget(bot_id: str, payload: UpdateBudgetRequest, db: DbSession) -> d
     return {"ok": True}
 
 
+@router.post("/bots/{bot_id}/sync", responses={400: {"description": "Bot cannot sync"}, 404: {"description": "Not found"}, 502: {"description": "Agent failure"}})
+def sync_bot(bot_id: str, db: DbSession) -> dict:
+    """Force-sync a running bot with its exchange and refresh manager-side metrics."""
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail=_BOT_NOT_FOUND)
+
+    agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first() if bot.assigned_agent_id else None
+    if not agent:
+        inferred_agent = _find_running_agent_for_bot(bot.id, db)
+        if inferred_agent:
+            bot.assigned_agent_id = inferred_agent.id
+            bot.updated_at = datetime.now(UTC)
+            db.commit()
+            agent = inferred_agent
+
+    if not agent:
+        raise HTTPException(status_code=400, detail="Bot is not assigned to a running agent")
+    if agent.approval_status != "approved":
+        raise HTTPException(status_code=400, detail="Only approved agent sync is available")
+
+    with scoped_context(bot_id=bot.id, agent_id=agent.id, component="manager.routes.bots.sync"):
+        trace_log(
+            logger,
+            "manager_sync_bot_request",
+            "Manager forwarding bot sync request to agent",
+            bot_id=bot.id,
+            agent_id=agent.id,
+            agent_url=agent.base_url,
+        )
+
+    ok, message = post_json(
+        f"{agent.base_url}/agent/bots/{bot.id}/sync",
+        {"bot_id": bot.id},
+    )
+    if not ok:
+        with scoped_context(bot_id=bot.id, agent_id=agent.id, component="manager.routes.bots.sync"):
+            debug_log(
+                logger,
+                "manager_sync_bot_failed",
+                "Manager received failed bot-sync response from agent",
+                bot_id=bot.id,
+                agent_id=agent.id,
+                error=message,
+            )
+        raise HTTPException(status_code=502, detail=f"Agent sync failed: {message}")
+
+    bot.updated_at = datetime.now(UTC)
+    db.commit()
+
+    with scoped_context(bot_id=bot.id, agent_id=agent.id, component="manager.routes.bots.sync"):
+        debug_log(
+            logger,
+            "manager_sync_bot_ok",
+            "Manager triggered bot exchange sync successfully",
+            bot_id=bot.id,
+            agent_id=agent.id,
+        )
+
+    return {"ok": True, "bot_id": bot.id, "agent_id": agent.id, "message": message}
+
+
 @router.post("/agents/{agent_id}/bots/{bot_id}/metrics", responses={404: {"description": "Bot not found"}})
 def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: DbSession) -> dict:
     """
