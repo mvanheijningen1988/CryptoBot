@@ -1460,28 +1460,9 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                             base_remainder_after_sell=round(base_remainder, 12),
                         )
     else:
-        # Fallback: infer from trade_count change
-        prev_metrics = json.loads(bot.latest_metrics_json or "{}")
-        prev_trade_count = prev_metrics.get("trade_count", 0)
-        if snapshot.trade_count > prev_trade_count:
-            new_trades = snapshot.trade_count - prev_trade_count
-            prev_equity = prev_metrics.get("total_equity_quote", snapshot.total_equity_quote)
-            trade_pnl = (snapshot.total_equity_quote - prev_equity) / max(new_trades, 1)
-            for i in range(new_trades):
-                add_trade_event(
-                    bot_id=bot_id,
-                    bot_name=bot.name,
-                    side="trade",
-                    quote_amount=0,
-                    fill_count=0,
-                    fee_paid_quote=0.0,
-                    fee_rate=0.0,
-                    price=snapshot.price,
-                    trade_pnl=trade_pnl,
-                    total_equity=snapshot.total_equity_quote,
-                    trade_number=prev_trade_count + i + 1,
-                    market=market,
-                )
+        # No fallback synthetic "trade" rows: they are not real orders and
+        # create confusing PnL records in the database/UI.
+        pass
 
     bot.status = snapshot.status
     bot.latest_metrics_json = snapshot.model_dump_json()

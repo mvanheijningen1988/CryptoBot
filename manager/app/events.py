@@ -12,6 +12,7 @@ from threading import Condition
 
 from manager.app.database import SessionLocal
 from manager.app.models import TradeEvent
+from sqlalchemy.orm import Session
 
 # ── Agent lifecycle events ────────────────────────────────────
 
@@ -71,6 +72,80 @@ def add_agent_event(agent_id: str, event_type: str, message: str) -> None:
 # ── Trade events (persisted to DB) ───────────────────────────
 
 
+def _is_valid_link_pair(source: TradeEvent, candidate: TradeEvent | None) -> bool:
+    """Return whether two trade events form a valid opposite-side grid pair."""
+    if candidate is None or source.id == candidate.id:
+        return False
+
+    source_side = str(source.side or "").lower()
+    candidate_side = str(candidate.side or "").lower()
+    source_type = str(source.event_type or "").lower()
+    candidate_type = str(candidate.event_type or "").lower()
+    if source_side not in {"buy", "sell"} or candidate_side not in {"buy", "sell"}:
+        return False
+    if source_side == candidate_side:
+        return False
+    if source.level_index is None or candidate.level_index is None:
+        return False
+
+    if source_side == "buy":
+        return (
+            source_type == "order_filled"
+            and candidate_side == "sell"
+            and candidate.level_index == source.level_index + 1
+            and candidate_type in {"order_placed", "order_filled"}
+        )
+
+    return (
+        source_type in {"order_placed", "order_filled"}
+        and source.level_index > 0
+        and candidate_side == "buy"
+        and candidate.level_index == source.level_index - 1
+        and candidate_type == "order_filled"
+    )
+
+
+def _find_link_candidate(db: Session, bot_id: str, row: TradeEvent) -> TradeEvent | None:
+    """Find the best opposite-side link candidate for one trade event."""
+    side = str(row.side or "").lower()
+    event_type = str(row.event_type or "").lower()
+    level_index = row.level_index
+    if level_index is None:
+        return None
+
+    if side == "buy" and event_type == "order_filled":
+        target_side = "sell"
+        target_level = level_index + 1
+        target_types = ["order_placed", "order_filled"]
+    elif side == "sell" and event_type in {"order_placed", "order_filled"} and level_index > 0:
+        target_side = "buy"
+        target_level = level_index - 1
+        target_types = ["order_filled"]
+    else:
+        return None
+
+    candidates = (
+        db.query(TradeEvent)
+        .filter(
+            TradeEvent.bot_id == bot_id,
+            TradeEvent.id != row.id,
+            TradeEvent.side == target_side,
+            TradeEvent.level_index == target_level,
+            TradeEvent.event_type.in_(target_types),
+        )
+        .order_by(TradeEvent.timestamp.desc())
+        .all()
+    )
+    for candidate in candidates:
+        if side == "sell" and candidate.timestamp and row.timestamp and candidate.timestamp > row.timestamp:
+            continue
+        if candidate.linked_order_id not in {None, row.id} and _is_valid_link_pair(candidate, db.query(TradeEvent).filter(TradeEvent.id == candidate.linked_order_id).first()):
+            continue
+        if _is_valid_link_pair(row, candidate):
+            return candidate
+    return None
+
+
 def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
                     price: float, trade_pnl: float, total_equity: float,
                     trade_number: int, event_type: str = "trade",
@@ -90,8 +165,6 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
     in a different order (e.g. sell placement logged before buy fill).
     """
     event_id = str(uuid.uuid4())
-    linked_order_id = None
-
     db = SessionLocal()
     try:
         row = None
@@ -144,49 +217,24 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
         row.level_index = level_index
         row.market = market
 
-        # Link sell events to the originating confirmed buy fill (N-1).
-        if side == "sell" and level_index is not None and level_index > 0:
-            linked_buy_level = level_index - 1
-            buy = (
-                db.query(TradeEvent)
-                .filter(
-                    TradeEvent.bot_id == bot_id,
-                    TradeEvent.event_type == "order_filled",
-                    TradeEvent.side == "buy",
-                    TradeEvent.level_index == linked_buy_level,
-                    TradeEvent.linked_order_id.is_(None),
-                )
-                .order_by(TradeEvent.timestamp.desc())
-                .first()
-            )
-            if buy:
-                linked_order_id = buy.id
-                if not buy.linked_order_id:
-                    buy.linked_order_id = event_id
+        existing_link = None
+        if row.linked_order_id:
+            existing_link = db.query(TradeEvent).filter(TradeEvent.id == row.linked_order_id).first()
+            if not _is_valid_link_pair(row, existing_link):
+                row.linked_order_id = None
+                existing_link = None
 
-        # Link buy fills to the sell event one level above (N+1), even if
-        # that sell placement was persisted before this buy fill.
-        if event_type == "order_filled" and side == "buy" and level_index is not None:
-            linked_sell_level = level_index + 1
-            sell = (
-                db.query(TradeEvent)
-                .filter(
-                    TradeEvent.bot_id == bot_id,
-                    TradeEvent.side == "sell",
-                    TradeEvent.level_index == linked_sell_level,
-                    TradeEvent.event_type.in_(["order_placed", "order_filled"]),
-                    TradeEvent.linked_order_id.is_(None),
-                )
-                .order_by(TradeEvent.timestamp.desc())
-                .first()
-            )
-            if sell:
-                linked_order_id = sell.id
-                if not sell.linked_order_id:
-                    sell.linked_order_id = event_id
-
-        if linked_order_id is not None:
-            row.linked_order_id = linked_order_id
+        candidate = _find_link_candidate(db, bot_id, row)
+        if candidate is not None:
+            linked_order_id = candidate.id
+            row.linked_order_id = candidate.id
+            existing_back_link = None
+            if candidate.linked_order_id:
+                existing_back_link = db.query(TradeEvent).filter(TradeEvent.id == candidate.linked_order_id).first()
+            if not _is_valid_link_pair(candidate, existing_back_link) or candidate.linked_order_id in {None, row.id}:
+                candidate.linked_order_id = row.id
+        elif existing_link is None:
+            row.linked_order_id = None
 
         db.commit()
     finally:

@@ -1884,7 +1884,8 @@ let _tradeEventsInitialised = false;
  * trade notifications panel. New trades trigger a toast.
  */
 async function loadTradeEvents() {
-  const events = await api("/api/v1/trade-events");
+  const rawEvents = await api("/api/v1/trade-events");
+  const events = rawEvents.filter((ev) => ev?.event_type !== "trade");
   const list = document.getElementById("trade_events_list");
   if (!list) return;
   list.innerHTML = "";
@@ -2280,7 +2281,8 @@ async function loadOrders() {
   const body = document.getElementById("orders_body");
   if (!body) return;
   try {
-    const events = await api("/api/v1/trade-events");
+    const rawEvents = await api("/api/v1/trade-events");
+    const events = rawEvents.filter((ev) => ev?.event_type !== "trade");
     body.innerHTML = "";
     for (const ev of events) {
       const tr = document.createElement("tr");
