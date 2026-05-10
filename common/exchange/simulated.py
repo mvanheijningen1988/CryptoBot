@@ -339,6 +339,7 @@ class SimulatedExchange(Exchange):
                 "side": side,
                 "quote_amount": order["quote_amount"],
                 "fill_price": limit_price,
+                "base_amount": base_bought if side == "buy" else base_to_sell,
                 "level_index": order["level_index"],
                 "fee_paid_quote": fee_paid_quote,
                 "fee_rate": self.fee_rate,

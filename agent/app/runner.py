@@ -743,7 +743,7 @@ class BotRunner:
         )
         return synced_levels
 
-    def _limit_order_readiness(self, level_idx: int, side: str, limit_price: float) -> tuple[bool, str | None, dict | None]:
+    def _limit_order_readiness(self, level_idx: int, side: str, limit_price: float, quote_amount: float) -> tuple[bool, str | None, dict | None]:
         """Return whether an order is ready to post on the exchange right now."""
         if side == "buy":
             if self.price > 0 and limit_price >= self.price:
@@ -755,7 +755,7 @@ class BotRunner:
                 }
             return True, None, None
 
-        required_base = self.config.grid.order_size_quote / limit_price if limit_price > 0 else 0.0
+        required_base = quote_amount / limit_price if limit_price > 0 else 0.0
         if self.exchange.base_balance + 1e-12 < required_base:
             return False, "insufficient_base", {
                 "level_index": level_idx,
@@ -766,6 +766,52 @@ class BotRunner:
             }
         return True, None, None
 
+    def _base_amount_from_fill(self, fill: dict, side: str) -> float:
+        """Return executed base amount from one fill payload."""
+        explicit_base = float(fill.get("base_amount", 0.0) or 0.0)
+        if explicit_base > 0:
+            return explicit_base
+
+        quote_amount = float(fill.get("quote_amount", 0.0) or 0.0)
+        fill_price = float(fill.get("fill_price", 0.0) or 0.0)
+        if quote_amount <= 0 or fill_price <= 0:
+            return 0.0
+
+        raw_base = quote_amount / fill_price
+        if side != "buy":
+            return raw_base
+
+        fee_rate = float(fill.get("fee_rate", 0.0) or 0.0)
+        fee_paid_quote = float(fill.get("fee_paid_quote", 0.0) or 0.0)
+        if fee_rate <= 0 and fee_paid_quote > 0 and quote_amount > 0:
+            fee_rate = max(0.0, min(1.0, fee_paid_quote / quote_amount))
+        return raw_base * max(0.0, 1.0 - fee_rate)
+
+    def _quote_amount_for_new_order(self, side: str, level_idx: int, limit_price: float) -> float:
+        """Return quote amount for newly posted orders.
+
+        Existing orders keep their original size. New BUY orders compound
+        realized profits. New SELL orders use the exact matched base amount
+        from the originating BUY fill (converted to quote at the sell level).
+        """
+        base_order_size = float(self.config.grid.order_size_quote)
+        if side != "buy":
+            buy_origin = level_idx - 1
+            if buy_origin >= 0 and limit_price > 0:
+                matched_base = float(self.state.filled_amounts.get(buy_origin, 0.0) or 0.0)
+                if matched_base > 0:
+                    return round(matched_base * limit_price, 8)
+            return base_order_size
+
+        start_quote_budget = float(self.config.budget.quote_budget)
+        if start_quote_budget <= 0:
+            return base_order_size
+
+        realized_gain = max(float(self.realized_pnl), 0.0)
+        compound_factor = 1.0 + (realized_gain / start_quote_budget)
+        adjusted_order_size = base_order_size * compound_factor
+        return round(adjusted_order_size, 8)
+
     def _place_ready_open_orders(self, context: str = "", log_deferred: bool = False) -> None:
         """Try to place currently open strategy orders that are valid to post now."""
         for idx in sorted(self.state.open_orders.keys()):
@@ -775,7 +821,8 @@ class BotRunner:
             limit_price = self.strategy.levels[idx]
             if self.exchange.has_tracked_level_order(idx, side, limit_price):
                 continue
-            ready, reason, details = self._limit_order_readiness(idx, side, limit_price)
+            quote_amount = self._quote_amount_for_new_order(side, idx, limit_price)
+            ready, reason, details = self._limit_order_readiness(idx, side, limit_price, quote_amount)
             if not ready:
                 if log_deferred:
                     self.log_store.add(
@@ -884,8 +931,9 @@ class BotRunner:
         if side is None:
             return
         limit_price = self.strategy.levels[level_idx]
+        quote_amount = self._quote_amount_for_new_order(side, level_idx, limit_price)
         order_reference = f"level-{level_idx}"
-        ready, reason, details = self._limit_order_readiness(level_idx, side, limit_price)
+        ready, reason, details = self._limit_order_readiness(level_idx, side, limit_price, quote_amount)
         if not ready:
             self.log_store.add(
                 "order_waiting",
@@ -915,7 +963,7 @@ class BotRunner:
                 "side": side,
                 "level_index": level_idx,
                 "price": limit_price,
-                "quote_amount": self.config.grid.order_size_quote,
+                "quote_amount": quote_amount,
                 "context": context,
             },
             category="trading",
@@ -924,7 +972,7 @@ class BotRunner:
             success = self.exchange.place_limit_order(
                 order_id=order_id,
                 side=side,
-                quote_amount=self.config.grid.order_size_quote,
+                quote_amount=quote_amount,
                 limit_price=limit_price,
                 level_index=level_idx,
                 client_reference=order_reference,
@@ -940,7 +988,7 @@ class BotRunner:
                     "side": side,
                     "level_index": level_idx,
                     "price": limit_price,
-                    "quote_amount": self.config.grid.order_size_quote,
+                    "quote_amount": quote_amount,
                     "context": context,
                     "error": str(exc),
                 },
@@ -959,7 +1007,7 @@ class BotRunner:
                 "event_type": "order_placed",
                 "order_id": order_id,
                 "side": side,
-                "quote_amount": self.config.grid.order_size_quote,
+                "quote_amount": quote_amount,
                 "price": limit_price,
                 "level_index": level_idx,
                 "trade_pnl": 0,
@@ -978,7 +1026,7 @@ class BotRunner:
                 "level_index": idx,
                 "side": side,
                 "price": self.strategy.levels[idx],
-                "quote_amount": self.config.grid.order_size_quote,
+                "quote_amount": self._quote_amount_for_new_order(side, idx, self.strategy.levels[idx]),
             })
 
         self.log_store.add(
@@ -1072,6 +1120,35 @@ class BotRunner:
                     self.realized_pnl += trade_pnl
                     self.trade_count += 1
 
+                    matched_buy_base = 0.0
+                    base_remainder_after_sell = 0.0
+                    filled_base_amount = self._base_amount_from_fill(fill, side)
+                    if side == "buy" and filled_base_amount > 0:
+                        current_amount = float(self.state.filled_amounts.get(idx, 0.0) or 0.0)
+                        self.state.filled_amounts[idx] = round(current_amount + filled_base_amount, 12)
+                    elif side == "sell" and idx > 0 and filled_base_amount > 0:
+                        buy_origin = idx - 1
+                        current_amount = float(self.state.filled_amounts.get(buy_origin, 0.0) or 0.0)
+                        matched_buy_base = current_amount
+                        remaining_amount = max(0.0, current_amount - filled_base_amount)
+                        base_remainder_after_sell = remaining_amount
+                        if remaining_amount <= 1e-12:
+                            self.state.filled_amounts.pop(buy_origin, None)
+                        else:
+                            self.state.filled_amounts[buy_origin] = round(remaining_amount, 12)
+                        with scoped_context(bot_id=self.bot_id, component="agent.runner"):
+                            debug_log(
+                                logger,
+                                "runner_sell_base_reconcile",
+                                "Sell fill reconciled against matched buy base amount",
+                                bot_id=self.bot_id,
+                                level_index=idx,
+                                buy_origin_level=buy_origin,
+                                matched_buy_base=round(matched_buy_base, 12),
+                                sold_base=round(filled_base_amount, 12),
+                                base_remainder_after_sell=round(base_remainder_after_sell, 12),
+                            )
+
                     self.log_store.add(
                         "trade_executed",
                         f"{side.upper()} {fill['quote_amount']:.2f} at {fill_price:.6f}{fill_parts_suffix} | pnl: {trade_pnl:+.4f}",
@@ -1092,6 +1169,9 @@ class BotRunner:
                         "order_id": fill.get("order_id"),
                         "side": side,
                         "quote_amount": fill["quote_amount"],
+                        "base_amount": round(filled_base_amount, 12),
+                        "matched_buy_base": round(matched_buy_base, 12),
+                        "base_remainder_after_sell": round(base_remainder_after_sell, 12),
                         "fill_count": fill_count,
                         "fee_paid_quote": round(float(fill.get("fee_paid_quote", 0.0) or 0.0), 8),
                         "fee_rate": round(float(fill.get("fee_rate", 0.0) or 0.0), 8),

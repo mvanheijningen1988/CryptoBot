@@ -413,6 +413,7 @@ class BitvavoExchange(Exchange):
             fill_price = self._to_float(order_state.get("price")) or fill_price
 
         quote_amount = filled_quote or self._to_float(order_info.get("quote_amount"))
+        base_amount = total_base or filled_base or (quote_amount / fill_price if quote_amount > 0 and fill_price > 0 else 0.0)
         fee_paid_quote = self._fee_to_quote(order_state.get("feePaid"), order_state.get("feeCurrency"), fill_price)
         if fee_paid_quote == 0 and fee_from_fills_quote > 0:
             fee_paid_quote = fee_from_fills_quote
@@ -426,6 +427,7 @@ class BitvavoExchange(Exchange):
             "side": order_info["side"],
             "quote_amount": quote_amount,
             "fill_price": fill_price,
+            "base_amount": base_amount,
             "level_index": order_info.get("level_index"),
             "fill_count": effective_fill_count,
             "fee_paid_quote": fee_paid_quote,

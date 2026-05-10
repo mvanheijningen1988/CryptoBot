@@ -1383,6 +1383,23 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                 market=market,
                 order_id=ev.get("order_id"),
             )
+            if ev.get("side") == "sell":
+                matched_buy_base = float(ev.get("matched_buy_base", 0.0) or 0.0)
+                sold_base = float(ev.get("base_amount", 0.0) or 0.0)
+                base_remainder = float(ev.get("base_remainder_after_sell", 0.0) or 0.0)
+                if matched_buy_base > 0 or sold_base > 0:
+                    with scoped_context(bot_id=bot_id, agent_id=agent_id, component="manager.routes.bots.metrics"):
+                        debug_log(
+                            logger,
+                            "manager_sell_base_reconcile",
+                            "Manager received sell/base reconciliation details",
+                            bot_id=bot_id,
+                            agent_id=agent_id,
+                            level_index=ev.get("level_index"),
+                            matched_buy_base=round(matched_buy_base, 12),
+                            sold_base=round(sold_base, 12),
+                            base_remainder_after_sell=round(base_remainder, 12),
+                        )
     else:
         # Fallback: infer from trade_count change
         prev_metrics = json.loads(bot.latest_metrics_json or "{}")
