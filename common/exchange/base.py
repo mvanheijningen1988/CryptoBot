@@ -111,3 +111,13 @@ class Exchange(ABC):
     def cancel_all_orders(self) -> None:
         """Cancel all pending limit orders."""
         raise NotImplementedError
+
+    def update_limit_order(self, order_id: str, quote_amount: float, limit_price: float) -> bool:
+        """Update one tracked limit order on the exchange.
+
+        :param order_id: Local tracked order identifier.
+        :param quote_amount: New order size in quote currency.
+        :param limit_price: New/confirmed limit price for the order.
+        :return: True when the order update is accepted.
+        """
+        return False

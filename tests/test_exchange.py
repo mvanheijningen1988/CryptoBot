@@ -1106,6 +1106,7 @@ class TestBitvavoSyncOpenOrders:
 
     def test_sync_open_orders_tracks_matching_operator_and_level(self):
         ex = self._make_exchange()
+        expected_client_order_id = ex._client_order_id("sync-0", "level-0")
 
         open_orders_response = {
             "response": [
@@ -1115,7 +1116,7 @@ class TestBitvavoSyncOpenOrders:
                     "side": "buy",
                     "price": "100.00000000",
                     "status": "new",
-                    "clientOrderId": "cid-match",
+                    "clientOrderId": expected_client_order_id,
                 },
                 {
                     "orderId": "ex-other-operator",
@@ -1155,6 +1156,7 @@ class TestBitvavoSyncOpenOrders:
 
     def test_sync_open_orders_falls_back_to_get_orders_on_invalid_action(self):
         ex = self._make_exchange()
+        expected_client_order_id = ex._client_order_id("sync-0", "level-0")
 
         fallback_open_orders = {
             "response": [
@@ -1164,7 +1166,7 @@ class TestBitvavoSyncOpenOrders:
                     "side": "buy",
                     "price": "100.00000000",
                     "status": "new",
-                    "clientOrderId": "cid-fallback",
+                    "clientOrderId": expected_client_order_id,
                 }
             ]
         }
@@ -1188,6 +1190,31 @@ class TestBitvavoSyncOpenOrders:
 
         assert calls == ["privateGetOrdersOpen", "privateGetOrders"]
         assert matched == {0}
+
+    def test_sync_open_orders_does_not_match_by_price_without_client_order_id(self):
+        ex = self._make_exchange()
+
+        open_orders_response = {
+            "response": [
+                {
+                    "orderId": "ex-manual",
+                    "operatorId": 42,
+                    "side": "buy",
+                    "price": "100.00000000",
+                    "status": "new",
+                    "clientOrderId": "manual-order-id",
+                }
+            ]
+        }
+
+        with patch.object(ex, "_call_action", return_value=open_orders_response):
+            matched = ex.sync_open_orders_for_levels(
+                planned_open_orders={0: "buy"},
+                level_prices=[100.0],
+                quote_amount=100.0,
+            )
+
+        assert matched == set()
 
     def test_sync_open_orders_matches_stable_level_client_order_id_before_price(self):
         ex = self._make_exchange()
@@ -1226,6 +1253,36 @@ class TestBitvavoSyncOpenOrders:
         assert matches[0]["match_method"] == "client_reference"
         assert matches[0]["client_reference"] == "level-0"
         assert matches[0]["client_order_id"] == expected_client_order_id
+
+    def test_sync_open_orders_tracks_remaining_quote_from_exchange(self):
+        ex = self._make_exchange()
+        expected_client_order_id = ex._client_order_id("sync-0", "level-0")
+
+        open_orders_response = {
+            "response": [
+                {
+                    "orderId": "ex-level-0",
+                    "operatorId": 42,
+                    "side": "buy",
+                    "price": "100.00000000",
+                    "status": "partiallyFilled",
+                    "clientOrderId": expected_client_order_id,
+                    "amountQuote": "150",
+                    "filledAmountQuote": "40",
+                }
+            ]
+        }
+
+        with patch.object(ex, "_call_action", return_value=open_orders_response):
+            matched = ex.sync_open_orders_for_levels(
+                planned_open_orders={0: "buy"},
+                level_prices=[100.0],
+                quote_amount=100.0,
+            )
+
+        assert matched == {0}
+        tracked = next(iter(ex._limit_orders.values()))
+        assert tracked["quote_amount"] == pytest.approx(110.0)
 
 
 # ===================================================================

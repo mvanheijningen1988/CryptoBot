@@ -80,3 +80,17 @@ class TradeEvent(Base):
     level_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     market: Mapped[str] = mapped_column(String(32), default="")
     linked_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class AppSetting(Base):
+    """Database-backed application setting seeded from env/compose defaults."""
+
+    __tablename__ = "app_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))

@@ -15,6 +15,7 @@ from fastapi import Request
 from common.diagnostics import configure_diagnostics_logging, debug_log, restore_context, set_context
 from agent.app.config import AGENT_ID, runner_manager
 from agent.app.heartbeat import heartbeat_loop, register_agent
+from agent.app.manager_ws import start_manager_ws_client
 from agent.app.routes import router
 from agent.app.version import __version__
 
@@ -67,5 +68,6 @@ def startup_event() -> None:
     """Register agent and start the heartbeat loop on application start."""
     runner_manager.log_system("agent_startup", "Agent process started.", {"agent_id": AGENT_ID})
     register_agent()
+    start_manager_ws_client()
     thread = threading.Thread(target=heartbeat_loop, daemon=True)
     thread.start()

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import UTC, datetime
 from time import sleep
 from typing import TYPE_CHECKING
@@ -15,14 +14,13 @@ from typing import TYPE_CHECKING
 from manager.app.events import add_agent_event
 from manager.app.models import Agent, Bot
 from manager.app.services.agent_client import get_json, post_json
+from manager.app.services.runtime_settings import get_int
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger(__name__)
 
-HEARTBEAT_TIMEOUT_SECONDS = int(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "30"))
-FAILOVER_INTERVAL_SECONDS = int(os.getenv("FAILOVER_INTERVAL_SECONDS", "10"))
 ACTIVE_BOT_STATUSES = ("initializing", "running")
 
 
@@ -251,8 +249,9 @@ def failover_maintenance_loop(session_factory: sessionmaker) -> None:
                 hb = agent.last_heartbeat
                 if hb and hb.tzinfo is None:
                     hb = hb.replace(tzinfo=UTC)
-                age_seconds = (now - hb).total_seconds() if hb else HEARTBEAT_TIMEOUT_SECONDS + 1
-                if age_seconds > HEARTBEAT_TIMEOUT_SECONDS:
+                heartbeat_timeout = get_int("HEARTBEAT_TIMEOUT_SECONDS", 30)
+                age_seconds = (now - hb).total_seconds() if hb else heartbeat_timeout + 1
+                if age_seconds > heartbeat_timeout:
                     if agent.status != "offline":
                         add_agent_event(
                             agent.id,
@@ -299,4 +298,4 @@ def failover_maintenance_loop(session_factory: sessionmaker) -> None:
         finally:
             db.close()
 
-        sleep(FAILOVER_INTERVAL_SECONDS)
+        sleep(max(1, get_int("FAILOVER_INTERVAL_SECONDS", 10)))

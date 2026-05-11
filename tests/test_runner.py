@@ -181,6 +181,116 @@ def test_runner_waits_with_sell_orders_until_enough_base(monkeypatch):
     assert waiting_logs == []
 
 
+def test_quote_amount_for_new_buy_order_only_compounds_in_compound_mode(monkeypatch):
+    exchange = _StubExchange([100.0])
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+
+    cfg = _config().model_copy(update={"budget": BudgetConfig(quote_budget=1000.0, base_budget=0.0, profit_mode="withdraw", skim_ratio=0.5)})
+    runner = BotRunner("bot-no-compound", cfg, "http://manager:8000", "agent-1", AgentLogStore())
+    runner.realized_pnl = 250.0
+
+    amount = runner._quote_amount_for_new_order("buy", 0, 90.0)
+
+    assert amount == pytest.approx(100.0)
+
+
+def test_live_compound_updates_existing_open_buy_orders(monkeypatch):
+    class _LiveCompoundExchange(_StubExchange):
+        def __init__(self) -> None:
+            super().__init__([100.0])
+            self._limit_orders = {
+                "order-1": {
+                    "side": "buy",
+                    "quote_amount": 100.0,
+                    "limit_price": 90.0,
+                    "level_index": 0,
+                    "client_reference": "level-0",
+                    "client_order_id": "cid-1",
+                    "exchange_order_id": "ex-1",
+                }
+            }
+            self.updated_orders: list[dict] = []
+
+        def update_limit_order(self, order_id: str, quote_amount: float, limit_price: float) -> bool:
+            self.updated_orders.append(
+                {
+                    "order_id": order_id,
+                    "quote_amount": quote_amount,
+                    "limit_price": limit_price,
+                }
+            )
+            self._limit_orders[order_id]["quote_amount"] = quote_amount
+            self._limit_orders[order_id]["limit_price"] = limit_price
+            return True
+
+    exchange = _LiveCompoundExchange()
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+
+    cfg = _config().model_copy(
+        update={
+            "mode": "live",
+            "budget": BudgetConfig(quote_budget=1000.0, base_budget=0.0, profit_mode="compound", skim_ratio=0.5),
+        }
+    )
+    runner = BotRunner("bot-compound-update", cfg, "http://manager:8000", "agent-1", AgentLogStore())
+    runner.price = 100.0
+    runner.realized_pnl = 200.0
+    runner.state.open_orders = {0: "buy"}
+
+    updated = runner._update_compound_open_buy_orders("test")
+
+    assert updated == 1
+    assert len(exchange.updated_orders) == 1
+    assert exchange.updated_orders[0]["order_id"] == "order-1"
+    assert exchange.updated_orders[0]["quote_amount"] == pytest.approx(120.0)
+
+
+def test_compound_update_not_triggered_on_partial_sell_fill(monkeypatch):
+    class _PartialSellExchange(_StubExchange):
+        def __init__(self) -> None:
+            super().__init__([100.0])
+            self._fills = [
+                {
+                    "order_id": "sell-1",
+                    "side": "sell",
+                    "quote_amount": 10.0,
+                    "fill_price": 100.0,
+                    "level_index": 0,
+                    "fill_count": 1,
+                    "fee_paid_quote": 0.0,
+                    "fee_rate": 0.0,
+                    "order_status": "partiallyFilled",
+                }
+            ]
+
+        def get_filled_orders(self) -> list[dict]:
+            if self._fills:
+                return [self._fills.pop(0)]
+            return []
+
+    exchange = _PartialSellExchange()
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+
+    cfg = _config().model_copy(
+        update={
+            "mode": "live",
+            "budget": BudgetConfig(quote_budget=1000.0, base_budget=0.0, profit_mode="compound", skim_ratio=0.5),
+        }
+    )
+    runner = BotRunner("bot-partial-sell", cfg, "http://manager:8000", "agent-1", AgentLogStore())
+    runner.running = True
+    runner.price = 100.0
+    runner.state.open_orders = {0: "sell"}
+
+    calls: list[str] = []
+    monkeypatch.setattr(BotRunner, "_update_compound_open_buy_orders", lambda self, context="": calls.append(context) or 0)
+    monkeypatch.setattr(BotRunner, "_push_snapshot", lambda self, snapshot: setattr(self, "running", False))
+
+    runner._loop()
+
+    assert calls == []
+
+
 def test_runner_removes_exchange_cancelled_order_before_pending_repost(monkeypatch):
     class _CancelledExchange(_StubExchange):
         def __init__(self) -> None:
@@ -431,3 +541,71 @@ def test_runner_manager_prepare_delete_keeps_runner_on_failure():
         manager.prepare_delete("bot-delete-fail", "delete_open_orders")
 
     assert "bot-delete-fail" in manager.runners
+
+
+def test_prepare_delete_open_orders_live_cancels_buy_and_sell_scoped(monkeypatch):
+    class _DeleteLiveExchange(_StubExchange):
+        def __init__(self):
+            super().__init__([100.0])
+            self.quote_balance = 500.0
+            self.base_balance = 2.0
+            self.calls: list[str] = []
+
+        def cancel_operator_orders(self, side=None):
+            self.calls.append(str(side))
+            if side == "buy":
+                return {"cancelled": 3, "cancelled_sell_base_amount": 0.0}
+            if side == "sell":
+                return {"cancelled": 2, "cancelled_sell_base_amount": 1.25}
+            return {"cancelled": 0, "cancelled_sell_base_amount": 0.0}
+
+    exchange = _DeleteLiveExchange()
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+
+    cfg = _config().model_copy(update={"mode": "live"})
+    runner = BotRunner("bot-delete-live", cfg, "http://manager:8000", "agent-1", AgentLogStore())
+
+    details = runner.prepare_delete("delete_open_orders")
+
+    assert details["mode"] == "delete_open_orders"
+    assert details["cancelled_buy_orders"] == 3
+    assert details["cancelled_sell_orders"] == 2
+    assert exchange.calls == ["buy", "sell"]
+
+
+def test_prepare_delete_transform_to_quote_adds_cancelled_sell_base(monkeypatch):
+    class _DeleteQuoteExchange(_StubExchange):
+        def __init__(self):
+            super().__init__([100.0])
+            self.quote_balance = 500.0
+            self.base_balance = 1.0
+            self.executed: list[dict] = []
+
+        def cancel_operator_orders(self, side=None):
+            if side == "buy":
+                return {"cancelled": 1, "cancelled_sell_base_amount": 0.0}
+            if side == "sell":
+                return {"cancelled": 2, "cancelled_sell_base_amount": 0.5}
+            return {"cancelled": 0, "cancelled_sell_base_amount": 0.0}
+
+        def execute(self, signal, price=None):
+            self.executed.append({"side": signal.side, "quote_amount": signal.quote_amount, "price": price})
+            return True
+
+    exchange = _DeleteQuoteExchange()
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+
+    cfg = _config().model_copy(update={"mode": "live"})
+    runner = BotRunner("bot-delete-quote", cfg, "http://manager:8000", "agent-1", AgentLogStore())
+    runner.price = 100.0
+
+    details = runner.prepare_delete("transform_to_quote")
+
+    assert details["mode"] == "transform_to_quote"
+    assert details["cancelled_buy_orders"] == 1
+    assert details["cancelled_sell_orders"] == 2
+    assert details["cancelled_sell_base_amount"] == pytest.approx(0.5)
+    assert len(exchange.executed) == 1
+    assert exchange.executed[0]["side"] == "sell"
+    # (base_balance + cancelled_sell_base) * price = (1.0 + 0.5) * 100
+    assert exchange.executed[0]["quote_amount"] == pytest.approx(150.0)

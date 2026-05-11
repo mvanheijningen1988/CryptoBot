@@ -855,6 +855,8 @@ class TestEquityHistoryPnl:
 
         assert r.status_code == 200
         assert r.json()["pnl"] == pytest.approx(130.0)
+        assert "series" in r.json()
+        assert isinstance(r.json().get("series"), list)
 
     def test_live_bot_equity_history_uses_reconstructed_metrics(self, client):
         _seed_bot(client, "eq-live-bot")
@@ -973,6 +975,99 @@ class TestEquityHistoryPnl:
             EQUITY_HISTORY.pop("eq-live-backfill", None)
 
         r = client.get("/api/v1/bots/eq-live-backfill/equity-history")
+
+        assert r.status_code == 200
+        assert len(r.json()["points"]) >= 2
+        assert r.json()["points"][0]["v"] == pytest.approx(1000.0)
+        assert r.json()["points"][-1]["v"] == pytest.approx(1000.0)
+
+    def test_live_bot_equity_history_recomputes_realized_from_fills(self, client):
+        _seed_bot(client, "eq-live-recompute")
+        db = _get_db(client)
+        row = db.query(Bot).filter(Bot.id == "eq-live-recompute").first()
+        cfg = json.loads(row.config_json)
+        cfg["mode"] = "live"
+        row.mode = "live"
+        row.config_json = json.dumps(cfg)
+        row.latest_metrics_json = json.dumps({"price": 12.0})
+
+        db.add(TradeEvent(
+            id="eq-live-recompute-buy",
+            bot_id="eq-live-recompute",
+            bot_name=row.name,
+            timestamp=datetime(2026, 1, 1, 10, 0, 0),
+            event_type="order_filled",
+            side="buy",
+            quote_amount=100.0,
+            fill_count=1,
+            fee_paid_quote=0.0,
+            fee_rate=0.0,
+            price=10.0,
+            trade_pnl=0.0,
+            total_equity=0.0,
+            trade_number=1,
+            market="BTC-EUR",
+        ))
+        db.add(TradeEvent(
+            id="eq-live-recompute-sell",
+            bot_id="eq-live-recompute",
+            bot_name=row.name,
+            timestamp=datetime(2026, 1, 1, 10, 1, 0),
+            event_type="order_filled",
+            side="sell",
+            quote_amount=110.0,
+            fill_count=1,
+            fee_paid_quote=0.0,
+            fee_rate=0.0,
+            price=11.0,
+            trade_pnl=110.0,
+            total_equity=0.0,
+            trade_number=2,
+            market="BTC-EUR",
+        ))
+        db.commit()
+
+        r = client.get("/api/v1/bots/eq-live-recompute/equity-history")
+
+        assert r.status_code == 200
+        assert r.json()["pnl"] == pytest.approx(10.0)
+        assert r.json()["total_equity"] == pytest.approx(1010.0)
+
+    def test_live_bot_equity_history_ignores_persisted_equity_snapshots(self, client):
+        _seed_bot(client, "eq-live-persistent-rebuild")
+        db = _get_db(client)
+        row = db.query(Bot).filter(Bot.id == "eq-live-persistent-rebuild").first()
+        cfg = json.loads(row.config_json)
+        cfg["mode"] = "live"
+        row.mode = "live"
+        row.config_json = json.dumps(cfg)
+        row.latest_metrics_json = json.dumps({"price": 10.0})
+
+        db.add(TradeEvent(
+            id="eq-live-persistent-fill",
+            bot_id="eq-live-persistent-rebuild",
+            bot_name=row.name,
+            timestamp=datetime(2026, 1, 1, 10, 5, 0),
+            event_type="order_filled",
+            side="buy",
+            quote_amount=100.0,
+            fill_count=1,
+            fee_paid_quote=0.0,
+            fee_rate=0.0,
+            price=10.0,
+            trade_pnl=0.0,
+            total_equity=9999.0,
+            trade_number=1,
+            market="BTC-EUR",
+        ))
+        db.commit()
+
+        from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
+
+        with EQUITY_HISTORY_LOCK:
+            EQUITY_HISTORY.pop("eq-live-persistent-rebuild", None)
+
+        r = client.get("/api/v1/bots/eq-live-persistent-rebuild/equity-history")
 
         assert r.status_code == 200
         assert len(r.json()["points"]) >= 2
@@ -1191,6 +1286,123 @@ class TestMoveBot:
         assert bot.assigned_agent_id == "move-dst-active"
         assert bot.status == "initializing"
 
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.send_agent_command_ws", return_value=(True, "ok", None))
+    def test_move_active_bot_prefers_websocket(self, mock_ws, mock_post, client):
+        _seed_agent(client, "move-src-ws")
+        _seed_agent(client, "move-dst-ws")
+        _seed_bot(client, "move-ws-bot", agent_id="move-src-ws", status="running")
+
+        r = client.post("/api/v1/bots/move-ws-bot/move", json={"agent_id": "move-dst-ws"})
+
+        assert r.status_code == 200
+        assert mock_ws.call_count == 2
+        mock_post.assert_not_called()
+
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.send_agent_command_ws", return_value=(False, "ws_timeout", None))
+    def test_move_active_bot_ws_timeout_falls_back_http(self, mock_ws, mock_post, client):
+        _seed_agent(client, "move-src-fallback")
+        _seed_agent(client, "move-dst-fallback")
+        _seed_bot(client, "move-fallback-bot", agent_id="move-src-fallback", status="running")
+
+        r = client.post("/api/v1/bots/move-fallback-bot/move", json={"agent_id": "move-dst-fallback"})
+
+        assert r.status_code == 200
+        assert mock_ws.call_count == 2
+        assert mock_post.call_count == 2
+
+
+class TestWsFirstCommandDispatch:
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.send_agent_command_ws", return_value=(True, "started", None))
+    def test_start_bot_prefers_websocket(self, mock_ws, mock_post, client):
+        _seed_agent(client, "start-ws-agent")
+        _seed_bot(client, "start-ws-bot", agent_id="start-ws-agent", status="stopped")
+
+        r = client.post(
+            "/api/v1/bots/start-ws-bot/start",
+            json={"agent_id": "start-ws-agent"},
+        )
+
+        assert r.status_code == 200
+        mock_ws.assert_called_once()
+        mock_post.assert_not_called()
+
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.send_agent_command_ws", return_value=(False, "ws_timeout", None))
+    def test_start_bot_ws_timeout_falls_back_http(self, mock_ws, mock_post, client):
+        _seed_agent(client, "start-http-agent")
+        _seed_bot(client, "start-http-bot", agent_id="start-http-agent", status="stopped")
+
+        r = client.post(
+            "/api/v1/bots/start-http-bot/start",
+            json={"agent_id": "start-http-agent"},
+        )
+
+        assert r.status_code == 200
+        mock_ws.assert_called_once()
+        mock_post.assert_called_once()
+
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.send_agent_command_ws", return_value=(True, "stopped", None))
+    def test_stop_bot_prefers_websocket(self, mock_ws, mock_post, client):
+        _seed_agent(client, "stop-ws-agent")
+        _seed_bot(client, "stop-ws-bot", agent_id="stop-ws-agent", status="running")
+
+        r = client.post("/api/v1/bots/stop-ws-bot/stop")
+
+        assert r.status_code == 200
+        mock_ws.assert_called_once()
+        mock_post.assert_not_called()
+
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.send_agent_command_ws", return_value=(False, "ws_timeout", None))
+    def test_stop_bot_ws_timeout_falls_back_http(self, mock_ws, mock_post, client):
+        _seed_agent(client, "stop-http-agent")
+        _seed_bot(client, "stop-http-bot", agent_id="stop-http-agent", status="running")
+
+        r = client.post("/api/v1/bots/stop-http-bot/stop")
+
+        assert r.status_code == 200
+        mock_ws.assert_called_once()
+        mock_post.assert_called_once()
+
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    @patch(
+        "manager.app.routes.bots.send_agent_command_ws",
+        return_value=(True, "synced", {"details": {"matched_levels": [1, 2]}}),
+    )
+    def test_sync_bot_prefers_websocket_and_returns_details(self, mock_ws, mock_post, client):
+        _seed_agent(client, "sync-ws-agent")
+        _seed_bot(client, "sync-ws-bot", agent_id="sync-ws-agent", status="running")
+
+        r = client.post("/api/v1/bots/sync-ws-bot/sync")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["message"] == "synced"
+        assert body["details"]["details"]["matched_levels"] == [1, 2]
+        mock_ws.assert_called_once()
+        mock_post.assert_not_called()
+
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.send_agent_command_ws", return_value=(False, "ws_timeout", None))
+    def test_sync_bot_ws_timeout_falls_back_http(self, mock_ws, mock_post, client):
+        _seed_agent(client, "sync-http-agent")
+        _seed_bot(client, "sync-http-bot", agent_id="sync-http-agent", status="running")
+
+        r = client.post("/api/v1/bots/sync-http-bot/sync")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["message"] == "ok"
+        assert "details" not in body
+        mock_ws.assert_called_once()
+        mock_post.assert_called_once()
+
 
 class TestUpdateBudget:
     def test_update_budget_stopped_bot(self, client):
@@ -1219,6 +1431,21 @@ class TestUpdateBudget:
         )
         assert r.status_code == 200
         mock_post.assert_called_once()
+
+    @patch("manager.app.routes.bots.post_json", return_value=(True, "ok"))
+    @patch("manager.app.routes.bots.send_agent_command_ws", return_value=(True, "budget_updated", None))
+    def test_update_budget_running_bot_prefers_websocket(self, mock_ws, mock_post, client):
+        _seed_agent(client, "brun-ws-agent")
+        _seed_bot(client, "brun-ws-bot", agent_id="brun-ws-agent", status="running")
+
+        r = client.post(
+            "/api/v1/bots/brun-ws-bot/budget",
+            json={"quote_budget": 3100.0, "base_budget": 1.25},
+        )
+
+        assert r.status_code == 200
+        mock_ws.assert_called_once()
+        mock_post.assert_not_called()
 
 
 class TestOpenOrders:
