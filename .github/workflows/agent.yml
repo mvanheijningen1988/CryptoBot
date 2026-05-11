@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "agent-v*.*.*"
     paths:
       - "agent/**"
       - "common/**"
@@ -56,6 +54,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Read agent version from pyproject.toml
+        id: version
+        run: |
+          VERSION=$(python3 - <<'PY'
+          import tomllib
+
+          with open("agent/pyproject.toml", "rb") as f:
+              data = tomllib.load(f)
+          print(data["project"]["version"])
+          PY
+          )
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -63,8 +74,8 @@ jobs:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/cryptobot-agent
           tags: |
             type=sha,prefix=sha-,enable=${{ github.ref == 'refs/heads/main' }}
-            type=match,pattern=agent-v(.*),group=1
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/agent-v') }}
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push image
         uses: docker/build-push-action@v6
