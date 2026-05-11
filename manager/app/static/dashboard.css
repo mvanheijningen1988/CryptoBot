@@ -565,6 +565,15 @@ button.danger { background: #dc2626; }
   max-width: min(260px, 90vw);
 }
 
+.bot-market-tooltip {
+  max-width: min(300px, 92vw);
+}
+
+.bot-market-cell {
+  cursor: help;
+  border-bottom: 1px dotted rgba(148, 163, 184, 0.6);
+}
+
 .tip-popup.fee-popup {
   background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
   border-color: #2563eb;

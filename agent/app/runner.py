@@ -179,6 +179,7 @@ class BotRunner:
         runtime_seconds = 0
         if self.started_at is not None:
             runtime_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
+        market_summary = self.exchange.get_market_summary() if hasattr(self.exchange, "get_market_summary") else {}
         return BotSnapshot(
             bot_id=self.bot_id,
             runtime_seconds=runtime_seconds,
@@ -190,6 +191,10 @@ class BotRunner:
             total_equity_quote=total_equity,
             realized_pnl_quote=self.realized_pnl,
             unrealized_pnl_quote=total_equity - self.initial_equity,
+            market_last_price=float(market_summary.get("last_price", self.price) or 0.0),
+            market_open_24h=float(market_summary.get("open_24h", 0.0) or 0.0),
+            market_change_24h_pct=float(market_summary.get("change_24h_pct", 0.0) or 0.0),
+            market_volume_24h_quote=float(market_summary.get("volume_24h_quote", 0.0) or 0.0),
             skimmed_quote=self.skimmed_quote,
             trade_count=self.trade_count,
             status=status,

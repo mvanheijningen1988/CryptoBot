@@ -75,6 +75,9 @@ class BitvavoExchange(Exchange):
         self.lock = threading.Lock()
 
         self.latest_price: float | None = None
+        self.latest_open_24h: float = 0.0
+        self.latest_change_24h_pct: float = 0.0
+        self.latest_volume_24h_quote: float = 0.0
         self.quote_balance: float = 0.0
         self.base_balance: float = 0.0
 
@@ -177,11 +180,44 @@ class BitvavoExchange(Exchange):
                 "action": "subscribe",
                 "channels": [
                     {"name": "ticker", "markets": [self.market]},
+                    {"name": "ticker24h", "markets": [self.market]},
                     {"name": "account", "markets": [self.market]},
                 ],
             }
         )
         self.authenticated = True
+
+    def _update_market_summary_from_message(self, message: dict[str, Any]) -> None:
+        """Update cached 24h market summary from incoming websocket message fields."""
+        if not isinstance(message, dict):
+            return
+
+        open_price_raw = message.get("open")
+        if open_price_raw is not None:
+            self.latest_open_24h = self._to_float(open_price_raw)
+
+        volume_quote_raw = message.get("volumeQuote")
+        if volume_quote_raw is not None:
+            self.latest_volume_24h_quote = self._to_float(volume_quote_raw)
+
+        if self.latest_open_24h > 0 and self.latest_price is not None:
+            self.latest_change_24h_pct = ((self.latest_price - self.latest_open_24h) / self.latest_open_24h) * 100.0
+
+    def get_market_summary(self) -> dict[str, float]:
+        """Return latest ticker summary known by the live websocket session."""
+        last_price = float(self.latest_price or 0.0)
+        open_24h = float(self.latest_open_24h or 0.0)
+        change_24h_pct = (
+            ((last_price - open_24h) / open_24h) * 100.0
+            if open_24h > 0 and last_price > 0
+            else float(self.latest_change_24h_pct or 0.0)
+        )
+        return {
+            "last_price": last_price,
+            "open_24h": open_24h,
+            "change_24h_pct": change_24h_pct,
+            "volume_24h_quote": float(self.latest_volume_24h_quote or 0.0),
+        }
 
     def _reconnect_transport(self, reason: str) -> None:
         """Rebuild websocket transport and re-authenticate after transient errors."""
@@ -962,6 +998,7 @@ class BitvavoExchange(Exchange):
                 self.latest_price = price
                 self.price_update_event.set()
                 self._market_activity_event.set()
+            self._update_market_summary_from_message(message)
             return
 
         # Order fill events from the account channel
@@ -981,6 +1018,7 @@ class BitvavoExchange(Exchange):
                 self.latest_price = price
                 self.price_update_event.set()
                 self._market_activity_event.set()
+            self._update_market_summary_from_message(message)
 
     def _reader_loop(self) -> None:
         """Background loop that reads from the websocket until stopped."""

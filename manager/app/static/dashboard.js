@@ -128,6 +128,8 @@ let marketSummaryRefreshTimer = null;
 
 /** Latest aggregated market snapshot used by renderMarketSummary(). */
 let marketSnapshot = null;
+const botMarketSummaryCache = new Map();
+let botMarketTooltipEl = null;
 
 /** Metadata map (market → {base, quote, status}) loaded from /api/markets. */
 const marketMeta = new Map();
@@ -988,6 +990,204 @@ function renderMarketSummary(summary) {
   volQuoteEl.textContent = formatNumber(volumeQuote, 0);
 }
 
+function ensureBotMarketTooltip() {
+  if (botMarketTooltipEl) return botMarketTooltipEl;
+  const tip = document.createElement("div");
+  tip.id = "bot_market_tooltip";
+  tip.className = "tip-popup info-popup bot-market-tooltip";
+  tip.style.display = "none";
+  document.body.appendChild(tip);
+  botMarketTooltipEl = tip;
+  return tip;
+}
+
+function hideBotMarketTooltip() {
+  const tip = botMarketTooltipEl || document.getElementById("bot_market_tooltip");
+  if (tip) tip.style.display = "none";
+}
+
+function positionBotMarketTooltip(anchorRect) {
+  const tip = ensureBotMarketTooltip();
+  const margin = 10;
+  const rect = tip.getBoundingClientRect();
+  let left = anchorRect.left;
+  let top = anchorRect.bottom + 8;
+
+  if (left + rect.width > globalThis.innerWidth - margin) {
+    left = Math.max(margin, globalThis.innerWidth - rect.width - margin);
+  }
+  if (top + rect.height > globalThis.innerHeight - margin) {
+    top = Math.max(margin, anchorRect.top - rect.height - 8);
+  }
+
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+}
+
+function renderBotMarketTooltip(target, market, summary, errorText = "") {
+  const tip = ensureBotMarketTooltip();
+  if (!target || !market) {
+    hideBotMarketTooltip();
+    return;
+  }
+
+  const marketName = String(market || "-");
+  const title = marketName;
+  if (!summary) {
+    tip.innerHTML = `
+      <div class="tip-title">${title}</div>
+      <div class="tip-body">
+        <div class="tip-row">${errorText || t("loading")}</div>
+      </div>
+    `;
+    tip.style.display = "block";
+    positionBotMarketTooltip(target.getBoundingClientRect());
+    return;
+  }
+
+  const last = Number(summary.last_price ?? summary.last ?? 0);
+  const open = Number(summary.open_24h ?? summary.open ?? 0);
+  const volumeQuote = Number(summary.volume_24h_quote ?? summary.volumeQuote ?? 0);
+  const suppliedDiffPct = Number(summary.change_24h_pct ?? 0);
+  const diffAbs = open > 0 ? last - open : 0;
+  const diffPct = open > 0 ? (diffAbs / open) * 100 : suppliedDiffPct;
+
+  tip.innerHTML = `
+    <div class="tip-title">${title}</div>
+    <div class="tip-body">
+      <div class="tip-row">${t("lbl_last_price")}: ${formatNumber(last)}</div>
+      <div class="tip-row ${diffAbs >= 0 ? "market-positive" : "market-negative"}">${t("th_24h_change")}: ${formatSignedNumber(diffAbs, 6)} (${formatSignedNumber(diffPct, 2)}%)</div>
+      <div class="tip-row">${t("lbl_24h_vol_quote")}: ${formatNumber(volumeQuote, 0)}</div>
+    </div>
+  `;
+  tip.style.display = "block";
+  positionBotMarketTooltip(target.getBoundingClientRect());
+}
+
+function getBotSummaryFromCell(target) {
+  if (!(target instanceof Element)) return null;
+  const dataset = target.dataset || {};
+  const last = Number(dataset.lastPrice || 0);
+  const open = Number(dataset.open24h || 0);
+  const changePct = Number(dataset.change24hPct || 0);
+  const volumeQuote = Number(dataset.volume24hQuote || 0);
+  if (last <= 0 && open <= 0 && Math.abs(changePct) <= 0 && volumeQuote <= 0) {
+    return null;
+  }
+  return {
+    last_price: last,
+    open_24h: open,
+    change_24h_pct: changePct,
+    volume_24h_quote: volumeQuote,
+  };
+}
+
+function enrichMarketCell(cellEl, market, metrics) {
+  if (!(cellEl instanceof Element)) return;
+  const safeMarket = String(market || "-");
+  const m = metrics || {};
+  const last = Number(m.market_last_price ?? m.price ?? 0);
+  const open = Number(m.market_open_24h ?? 0);
+  const changePct = Number(m.market_change_24h_pct ?? 0);
+  const volumeQuote = Number(m.market_volume_24h_quote ?? 0);
+  if (safeMarket.includes("-")) {
+    cellEl.dataset.market = safeMarket;
+  } else {
+    delete cellEl.dataset.market;
+  }
+  cellEl.dataset.lastPrice = String(Number.isFinite(last) ? last : 0);
+  cellEl.dataset.open24h = String(Number.isFinite(open) ? open : 0);
+  cellEl.dataset.change24hPct = String(Number.isFinite(changePct) ? changePct : 0);
+  cellEl.dataset.volume24hQuote = String(Number.isFinite(volumeQuote) ? volumeQuote : 0);
+
+  const cacheKey = safeMarket.trim().toUpperCase();
+  if (cacheKey && cacheKey.includes("-") && (last > 0 || open > 0 || volumeQuote > 0 || Math.abs(changePct) > 0)) {
+    botMarketSummaryCache.set(cacheKey, {
+      data: {
+        last_price: last,
+        open_24h: open,
+        change_24h_pct: changePct,
+        volume_24h_quote: volumeQuote,
+      },
+      ts: Date.now(),
+      promise: null,
+    });
+  }
+}
+
+async function getBotMarketSummary(market) {
+  const key = String(market || "").trim().toUpperCase();
+  if (!key) return null;
+
+  const now = Date.now();
+  const cached = botMarketSummaryCache.get(key);
+  if (cached && cached.data && now - Number(cached.ts || 0) < 15000) {
+    return cached.data;
+  }
+  if (cached && cached.promise) {
+    return cached.promise;
+  }
+
+  const pending = api(`/api/v1/market/summary?market=${encodeURIComponent(key)}`)
+    .then((data) => {
+      botMarketSummaryCache.set(key, { data, ts: Date.now(), promise: null });
+      return data;
+    })
+    .catch((err) => {
+      botMarketSummaryCache.set(key, { data: null, ts: 0, promise: null });
+      throw err;
+    });
+
+  botMarketSummaryCache.set(key, { data: cached?.data || null, ts: Number(cached?.ts || 0), promise: pending });
+  return pending;
+}
+
+function wireBotMarketTooltips() {
+  const body = document.getElementById("bots_body");
+  if (!body || body.dataset.marketTooltipBound === "1") return;
+  body.dataset.marketTooltipBound = "1";
+
+  body.addEventListener("mouseover", async (event) => {
+    const target = event.target instanceof Element ? event.target.closest(".bot-market-cell[data-market]") : null;
+    if (!target) return;
+    const market = String(target.dataset.market || "").trim().toUpperCase();
+    if (!market) return;
+
+    const rowSummary = getBotSummaryFromCell(target);
+    if (rowSummary) {
+      renderBotMarketTooltip(target, market, rowSummary);
+      return;
+    }
+
+    renderBotMarketTooltip(target, market, null, t("loading"));
+    try {
+      const summary = await getBotMarketSummary(market);
+      if (!target.isConnected) return;
+      renderBotMarketTooltip(target, market, summary);
+    } catch {
+      if (!target.isConnected) return;
+      renderBotMarketTooltip(target, market, null, t("lbl_fee_info_unavailable"));
+    }
+  });
+
+  body.addEventListener("mousemove", (event) => {
+    const target = event.target instanceof Element ? event.target.closest(".bot-market-cell[data-market]") : null;
+    if (!target || !botMarketTooltipEl || botMarketTooltipEl.style.display === "none") return;
+    positionBotMarketTooltip(target.getBoundingClientRect());
+  });
+
+  body.addEventListener("mouseout", (event) => {
+    const from = event.target instanceof Element ? event.target.closest(".bot-market-cell[data-market]") : null;
+    if (!from) return;
+    const to = event.relatedTarget instanceof Element ? event.relatedTarget.closest(".bot-market-cell[data-market]") : null;
+    if (to === from) return;
+    hideBotMarketTooltip();
+  });
+
+  document.addEventListener("scroll", hideBotMarketTooltip, true);
+  window.addEventListener("resize", hideBotMarketTooltip);
+}
+
 /**
  * Reset all four market-stat elements to "N/A" and remove colour classes.
  */
@@ -1507,6 +1707,7 @@ function openBotDetailModal(bot) {
  * Start/Stop buttons are hidden for viewer-role users.
  */
 async function loadBots() {
+  wireBotMarketTooltips();
   const bots = await api("/api/v1/bots");
   latestBots = Array.isArray(bots) ? bots : [];
   const body = document.getElementById("bots_body");
@@ -1559,7 +1760,9 @@ async function loadBots() {
       // Update existing row cells in-place (skip actions column to preserve dropdown state)
       const cells = tr.children;
       cells[0].innerHTML = nameHtml;
-      cells[1].textContent = market;
+      const safeMarket = String(market || "-");
+      cells[1].innerHTML = `<span class="bot-market-cell">${safeMarket}</span>`;
+      enrichMarketCell(cells[1].querySelector(".bot-market-cell"), safeMarket, m);
       cells[2].innerHTML = statusHtml;
       cells[3].textContent = runtime;
       // cells[4] is the actions dropdown — leave it untouched
@@ -1570,7 +1773,9 @@ async function loadBots() {
       const acts = isViewer
         ? "<td>-</td>"
         : `<td><div class="action-dropdown" data-bot-id="${bot.id}"><button class="action-toggle">${t("btn_actions")} ▾</button><div class="action-menu"><button data-action="start">${t("btn_start")}</button><button data-action="stop">${t("btn_stop")}</button><button data-action="sync">${t("btn_sync_exchange")}</button><button data-action="chart">${t("btn_chart")}</button><button data-action="orders">${t("btn_orders")}</button><button data-action="bot_logs">${t("btn_bot_log")}</button><button data-action="delete" class="danger">${t("btn_delete")}</button></div></div></td>`;
-      tr.innerHTML = `<td>${nameHtml}</td><td>${market}</td><td>${statusHtml}</td><td>${runtime}</td>${acts}`;
+      const safeMarket = String(market || "-");
+      tr.innerHTML = `<td>${nameHtml}</td><td><span class="bot-market-cell">${safeMarket}</span></td><td>${statusHtml}</td><td>${runtime}</td>${acts}`;
+      enrichMarketCell(tr.querySelector(".bot-market-cell"), safeMarket, m);
       body.appendChild(tr);
       _wireUpBotRow(tr);
     }

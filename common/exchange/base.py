@@ -50,6 +50,15 @@ class Exchange(ABC):
         """Return ``(quote_balance, base_balance)``."""
         raise NotImplementedError
 
+    def get_market_summary(self) -> dict[str, float]:
+        """Return market summary fields (last/open/change/volume) when available."""
+        return {
+            "last_price": 0.0,
+            "open_24h": 0.0,
+            "change_24h_pct": 0.0,
+            "volume_24h_quote": 0.0,
+        }
+
     @abstractmethod
     def execute(self, signal: TradeSignal, price: float | None = None) -> bool:
         """
