@@ -87,13 +87,20 @@ def send_agent_command_ws(
         },
     }
 
+    send_coro = session.websocket.send_text(json.dumps(wire_message, separators=(",", ":")))
     try:
         future = asyncio.run_coroutine_threadsafe(
-            session.websocket.send_text(json.dumps(wire_message, separators=(",", ":"))),
+            send_coro,
             session.loop,
         )
         future.result(timeout=min(max(timeout_seconds / 2.0, 0.5), 3.0))
     except Exception as exc:
+        # If scheduling fails before the loop takes ownership, close the coroutine
+        # to avoid RuntimeWarning: coroutine was never awaited.
+        try:
+            send_coro.close()
+        except Exception:
+            pass
         with session.lock:
             session.pending.pop(message_id, None)
         return False, f"ws_send_failed: {exc}", None

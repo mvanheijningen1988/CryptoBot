@@ -1840,7 +1840,10 @@ def get_equity_history(bot_id: str, db: DbSession, aggregation: str = "1m") -> d
     }
 
 
-def _build_total_equity_series_entry(bot: Bot, db: Session, agg: str) -> tuple[dict | None, float, float, float]:
+def _build_total_equity_series_entry(bot: Bot | None, db: Session, agg: str) -> tuple[dict | None, float, float, float]:
+    if bot is None:
+        return None, 0.0, 0.0, 0.0
+
     config = json.loads(bot.config_json or "{}")
     budget = config.get("budget", {})
     starting_budget = float(budget.get("quote_budget", 0) or 0.0)
@@ -1902,6 +1905,8 @@ def get_total_equity_history(db: DbSession, aggregation: str = "1m") -> dict:
     series: list[dict] = []
 
     for bot in bots:
+        if bot is None:
+            continue
         entry, starting_budget, bot_total_equity, bot_pnl = _build_total_equity_series_entry(bot, db, agg)
         total_starting_budget += starting_budget
         total_equity += bot_total_equity
