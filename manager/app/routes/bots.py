@@ -1601,6 +1601,7 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
                 level_index=ev.get("level_index"),
                 market=market,
                 order_id=ev.get("order_id"),
+                exchange_order_id=ev.get("exchange_order_id"),
             )
             if ev.get("side") == "sell":
                 matched_buy_base = float(ev.get("matched_buy_base", 0.0) or 0.0)
@@ -1665,6 +1666,7 @@ def get_single_trade_event(event_id: str) -> dict:
             "market": ev.market or "",
             "event_type": ev.event_type,
             "order_id": ev.order_id,
+            "exchange_order_id": ev.exchange_order_id,
             "side": ev.side,
             "quote_amount": ev.quote_amount,
             "fill_count": ev.fill_count,
@@ -1685,6 +1687,7 @@ def get_single_trade_event(event_id: str) -> dict:
                 result["linked_order"] = {
                     "id": linked.id,
                     "order_id": linked.order_id,
+                    "exchange_order_id": linked.exchange_order_id,
                     "timestamp": linked.timestamp.isoformat() + "Z" if linked.timestamp else "",
                     "event_type": linked.event_type,
                     "side": linked.side,

@@ -424,6 +424,7 @@ class BitvavoExchange(Exchange):
 
         return {
             "order_id": order_id,
+            "exchange_order_id": str(order_state.get("orderId", "") or order_info.get("exchange_order_id", "")),
             "side": order_info["side"],
             "quote_amount": quote_amount,
             "fill_price": fill_price,
@@ -1326,6 +1327,187 @@ class BitvavoExchange(Exchange):
 
         return matched_levels
 
+    def force_authoritative_grid_sync(
+        self,
+        level_prices: list[float],
+        quote_amount: float,
+    ) -> dict[str, Any]:
+        """Force one bot-scoped authoritative sync from exchange state.
+
+        This method treats Bitvavo as source of truth for the current bot
+        (scoped by ``operatorId``). It rebuilds local open-order tracking from
+        exchange open orders and returns any recovered terminal fills from
+        previously tracked local orders.
+        """
+        if not self.authenticated:
+            raise RuntimeError(self._not_authenticated_error)
+
+        recovered_fills: list[dict[str, Any]] = []
+
+        # First, resolve local tracked orders that may have become terminal.
+        for order_id in tuple(self._limit_orders):
+            try:
+                fill = self._sync_tracked_order(order_id)
+            except Exception:
+                continue
+            if fill is not None:
+                recovered_fills.append(fill)
+
+        items = self._get_open_orders()
+        open_by_client_order_id = self._index_open_orders_by_client_order_id(items)
+        by_side_price = self._index_open_orders_by_side_price(items)
+        used_exchange_ids: set[str] = set()
+
+        # Rebuild local tracking from exchange open-order truth.
+        self._limit_orders.clear()
+        self._exchange_order_map.clear()
+        self._last_sync_matches = []
+
+        authoritative_open_orders: dict[int, str] = {}
+
+        for level_index, level_price in enumerate(level_prices):
+            expected_reference = self._grid_level_reference(level_index)
+            expected_client_order_id = self._client_order_id(f"sync-{level_index}", expected_reference)
+
+            matched = open_by_client_order_id.get(expected_client_order_id)
+            match_method = "client_reference"
+
+            if matched is not None:
+                exchange_oid = str(matched.get("orderId", "") or "")
+                if exchange_oid:
+                    used_exchange_ids.add(exchange_oid)
+                planned_side = str(matched.get("side", "") or "").lower()
+            else:
+                match_method = "price_fallback"
+                buy_candidates = by_side_price.get(("buy", self._price_key(level_price)), [])
+                sell_candidates = by_side_price.get(("sell", self._price_key(level_price)), [])
+
+                matched_buy = self._take_first_unused(buy_candidates, used_exchange_ids)
+                matched_sell = self._take_first_unused(sell_candidates, used_exchange_ids)
+
+                if matched_buy is None and matched_sell is None:
+                    continue
+                if matched_buy is None:
+                    matched = matched_sell
+                    planned_side = "sell"
+                elif matched_sell is None:
+                    matched = matched_buy
+                    planned_side = "buy"
+                else:
+                    # Ambiguous double-open level; choose one deterministically.
+                    buy_oid = str(matched_buy.get("orderId", "") or "")
+                    sell_oid = str(matched_sell.get("orderId", "") or "")
+                    if buy_oid >= sell_oid:
+                        matched = matched_buy
+                        planned_side = "buy"
+                    else:
+                        matched = matched_sell
+                        planned_side = "sell"
+
+                if matched is None:
+                    continue
+
+            self._track_existing_level_order(
+                matched=matched,
+                level_index=level_index,
+                planned_side=planned_side,
+                limit_price=level_price,
+                quote_amount=quote_amount,
+            )
+            authoritative_open_orders[level_index] = planned_side
+            self._last_sync_matches.append(
+                {
+                    "level_index": level_index,
+                    "match_method": match_method,
+                    "client_reference": expected_reference,
+                    "client_order_id": str(matched.get("clientOrderId", "") or expected_client_order_id),
+                    "exchange_order_id": str(matched.get("orderId", "") or ""),
+                    "side": planned_side,
+                    "price": self._to_float(matched.get("price")) or level_price,
+                }
+            )
+
+        historical_fills = self._collect_historical_fills_for_levels(
+            level_prices=level_prices,
+            quote_amount=quote_amount,
+        )
+        if historical_fills:
+            recovered_fills.extend(historical_fills)
+
+        return {
+            "open_orders": authoritative_open_orders,
+            "fills": recovered_fills,
+            "synced_levels": sorted(authoritative_open_orders.keys()),
+            "matches": self.get_last_open_order_sync_matches(),
+        }
+
+    def _get_recent_orders(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Fetch recent orders for the current market (open and closed)."""
+        body = {"market": self.market, "limit": int(max(1, min(limit, 500)))}
+        response = self._call_action("privateGetOrders", body, timeout=10.0)
+        if response.get("errorCode") is not None:
+            return []
+        items = response.get("response") if isinstance(response.get("response"), list) else response.get("orders")
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)]
+
+    def _infer_level_index_from_order_state(self, order_state: dict[str, Any], level_prices: list[float]) -> int | None:
+        """Infer grid level index from clientOrderId first, then side+price fallback."""
+        client_order_id = str(order_state.get("clientOrderId", "") or "")
+        if client_order_id:
+            for level_index in range(len(level_prices)):
+                expected_reference = self._grid_level_reference(level_index)
+                expected_client_order_id = self._client_order_id(f"sync-{level_index}", expected_reference)
+                if client_order_id == expected_client_order_id:
+                    return level_index
+
+        price_key = self._price_key(self._to_float(order_state.get("price")))
+        if not price_key:
+            return None
+        side = str(order_state.get("side", "") or "").lower()
+        if side not in {"buy", "sell"}:
+            return None
+        for level_index, level_price in enumerate(level_prices):
+            if self._price_key(level_price) == price_key:
+                return level_index
+        return None
+
+    def _collect_historical_fills_for_levels(self, level_prices: list[float], quote_amount: float) -> list[dict[str, Any]]:
+        """Collect missing filled orders for this bot from recent exchange history."""
+        fills: list[dict[str, Any]] = []
+        for order_state in self._get_recent_orders(limit=200):
+            if not self._operator_matches(order_state):
+                continue
+
+            status = str(order_state.get("status", "") or "")
+            if status != "filled":
+                continue
+
+            exchange_order_id = str(order_state.get("orderId", "") or "")
+            if exchange_order_id and exchange_order_id in self._processed_exchange_order_ids:
+                continue
+
+            level_index = self._infer_level_index_from_order_state(order_state, level_prices)
+            if level_index is None:
+                continue
+
+            side = str(order_state.get("side", "") or "").lower()
+            if side not in {"buy", "sell"}:
+                continue
+
+            order_info = {
+                "side": side,
+                "quote_amount": self._to_float(order_state.get("filledAmountQuote")) or quote_amount,
+                "limit_price": self._to_float(order_state.get("price")) or level_prices[level_index],
+                "level_index": level_index,
+            }
+            logical_id = exchange_order_id or str(order_state.get("clientOrderId", "") or f"history-{level_index}")
+            fill = self._build_fill_from_order_status(f"history-{logical_id}", order_info, order_state)
+            fills.append(fill)
+            self._mark_exchange_order_processed(exchange_order_id)
+        return fills
+
     def discover_open_orders_for_levels(self, level_prices: list[float]) -> dict[int, str]:
         """Return current exchange open orders mapped to grid levels.
 
@@ -1357,6 +1539,74 @@ class BitvavoExchange(Exchange):
             # leave unresolved and let existing restore state handle it.
 
         return discovered
+
+    def list_open_grid_orders(self, level_prices: list[float], quote_amount: float) -> list[dict[str, Any]]:
+        """Return authoritative open grid orders for this bot/operator.
+
+        Each returned row includes IDs so UI details can show both local/client
+        and exchange order identifiers.
+        """
+        try:
+            items = self._get_open_orders()
+        except Exception:
+            return []
+
+        orders: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if not self._operator_matches(item):
+                continue
+
+            status = str(item.get("status", "") or "")
+            if status and not self._is_open_order_status(status):
+                continue
+
+            side = str(item.get("side", "") or "").lower()
+            if side not in {"buy", "sell"}:
+                continue
+
+            level_index = self._infer_level_index_from_order_state(item, level_prices)
+            if level_index is None:
+                continue
+
+            price = self._to_float(item.get("price"))
+            if price <= 0 and 0 <= level_index < len(level_prices):
+                price = float(level_prices[level_index])
+
+            filled_quote = self._to_float(item.get("filledAmountQuote"))
+            total_quote = self._to_float(item.get("amountQuote"))
+            if total_quote <= 0:
+                amount_base = self._to_float(item.get("amount"))
+                if amount_base > 0 and price > 0:
+                    total_quote = amount_base * price
+            if total_quote <= 0:
+                total_quote = float(quote_amount)
+
+            remaining_quote = max(0.0, total_quote - max(0.0, filled_quote))
+            if remaining_quote <= 0:
+                remaining_quote = float(quote_amount)
+
+            exchange_order_id = str(item.get("orderId", "") or "")
+            client_order_id = str(item.get("clientOrderId", "") or "")
+            local_order_id = client_order_id or exchange_order_id or f"open-{level_index}-{side}"
+
+            orders.append(
+                {
+                    "level": int(level_index),
+                    "price": round(float(price), 6),
+                    "side": side,
+                    "quote_amount": round(float(remaining_quote), 6),
+                    "filled_quote": round(float(filled_quote), 6),
+                    "order_id": local_order_id,
+                    "client_order_id": client_order_id,
+                    "exchange_order_id": exchange_order_id,
+                    "market": self.market,
+                }
+            )
+
+        orders.sort(key=lambda item: (int(item.get("level", 0)), str(item.get("side", ""))))
+        return orders
 
     def cancel_all_orders(self) -> None:
         """Cancel all pending limit orders on Bitvavo."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import requests
 
 from common import BotConfig, BudgetConfig, GridConfig
 from agent.app.runner import AgentLogStore, BotRunner, RunnerManager
@@ -286,6 +287,122 @@ def test_live_snapshot_includes_reserved_open_order_value(monkeypatch):
 
     assert snapshot.total_equity_quote == pytest.approx(57.0)
     assert snapshot.unrealized_pnl_quote == pytest.approx(0.0)
+
+
+def test_push_snapshot_clears_pending_trade_events_on_success(monkeypatch):
+    class _OkResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    exchange = _StubExchange([100.0])
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+    monkeypatch.setattr("agent.app.runner.requests.post", lambda *args, **kwargs: _OkResponse())
+
+    runner = BotRunner("bot-push-ok", _config(), "http://manager:8000", "agent-1", AgentLogStore())
+    runner.price = 100.0
+    runner._pending_trade_events = [
+        {
+            "event_type": "order_filled",
+            "order_id": "ord-1",
+            "side": "buy",
+            "quote_amount": 10.0,
+            "price": 100.0,
+            "level_index": 1,
+            "trade_pnl": 0.0,
+            "total_equity": 1000.0,
+            "trade_number": 1,
+        }
+    ]
+
+    runner._push_snapshot(runner._build_snapshot("running"))
+
+    assert runner._pending_trade_events == []
+
+
+def test_push_snapshot_requeues_trade_events_on_http_error(monkeypatch):
+    class _FailResponse:
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError("HTTP 500")
+
+    exchange = _StubExchange([100.0])
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+    monkeypatch.setattr("agent.app.runner.requests.post", lambda *args, **kwargs: _FailResponse())
+
+    runner = BotRunner("bot-push-fail", _config(), "http://manager:8000", "agent-1", AgentLogStore())
+    runner.price = 100.0
+    event = {
+        "event_type": "order_filled",
+        "order_id": "ord-2",
+        "side": "sell",
+        "quote_amount": 11.0,
+        "price": 101.0,
+        "level_index": 2,
+        "trade_pnl": 0.1,
+        "total_equity": 1000.1,
+        "trade_number": 2,
+    }
+    runner._pending_trade_events = [event]
+
+    runner._push_snapshot(runner._build_snapshot("running"))
+
+    assert runner._pending_trade_events == [event]
+
+
+def test_sync_with_exchange_uses_bot_authoritative_state_and_recovered_fills(monkeypatch):
+    class _FakeLiveExchange:
+        def __init__(self):
+            self.quote_balance = 500.0
+            self.base_balance = 2.5
+
+        def ensure_authenticated(self) -> None:
+            return None
+
+        def force_authoritative_grid_sync(self, level_prices, quote_amount):  # noqa: ARG002
+            return {
+                "open_orders": {0: "buy", 4: "sell"},
+                "fills": [
+                    {
+                        "order_id": "hist-1",
+                        "side": "sell",
+                        "quote_amount": 9.5,
+                        "fill_price": 101.0,
+                        "base_amount": 0.094059,
+                        "level_index": 4,
+                        "fill_count": 1,
+                        "fee_paid_quote": 0.01,
+                        "fee_rate": 0.001,
+                    }
+                ],
+                "synced_levels": [0, 4],
+            }
+
+        def get_balances(self):
+            return self.quote_balance, self.base_balance
+
+        def has_tracked_level_order(self, level_index: int, side: str, limit_price: float) -> bool:  # noqa: ARG002
+            return True
+
+    config = _config().model_copy(update={"mode": "live"})
+    exchange = _FakeLiveExchange()
+
+    monkeypatch.setattr("agent.app.runner.BitvavoExchange", _FakeLiveExchange)
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, cfg: exchange)
+    monkeypatch.setattr(BotRunner, "_push_snapshot", lambda self, snapshot: None)
+
+    runner = BotRunner("bot-authoritative-sync", config, "http://manager:8000", "agent-1", AgentLogStore())
+    runner.running = True
+    runner.state.open_orders = {1: "buy"}
+    runner.trade_count = 7
+
+    details = runner.sync_with_exchange()
+
+    assert runner.state.open_orders == {0: "buy", 4: "sell"}
+    assert details["synced_levels"] == [0, 4]
+    assert details["recovered_fills"] == 1
+    assert runner.trade_count == 8
+    assert len(runner._pending_trade_events) == 1
+    assert runner._pending_trade_events[0]["event_type"] == "order_filled"
+    assert runner._pending_trade_events[0]["order_id"] == "hist-1"
 
 
 def test_runner_manager_prepare_delete_removes_runner_on_success():

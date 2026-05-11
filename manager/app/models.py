@@ -63,6 +63,7 @@ class TradeEvent(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     order_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     bot_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     bot_name: Mapped[str] = mapped_column(String(128), nullable=False)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))

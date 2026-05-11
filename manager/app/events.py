@@ -107,6 +107,13 @@ def _is_valid_link_pair(source: TradeEvent, candidate: TradeEvent | None) -> boo
 
 def _find_link_candidate(db: Session, bot_id: str, row: TradeEvent) -> TradeEvent | None:
     """Find the best opposite-side link candidate for one trade event."""
+    def _as_utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
     side = str(row.side or "").lower()
     event_type = str(row.event_type or "").lower()
     level_index = row.level_index
@@ -137,7 +144,9 @@ def _find_link_candidate(db: Session, bot_id: str, row: TradeEvent) -> TradeEven
         .all()
     )
     for candidate in candidates:
-        if side == "sell" and candidate.timestamp and row.timestamp and candidate.timestamp > row.timestamp:
+        candidate_ts = _as_utc(candidate.timestamp)
+        row_ts = _as_utc(row.timestamp)
+        if side == "sell" and candidate_ts and row_ts and candidate_ts > row_ts:
             continue
         if candidate.linked_order_id not in {None, row.id} and _is_valid_link_pair(candidate, db.query(TradeEvent).filter(TradeEvent.id == candidate.linked_order_id).first()):
             continue
@@ -152,6 +161,7 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
                     level_index: int | None = None,
                     market: str = "",
                     order_id: str | None = None,
+                    exchange_order_id: str | None = None,
                     fill_count: int = 0,
                     fee_paid_quote: float = 0.0,
                     fee_rate: float = 0.0) -> str:
@@ -202,6 +212,8 @@ def add_trade_event(bot_id: str, bot_name: str, side: str, quote_amount: float,
             event_id = row.id
 
         row.order_id = order_id
+        if exchange_order_id:
+            row.exchange_order_id = exchange_order_id
         row.bot_name = bot_name
         row.timestamp = datetime.now(UTC)
         row.event_type = event_type
@@ -269,6 +281,7 @@ def get_trade_events(bot_id: str | None = None, limit: int = 200) -> list[dict]:
             {
                 "id": r.id,
                 "order_id": r.order_id,
+                "exchange_order_id": r.exchange_order_id,
                 "timestamp": r.timestamp.isoformat() + "Z" if r.timestamp else "",
                 "bot_id": r.bot_id,
                 "bot_name": r.bot_name,

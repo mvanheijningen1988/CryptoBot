@@ -138,3 +138,33 @@ def test_order_filled_updates_existing_order_row_by_order_id(db_engine, monkeypa
         assert row.trade_pnl == 1.23
     finally:
         session.close()
+
+
+def test_trade_event_persists_exchange_order_id(db_engine, monkeypatch):
+    test_session = sessionmaker(bind=db_engine)
+    monkeypatch.setattr("manager.app.events.SessionLocal", test_session)
+
+    event_id = add_trade_event(
+        bot_id="bot-4",
+        bot_name="Bot 4",
+        side="sell",
+        quote_amount=50.0,
+        price=2.0,
+        trade_pnl=0.5,
+        total_equity=1002.0,
+        trade_number=9,
+        event_type="order_filled",
+        level_index=2,
+        market="TEST-EUR",
+        order_id="local-ord-1",
+        exchange_order_id="00000000-0000-0463-0100-00078fab0b8c",
+    )
+
+    session = test_session()
+    try:
+        row = session.query(TradeEvent).filter(TradeEvent.id == event_id).first()
+        assert row is not None
+        assert row.order_id == "local-ord-1"
+        assert row.exchange_order_id == "00000000-0000-0463-0100-00078fab0b8c"
+    finally:
+        session.close()
