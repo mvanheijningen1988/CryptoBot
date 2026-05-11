@@ -570,9 +570,65 @@ class BotRunner:
             raise RuntimeError("Bot is not running")
 
         synced_levels: set[int] = set()
+        recovered_fill_count = 0
         if self.config.mode == "live" and isinstance(self.exchange, BitvavoExchange):
             self.exchange.ensure_authenticated()
-            synced_levels = self._sync_existing_live_open_orders()
+            authoritative = self.exchange.force_authoritative_grid_sync(
+                level_prices=self.strategy.levels,
+                quote_amount=self.config.grid.order_size_quote,
+            )
+            authoritative_open_orders = {
+                int(k): str(v).lower()
+                for k, v in (authoritative.get("open_orders") or {}).items()
+                if str(v).lower() in {"buy", "sell"}
+            }
+            self.state.open_orders = authoritative_open_orders
+            synced_levels = {int(level) for level in (authoritative.get("synced_levels") or [])}
+
+            # Rebuild buy-fill bookkeeping from exchange open SELL orders.
+            rebuilt_filled_buys: set[int] = set()
+            rebuilt_filled_amounts: dict[int, float] = {}
+            for level_index, side in authoritative_open_orders.items():
+                if side != "sell" or level_index <= 0:
+                    continue
+                buy_origin = level_index - 1
+                rebuilt_filled_buys.add(buy_origin)
+                sell_price = self.strategy.levels[level_index] if 0 <= level_index < len(self.strategy.levels) else 0.0
+                if sell_price > 0:
+                    rebuilt_filled_amounts[buy_origin] = round(float(self.config.grid.order_size_quote) / float(sell_price), 12)
+            self.state.filled_buys = rebuilt_filled_buys
+            self.state.filled_amounts = rebuilt_filled_amounts
+
+            recovered_fills = list(authoritative.get("fills") or [])
+            recovered_fill_count = len(recovered_fills)
+            for fill in recovered_fills:
+                side = str(fill.get("side", "") or "").lower()
+                level_index = fill.get("level_index")
+                quote_amount = float(fill.get("quote_amount", 0.0) or 0.0)
+                fill_price = float(fill.get("fill_price", 0.0) or 0.0)
+                if side not in {"buy", "sell"} or level_index is None or quote_amount <= 0 or fill_price <= 0:
+                    continue
+                self.trade_count += 1
+                self._pending_trade_events.append(
+                    {
+                        "event_type": "order_filled",
+                        "order_id": fill.get("order_id"),
+                        "exchange_order_id": fill.get("exchange_order_id"),
+                        "side": side,
+                        "quote_amount": quote_amount,
+                        "base_amount": round(float(fill.get("base_amount", 0.0) or 0.0), 12),
+                        "matched_buy_base": 0.0,
+                        "base_remainder_after_sell": 0.0,
+                        "fill_count": int(fill.get("fill_count", 0) or 0),
+                        "fee_paid_quote": round(float(fill.get("fee_paid_quote", 0.0) or 0.0), 8),
+                        "fee_rate": round(float(fill.get("fee_rate", 0.0) or 0.0), 8),
+                        "price": fill_price,
+                        "level_index": int(level_index),
+                        "trade_pnl": 0.0,
+                        "total_equity": round(self._calculate_total_equity(), 4),
+                        "trade_number": self.trade_count,
+                    }
+                )
 
         quote_balance, base_balance = self.exchange.get_balances()
         self.exchange.quote_balance = quote_balance
@@ -591,6 +647,7 @@ class BotRunner:
             "price": round(float(self.price or 0.0), 8),
             "status": snapshot.status,
             "synced_levels": sorted(int(level) for level in synced_levels),
+            "recovered_fills": int(recovered_fill_count),
         }
         self.log_store.add(
             "exchange_sync",
@@ -663,10 +720,10 @@ class BotRunner:
 
         :param snapshot: Point-in-time bot metrics to push.
         """
+        events = list(self._pending_trade_events)
+        self._pending_trade_events = []
         try:
             runner_state = self.get_runner_state()
-            events = self._pending_trade_events
-            self._pending_trade_events = []
             with scoped_context(
                 correlation_id=self.trace_id,
                 agent_id=self.agent_id,
@@ -682,7 +739,7 @@ class BotRunner:
                     trade_events=len(events),
                     status=snapshot.status,
                 )
-                requests.post(
+                response = requests.post(
                     f"{self.manager_url}/api/v1/agents/{self.agent_id}/bots/{self.bot_id}/metrics",
                     json={
                         "snapshot": snapshot.model_dump(mode="json"),
@@ -692,6 +749,7 @@ class BotRunner:
                     timeout=4,
                     headers={"x-correlation-id": self.trace_id},
                 )
+                response.raise_for_status()
                 debug_log(
                     logging.getLogger(__name__),
                     "snapshot_push_ok",
@@ -701,6 +759,10 @@ class BotRunner:
                     status=snapshot.status,
                 )
         except requests.RequestException as exc:
+            # Preserve event delivery guarantees for order lifecycle updates.
+            # If the manager call fails, put events back so a later snapshot
+            # can retry instead of silently dropping fills/placements.
+            self._pending_trade_events = events + self._pending_trade_events
             debug_log(
                 logging.getLogger(__name__),
                 "snapshot_push_failed",
@@ -708,6 +770,19 @@ class BotRunner:
                 bot_id=self.bot_id,
                 agent_id=self.agent_id,
                 error=str(exc),
+                trade_events_requeued=len(events),
+            )
+            return
+        except Exception as exc:
+            self._pending_trade_events = events + self._pending_trade_events
+            debug_log(
+                logging.getLogger(__name__),
+                "snapshot_push_failed_unexpected",
+                "Bot snapshot push failed unexpectedly",
+                bot_id=self.bot_id,
+                agent_id=self.agent_id,
+                error=str(exc),
+                trade_events_requeued=len(events),
             )
             return
 
@@ -996,6 +1071,12 @@ class BotRunner:
             )
             raise
         if success:
+            exchange_order_id = ""
+            open_orders = getattr(self.exchange, "_limit_orders", None)
+            if isinstance(open_orders, dict):
+                info = open_orders.get(order_id)
+                if isinstance(info, dict):
+                    exchange_order_id = str(info.get("exchange_order_id", "") or "")
             self.log_store.add(
                 "order_opened",
                 f"Limit order ({context}): {side.upper()} at level {level_idx} (price {limit_price:.6f})",
@@ -1006,6 +1087,7 @@ class BotRunner:
             self._pending_trade_events.append({
                 "event_type": "order_placed",
                 "order_id": order_id,
+                "exchange_order_id": exchange_order_id,
                 "side": side,
                 "quote_amount": quote_amount,
                 "price": limit_price,
@@ -1167,6 +1249,7 @@ class BotRunner:
                     self._pending_trade_events.append({
                         "event_type": "order_filled",
                         "order_id": fill.get("order_id"),
+                        "exchange_order_id": fill.get("exchange_order_id"),
                         "side": side,
                         "quote_amount": fill["quote_amount"],
                         "base_amount": round(filled_base_amount, 12),

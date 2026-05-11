@@ -199,6 +199,13 @@ def _add_trade_event_columns(engine: Engine) -> None:
                 conn.exec_driver_sql(
                     "CREATE INDEX IF NOT EXISTS idx_trade_events_order_id ON trade_events(order_id)"
                 )
+            if "exchange_order_id" not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE trade_events ADD COLUMN exchange_order_id VARCHAR(128) DEFAULT NULL"
+                )
+                conn.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS idx_trade_events_exchange_order_id ON trade_events(exchange_order_id)"
+                )
             if "market" not in columns:
                 conn.exec_driver_sql(
                     "ALTER TABLE trade_events ADD COLUMN market VARCHAR(32) DEFAULT ''"

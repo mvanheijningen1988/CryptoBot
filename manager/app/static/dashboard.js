@@ -75,6 +75,9 @@ let selectedLogBotId = null;
 /** Optional bot name shown in the logs modal title for bot logs. */
 let selectedLogBotName = "";
 
+/** Latest bot list cache used by multiple dashboard sections. */
+let latestBots = [];
+
 /** Whether the agent-logs modal is currently visible. */
 let logsModalOpen = false;
 
@@ -1187,6 +1190,7 @@ function buildAgentCellHtml(bot, candidateAgents, isViewer) {
  */
 async function loadBots() {
   const bots = await api("/api/v1/bots");
+  latestBots = Array.isArray(bots) ? bots : [];
   const agents = await api("/api/v1/agents");
   const moveCandidates = agents.filter((a) => a.approval_status === "approved");
   const body = document.getElementById("bots_body");
@@ -2654,7 +2658,13 @@ function _renderOrdersTable() {
     const marketLabel = ev.market || ev.bot_name || "-";
     const feeStr = Number(ev.fee_paid_quote || 0) > 0 ? formatNumber(ev.fee_paid_quote) : "-";
     tr.innerHTML = `<td>${ts}</td><td>${marketLabel}</td><td class="${typeClass}">${typeLabel}</td><td class="${sideClass}">${ev.side.toUpperCase()}</td><td>${formatNumber(ev.price)}</td><td>${formatNumber(ev.quote_amount)}</td><td>${feeStr}</td><td class="${pnlClass}">${pnlStr}</td>`;
-    tr.onclick = () => openOrderDetail(ev.id);
+    tr.onclick = () => {
+      if (ev.event_source === "open_order_snapshot") {
+        openOrderDetailFromData(ev);
+        return;
+      }
+      openOrderDetail(ev.id);
+    };
     body.appendChild(tr);
   }
 
@@ -2696,11 +2706,73 @@ async function loadOrders() {
   const body = document.getElementById("orders_body");
   if (!body) return;
   try {
-    const rawEvents = await api("/api/v1/trade-events");
-    _ordersTableState.events = rawEvents.filter((ev) => ev?.event_type !== "trade");
+    const bots = Array.isArray(latestBots) && latestBots.length ? latestBots : await api("/api/v1/bots");
+    const activeStatuses = new Set(["running", "initializing", "queued"]);
+    const nowIso = new Date().toISOString();
+    const rows = [];
+    for (const bot of bots) {
+      if (!bot || !activeStatuses.has(String(bot.status || "").toLowerCase())) continue;
+      try {
+        const data = await api(`/api/v1/bots/${bot.id}/open-orders`);
+        const orders = Array.isArray(data?.orders) ? data.orders : [];
+        for (const order of orders) {
+          const side = String(order?.side || "").toLowerCase();
+          if (side !== "buy" && side !== "sell") continue;
+          const price = Number(order?.price || 0);
+          if (!Number.isFinite(price) || price <= 0) continue;
+          const level = Number(order?.level);
+          const orderId = String(order?.order_id || order?.client_order_id || "").trim();
+          const exchangeOrderId = String(order?.exchange_order_id || "").trim();
+          const fallbackId = `${bot.id}-${level}-${side}-${price}`;
+          rows.push({
+            id: `open-${exchangeOrderId || orderId || fallbackId}`,
+            timestamp: nowIso,
+            bot_id: bot.id,
+            bot_name: String(bot.name || bot.id),
+            market: String(order?.market || bot?.config?.market || ""),
+            event_type: "order_placed",
+            side,
+            price,
+            quote_amount: Number(order?.quote_amount || 0),
+            fee_paid_quote: 0,
+            trade_pnl: 0,
+            level_index: Number.isFinite(level) ? level : null,
+            order_id: orderId,
+            exchange_order_id: exchangeOrderId,
+            fill_count: 0,
+            event_source: "open_order_snapshot",
+          });
+        }
+      } catch {
+        // Skip bot rows when open-orders cannot be fetched.
+      }
+    }
+    _ordersTableState.events = rows;
     _initOrdersHeaderControls();
     _renderOrdersTable();
   } catch { /* ignore */ }
+}
+
+function openOrderDetailFromData(ev) {
+  const modal = document.getElementById("order_detail_modal");
+  const content = document.getElementById("order_detail_content");
+  if (!modal || !content) return;
+
+  const sideClass = ev.side === "buy" ? "order-buy" : "order-sell";
+  const typeLabel = `📋 ${t("lbl_placed")}`;
+  let html = `<div class="order-detail-grid">`;
+  html += `<div class="od-row"><span class="od-label">${t("th_type")}</span><span>${typeLabel}</span></div>`;
+  html += `<div class="od-row"><span class="od-label">${t("lbl_local_order_id")}</span><span>${ev.order_id || "-"}</span></div>`;
+  html += `<div class="od-row"><span class="od-label">${t("lbl_exchange_order_id")}</span><span>${ev.exchange_order_id || "-"}</span></div>`;
+  html += `<div class="od-row"><span class="od-label">${t("th_side")}</span><span class="${sideClass}">${String(ev.side || "").toUpperCase()}</span></div>`;
+  html += `<div class="od-row"><span class="od-label">${t("th_market")}</span><span>${ev.market || ev.bot_name || "-"}</span></div>`;
+  html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(ev.price)}</span></div>`;
+  html += `<div class="od-row"><span class="od-label">${t("th_amount")}</span><span>${formatNumber(ev.quote_amount)}</span></div>`;
+  html += `<div class="od-row"><span class="od-label">${t("th_time")}</span><span>${new Date(ev.timestamp).toLocaleString()}</span></div>`;
+  html += `<div class="od-row"><span class="od-label">${t("th_level")}</span><span>${ev.level_index != null ? ev.level_index : "-"}</span></div>`;
+  html += `</div>`;
+  content.innerHTML = html;
+  modal.showModal();
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -2725,6 +2797,8 @@ async function openOrderDetail(eventId) {
 
     let html = `<div class="order-detail-grid">`;
     html += `<div class="od-row"><span class="od-label">${t("th_type")}</span><span>${typeLabel}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("lbl_local_order_id")}</span><span>${ev.order_id || "-"}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${t("lbl_exchange_order_id")}</span><span>${ev.exchange_order_id || "-"}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_side")}</span><span class="${sideClass}">${ev.side.toUpperCase()}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_market")}</span><span>${ev.market || ev.bot_name || "-"}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(ev.price)}</span></div>`;
@@ -2767,6 +2841,8 @@ async function openOrderDetail(eventId) {
       html += `<h4 style="margin:14px 0 6px;">${linkedLabel}</h4>`;
       html += `<div class="order-detail-grid">`;
       html += `<div class="od-row"><span class="od-label">${t("th_type")}</span><span>${loTypeLabel}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("lbl_local_order_id")}</span><span>${lo.order_id || "-"}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${t("lbl_exchange_order_id")}</span><span>${lo.exchange_order_id || "-"}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_side")}</span><span class="${loSideClass}">${lo.side.toUpperCase()}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(lo.price)}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_amount")}</span><span>${formatNumber(lo.quote_amount)}</span></div>`;

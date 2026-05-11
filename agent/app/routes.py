@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from fastapi.routing import APIRouter
 
 from common.diagnostics import debug_log, scoped_context, trace_log
+from common.exchange.bitvavo import BitvavoExchange
 from agent.app.config import AGENT_ID, runner_manager
 from agent.app.schemas import BudgetPayload, DeleteBotPayload, StartBotPayload, StopBotPayload, SyncBotPayload
 from agent.app.version import __version__
@@ -155,6 +156,14 @@ def get_open_orders(bot_id: str) -> dict:
     runner = runner_manager.runners.get(bot_id)
     if not runner or not runner.running:
         raise HTTPException(status_code=404, detail="Bot not running")
+
+    if runner.config.mode == "live" and isinstance(runner.exchange, BitvavoExchange):
+        orders = runner.exchange.list_open_grid_orders(
+            level_prices=runner.strategy.levels,
+            quote_amount=runner.config.grid.order_size_quote,
+        )
+        return {"bot_id": bot_id, "orders": orders}
+
     orders = runner.strategy.get_open_orders(runner.state)
     return {"bot_id": bot_id, "orders": orders}
 
