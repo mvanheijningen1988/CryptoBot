@@ -1012,8 +1012,13 @@ def resolve_agent_url(agent_id: str, db: Session) -> str:
     return agent.base_url
 
 
-def _find_running_agent_for_bot(bot_id: str, db: Session) -> Agent | None:
-    """Best-effort lookup: find an approved online agent currently running this bot."""
+def _find_running_agent_for_bot(bot_id: str, db: Session, include_stopped: bool = False) -> Agent | None:
+    """Best-effort lookup: find an approved online agent currently hosting this bot.
+
+    :param bot_id: Bot identifier to locate.
+    :param db: Database session.
+    :param include_stopped: When True, also match runners that exist but are not running.
+    """
     agents = (
         db.query(Agent)
         .filter(Agent.status == "online", Agent.approval_status == "approved")
@@ -1036,7 +1041,7 @@ def _find_running_agent_for_bot(bot_id: str, db: Session) -> Agent | None:
         for item in payload:
             if not isinstance(item, dict):
                 continue
-            if item.get("bot_id") == bot_id and bool(item.get("running")):
+            if item.get("bot_id") == bot_id and (include_stopped or bool(item.get("running"))):
                 return agent
     return None
 
@@ -1453,10 +1458,28 @@ def delete_bot(bot_id: str, db: DbSession, payload: DeleteBotRequest | None = Bo
             bot.updated_at = datetime.now(UTC)
             db.commit()
         else:
+            inferred_agent = _find_running_agent_for_bot(bot.id, db, include_stopped=True)
+            if inferred_agent:
+                ok, message, _ = _dispatch_agent_command(
+                    agent=inferred_agent,
+                    action="prepare_delete",
+                    payload={"bot_id": bot.id, "delete_mode": delete_mode},
+                    http_url=f"{inferred_agent.base_url}/agent/bots/{bot.id}/prepare-delete",
+                )
+                if not ok:
+                    raise HTTPException(status_code=502, detail=f"Agent delete preparation failed: {message}")
+
+                # Preserve recovered routing for diagnostics until record removal.
+                bot.assigned_agent_id = inferred_agent.id
+                bot.status = "stopped"
+                _set_manual_stop_flag(bot, True)
+                bot.updated_at = datetime.now(UTC)
+                db.commit()
+
             saved_state = _load_saved_runner_state(bot) or {}
             saved_open_orders = saved_state.get("open_orders") if isinstance(saved_state, dict) else {}
             has_saved_open_orders = isinstance(saved_open_orders, dict) and bool(saved_open_orders)
-            if bot.status in _ACTIVE_BOT_STATUSES or has_saved_open_orders:
+            if not inferred_agent and (bot.status in _ACTIVE_BOT_STATUSES or has_saved_open_orders):
                 raise HTTPException(status_code=409, detail="Bot has no assigned agent to cancel open orders before delete")
     elif bot.status in _ACTIVE_BOT_STATUSES:
         if not bot.assigned_agent_id:

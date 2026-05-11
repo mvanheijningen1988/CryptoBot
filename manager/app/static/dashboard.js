@@ -1797,6 +1797,26 @@ async function loadBots() {
 function _wireUpBotRow(tr) {
   const isViewer = currentUser?.role === "viewer";
 
+  const resolveDeleteErrorMessage = (err, deleteMode) => {
+    const raw = String(err?.message || err || "");
+    const normalized = raw.toLowerCase();
+
+    if (deleteMode === "delete_open_orders") {
+      if (normalized.includes("no assigned agent") && normalized.includes("cancel open orders")) {
+        return lang === "nl"
+          ? "Verwijderen gestopt: manager kan geen actieve host-agent voor deze bot vinden om alleen de bot-orders op de exchange te annuleren."
+          : "Delete stopped: manager cannot find a hosting agent for this bot to cancel only this bot's exchange orders.";
+      }
+      if (normalized.includes("delete preparation failed")) {
+        return lang === "nl"
+          ? "Verwijderen gestopt: voorbereiding op de agent voor bot-specifieke order-cancel is mislukt."
+          : "Delete stopped: agent-side preparation for bot-scoped order cancellation failed.";
+      }
+    }
+
+    return raw;
+  };
+
   tr.addEventListener("click", (e) => {
     const target = e.target;
     const targetEl = target instanceof Element ? target : null;
@@ -1835,6 +1855,7 @@ function _wireUpBotRow(tr) {
       const bot = latestBots.find((x) => x.id === botId);
       btn.closest(".action-menu").classList.remove("open");
       if (!action || !bot) return;
+      let chosenDeleteMode = "";
 
       try {
         if (action === "start") {
@@ -1857,13 +1878,17 @@ function _wireUpBotRow(tr) {
         } else if (action === "delete") {
           const deleteMode = await showDeleteBotModeModal(bot.name || botId);
           if (!deleteMode) return;
+          chosenDeleteMode = String(deleteMode || "");
           await api(`/api/v1/bots/${botId}`, {
             method: "DELETE",
             body: JSON.stringify({ delete_mode: deleteMode }),
           });
         }
       } catch (err) {
-        showToast(t("btn_" + action) || action, err.message || String(err), "warn", 5000);
+        const displayMessage = action === "delete"
+          ? resolveDeleteErrorMessage(err, chosenDeleteMode)
+          : String(err?.message || err);
+        showToast(t("btn_" + action) || action, displayMessage, "warn", 5000);
       }
       await loadBots();
       await loadAgents();
@@ -3074,7 +3099,7 @@ function updateEquityChartTooltip(marker, event) {
   tip.style.top = `${top}px`;
 }
 
-function drawEquityChartSeries(seriesEntries) {
+function drawEquityChartSeries(seriesEntries, startingBudget = null) {
   const canvas = document.getElementById("equity_chart");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -3121,6 +3146,10 @@ function drawEquityChartSeries(seriesEntries) {
 
   let minV = Math.min(...allValues);
   let maxV = Math.max(...allValues);
+  if (startingBudget != null) {
+    minV = Math.min(minV, Number(startingBudget));
+    maxV = Math.max(maxV, Number(startingBudget));
+  }
   const range = maxV - minV || 1;
   const validTimes = allTimes.filter((v) => Number.isFinite(v));
   const minTs = validTimes.length ? Math.min(...validTimes) : 0;
@@ -3227,6 +3256,33 @@ function drawEquityChartSeries(seriesEntries) {
   let legendY = pad.top + 6;
   ctx.font = "11px sans-serif";
   ctx.textAlign = "left";
+
+  if (startingBudget != null) {
+    const budgetY = pad.top + plotH - ((Number(startingBudget) - minV) / range) * plotH;
+    ctx.save();
+    ctx.strokeStyle = "#22c55e";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pad.left, budgetY);
+    ctx.lineTo(pad.left + plotW, budgetY);
+    ctx.stroke();
+    ctx.restore();
+
+    // Keep the start-budget marker visible in the legend.
+    ctx.strokeStyle = "#22c55e";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(legendX, legendY + 7);
+    ctx.lineTo(legendX + 24, legendY + 7);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#cbd5e1";
+    ctx.fillText(t("lbl_starting_budget"), legendX + 28, legendY + 8);
+    legendY += 14;
+  }
+
   for (let i = 0; i < cleanedSeries.length; i++) {
     const color = styleBySeries[i].color;
     const dash = styleBySeries[i].dash;
@@ -3439,7 +3495,7 @@ async function loadEquityChart() {
     }
 
     if (totalSeries && totalSeries.length > 0) {
-      drawEquityChartSeries(totalSeries);
+      drawEquityChartSeries(totalSeries, startingBudget);
     } else {
       drawEquityChart(points, startingBudget);
     }

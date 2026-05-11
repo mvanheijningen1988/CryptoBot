@@ -489,6 +489,16 @@ class BitvavoExchange(Exchange):
         try:
             return int(raw_operator) == int(self.operator_id)
         except (TypeError, ValueError):
+            # Some payload variants omit operatorId on open-order rows.
+            # In that case, only accept rows we can tie back to tracked bot orders.
+            exchange_order_id = str(item.get("orderId", "") or "")
+            if exchange_order_id and exchange_order_id in self._exchange_order_map:
+                return True
+            client_order_id = str(item.get("clientOrderId", "") or "")
+            if client_order_id:
+                for info in self._limit_orders.values():
+                    if str(info.get("client_order_id", "") or "") == client_order_id:
+                        return True
             return False
 
     def _index_open_orders_by_side_price(self, items: list[dict[str, Any]]) -> dict[tuple[str, str], list[dict[str, Any]]]:
@@ -1651,22 +1661,33 @@ class BitvavoExchange(Exchange):
                 continue
 
             order_id = str(item.get("orderId", "") or "")
-            if not order_id:
+            client_order_id = str(item.get("clientOrderId", "") or "")
+            if not order_id and not client_order_id:
                 continue
 
             if item_side == "sell":
                 cancelled_sell_base_amount += self._remaining_base_from_order(item)
 
             try:
-                self._call_action(
+                cancel_body: dict[str, Any] = {
+                    "market": self.market,
+                }
+                if self.operator_id is not None:
+                    cancel_body["operatorId"] = self.operator_id
+                if client_order_id:
+                    cancel_body["clientOrderId"] = client_order_id
+                if order_id:
+                    cancel_body["orderId"] = order_id
+
+                response = self._call_action(
                     "privateCancelOrder",
-                    {
-                        "market": self.market,
-                        "orderId": order_id,
-                    },
+                    cancel_body,
                     timeout=10.0,
                 )
             except Exception:
+                continue
+
+            if response.get("errorCode") is not None:
                 continue
 
             cancelled += 1
