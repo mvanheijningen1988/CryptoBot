@@ -1,0 +1,76 @@
+name: Manager CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "manager-v*.*.*"
+    paths:
+      - "manager/**"
+      - "common/**"
+
+jobs:
+  test:
+    name: Build and test manager changes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r manager/requirements.txt
+          pip install -r agent/requirements.txt
+          pip install pytest
+
+      - name: Build check
+        run: python -m compileall -q .
+
+      - name: Run tests
+        run: pytest -q
+
+  docker:
+    name: Build and push manager image
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/cryptobot-manager
+          tags: |
+            type=sha,prefix=sha-,enable=${{ github.ref == 'refs/heads/main' }}
+            type=match,pattern=manager-v(.*),group=1
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/manager-v') }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: manager/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
