@@ -52,6 +52,7 @@ class SimulatedExchange(Exchange):
         self,
         budget: BudgetConfig,
         market: str | None = None,
+        start_price: float = 100.0,
         fee_rate: float = 0.0,
     ) -> None:
         """
@@ -60,13 +61,14 @@ class SimulatedExchange(Exchange):
         :param budget: Capital allocation with quote and base amounts.
         :param market: Bitvavo market symbol (e.g. ``'BTC-EUR'``).  When set,
                        prices are streamed from the public WebSocket.
+        :param start_price: Initial seed price used before live ticks arrive.
         :param fee_rate: Fee fraction applied per trade (e.g. 0.0025 = 0.25 %).
         """
         self.quote_balance: float = budget.quote_budget
         self.base_balance: float = budget.base_budget
         self.initial_quote: float = budget.quote_budget
         self.initial_base: float = budget.base_budget
-        self.price: float = 0.0
+        self.price: float = float(start_price)
         self.market: str | None = market
         self.fee_rate: float = fee_rate
 
