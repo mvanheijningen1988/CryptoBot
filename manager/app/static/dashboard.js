@@ -1962,6 +1962,25 @@ document.querySelectorAll(".ntab-btn").forEach((btn) => {
 
 let _equityChartMarkers = [];
 
+const _defaultEquityAggregation = "5m";
+const _equityAggregationOptions = new Set(["1m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1w", "1mo"]);
+
+function getSelectedEquityAggregation() {
+  const select = document.getElementById("equity_chart_aggregation");
+  const value = String(select?.value || "").trim();
+  return _equityAggregationOptions.has(value) ? value : _defaultEquityAggregation;
+}
+
+function initEquityAggregationSelector() {
+  const select = document.getElementById("equity_chart_aggregation");
+  if (!select) return;
+
+  const saved = String(localStorage.getItem("cryptobot_equity_chart_aggregation") || _defaultEquityAggregation).trim();
+  select.value = _equityAggregationOptions.has(saved) ? saved : _defaultEquityAggregation;
+  localStorage.setItem("cryptobot_equity_chart_aggregation", select.value || _defaultEquityAggregation);
+  refreshAppSelect(select);
+}
+
 function hideEquityChartTooltip() {
   const tip = document.getElementById("equity_chart_tooltip");
   if (tip) tip.style.display = "none";
@@ -2198,6 +2217,7 @@ function drawEquityChart(data, startingBudget) {
 /** Fetch equity history for the selected bot and redraw the chart. */
 async function loadEquityChart() {
   const botId = document.getElementById("equity_chart_bot")?.value;
+  const aggregation = getSelectedEquityAggregation();
   const infoDiv = document.getElementById("equity_chart_info");
   if (!botId) {
     drawEquityChart([]);
@@ -2205,9 +2225,10 @@ async function loadEquityChart() {
     return;
   }
   try {
+    const params = new URLSearchParams({ aggregation });
     const url = botId === "__total__"
-      ? "/api/v1/bots/equity-history/total"
-      : `/api/v1/bots/${botId}/equity-history`;
+      ? `/api/v1/bots/equity-history/total?${params.toString()}`
+      : `/api/v1/bots/${botId}/equity-history?${params.toString()}`;
     const resp = await api(url);
     const points = Array.isArray(resp.points) ? [...resp.points] : [];
     const startingBudget = resp.starting_budget || 0;
@@ -2242,6 +2263,11 @@ async function loadEquityChart() {
 document.getElementById("equity_chart_bot")?.addEventListener("change", () => {
   const chartSelect = document.getElementById("equity_chart_bot");
   localStorage.setItem("cryptobot_equity_chart_bot", chartSelect?.value || "");
+  loadEquityChart();
+});
+document.getElementById("equity_chart_aggregation")?.addEventListener("change", () => {
+  const aggregationSelect = document.getElementById("equity_chart_aggregation");
+  localStorage.setItem("cryptobot_equity_chart_aggregation", aggregationSelect?.value || _defaultEquityAggregation);
   loadEquityChart();
 });
 document.getElementById("equity_chart")?.addEventListener("mousemove", (e) => {
@@ -3530,6 +3556,7 @@ function connectDashboardRealtimeStream() {
 
   applyTranslations();
   initAllAppSelects();
+  initEquityAggregationSelector();
   applyRBAC();
 
   // Initial data load

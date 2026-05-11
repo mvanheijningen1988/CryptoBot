@@ -1054,8 +1054,30 @@ th, td { text-align: left; border-bottom: 1px solid #334155; padding: 8px; font-
 
 /* ── Equity chart ── */
 
-.chart-controls { margin-bottom: 8px; }
-.chart-controls select { width: auto; min-width: 200px; }
+.chart-controls {
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.chart-controls select { width: auto; min-width: 170px; }
+#equity_chart_bot,
+#equity_chart_bot + .app-select {
+  margin-right: auto;
+}
+
+.chart-controls .app-select:first-of-type {
+  margin-right: auto;
+}
+
+@media (max-width: 720px) {
+  #equity_chart_bot,
+  #equity_chart_bot + .app-select,
+  .chart-controls .app-select:first-of-type {
+    margin-right: 0;
+  }
+}
 .chart-info { display: flex; gap: 24px; margin-bottom: 8px; font-size: 0.9rem; color: #cbd5e1; }
 .chart-info strong { color: #e2e8f0; }
 #equity_chart {

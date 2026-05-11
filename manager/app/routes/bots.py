@@ -457,6 +457,166 @@ def _timestamp_to_epoch_seconds(ts: object) -> float | None:
     return dt.timestamp()
 
 
+_EQUITY_AGGREGATION_TO_SECONDS: dict[str, int] = {
+    "1m": 60,
+    "5m": 300,
+    "10m": 600,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "2h": 7200,
+    "4h": 14400,
+    "6h": 21600,
+    "8h": 28800,
+    "12h": 43200,
+    "1d": 86400,
+    "1w": 604800,
+}
+
+
+def _normalize_equity_aggregation(raw: str | None) -> str:
+    """Normalize and validate aggregation interval tokens."""
+    value = str(raw or "5m").strip().lower()
+    if value in _EQUITY_AGGREGATION_TO_SECONDS or value == "1mo":
+        return value
+    return "5m"
+
+
+def _bucket_start_for_aggregation(ts: object, aggregation: str) -> tuple[str, float] | None:
+    """Return bucket ISO timestamp and epoch start for a point timestamp."""
+    epoch = _timestamp_to_epoch_seconds(ts)
+    if epoch is None:
+        return None
+
+    if aggregation == "1mo":
+        if isinstance(ts, datetime):
+            dt = ts
+        elif isinstance(ts, str):
+            raw = ts.strip()
+            if raw.endswith("Z"):
+                raw = f"{raw[:-1]}+00:00"
+            try:
+                dt = datetime.fromisoformat(raw)
+            except ValueError:
+                return None
+        else:
+            return None
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        dt = dt.astimezone(UTC)
+        month_start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return month_start.isoformat().replace("+00:00", "Z"), month_start.timestamp()
+
+    bucket_seconds = _EQUITY_AGGREGATION_TO_SECONDS.get(aggregation, 300)
+    bucket_epoch = int(epoch // bucket_seconds) * bucket_seconds
+    bucket_dt = datetime.fromtimestamp(bucket_epoch, tz=UTC)
+    return bucket_dt.isoformat().replace("+00:00", "Z"), float(bucket_epoch)
+
+
+def _aggregate_equity_points(points: list[dict[str, object]], aggregation: str) -> list[dict[str, object]]:
+    """Aggregate points by taking the latest value inside each time bucket."""
+    if not points:
+        return []
+
+    normalized = _normalize_equity_aggregation(aggregation)
+    buckets: dict[str, dict[str, object]] = {}
+
+    for point in points:
+        point_ts = point.get("t")
+        bucket = _bucket_start_for_aggregation(point_ts, normalized)
+        point_epoch = _timestamp_to_epoch_seconds(point_ts)
+        if bucket is None or point_epoch is None:
+            continue
+        bucket_iso, bucket_epoch = bucket
+        current = buckets.get(bucket_iso)
+        if current is None or float(current.get("_point_epoch", -1.0)) <= point_epoch:
+            buckets[bucket_iso] = {
+                "t": bucket_iso,
+                "v": float(point.get("v", 0.0) or 0.0),
+                "p": float(point.get("p", 0.0) or 0.0),
+                "_bucket_epoch": bucket_epoch,
+                "_point_epoch": point_epoch,
+            }
+
+    aggregated = sorted(buckets.values(), key=lambda item: float(item.get("_bucket_epoch", 0.0)))
+    return [{"t": p["t"], "v": p["v"], "p": p["p"]} for p in aggregated]
+
+
+def _build_persisted_equity_points(bot_id: str, db: Session) -> list[dict[str, object]]:
+    """Build equity points from persisted TradeEvent rows."""
+    rows = (
+        db.query(TradeEvent)
+        .filter(TradeEvent.bot_id == bot_id)
+        .order_by(TradeEvent.timestamp.asc(), TradeEvent.id.asc())
+        .all()
+    )
+
+    points: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if row.timestamp is None:
+            continue
+        total_equity = float(row.total_equity or 0.0)
+        if total_equity <= 0:
+            continue
+        ts = row.timestamp.isoformat().replace("+00:00", "Z")
+        points[ts] = {
+            "t": ts,
+            "v": total_equity,
+            "p": float(row.price or 0.0),
+        }
+
+    return sorted(points.values(), key=lambda p: str(p.get("t", "")))
+
+
+def _get_bot_equity_points(bot: Bot, db: Session) -> list[dict[str, object]]:
+    """Return a durable equity series by combining persisted and live in-memory points."""
+    from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
+
+    config = json.loads(bot.config_json or "{}") if bot else {}
+    budget = config.get("budget", {}) if isinstance(config, dict) else {}
+
+    with EQUITY_HISTORY_LOCK:
+        memory_points = list(EQUITY_HISTORY.get(bot.id, []))
+
+    points = _build_persisted_equity_points(bot.id, db)
+    if bot.mode == "live" and not points:
+        points = _build_live_equity_points_from_fills(
+            bot.id,
+            float(budget.get("quote_budget", 0.0) or 0.0),
+            float(budget.get("base_budget", 0.0) or 0.0),
+            db,
+        )
+
+    if memory_points:
+        merged: dict[str, dict[str, object]] = {
+            str(p.get("t", "")): {"t": p.get("t"), "v": float(p.get("v", 0.0) or 0.0), "p": float(p.get("p", 0.0) or 0.0)}
+            for p in points
+            if p.get("t")
+        }
+        for p in memory_points:
+            t = str(p.get("t", ""))
+            if not t:
+                continue
+            merged[t] = {
+                "t": t,
+                "v": float(p.get("v", 0.0) or 0.0),
+                "p": float(p.get("p", 0.0) or 0.0),
+            }
+        points = sorted(merged.values(), key=lambda p: str(p.get("t", "")))
+
+    if bot.mode == "live":
+        points = _rebuild_live_equity_points_from_fills(
+            bot.id,
+            points,
+            float(budget.get("quote_budget", 0.0) or 0.0),
+            float(budget.get("base_budget", 0.0) or 0.0),
+            db,
+        )
+
+    return points
+
+
 def _apply_fill_to_balances(quote_balance: float, base_balance: float, fill: TradeEvent) -> tuple[float, float]:
     """Apply one fill event to quote/base balances."""
     side = str(fill.side or "").lower()
@@ -1545,42 +1705,26 @@ def get_single_trade_event(event_id: str) -> dict:
 
 
 @router.get("/bots/{bot_id}/equity-history")
-def get_equity_history(bot_id: str, db: DbSession) -> dict:
+def get_equity_history(bot_id: str, db: DbSession, aggregation: str = "5m") -> dict:
     """Return equity data-points and budget info for the trend chart.
 
     :param bot_id: The bot to fetch history for.
     :param db: Database session (injected).
     :return: Dict with points list and budget metadata.
     """
-    from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
-
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     config = json.loads(bot.config_json) if bot else {}
     budget = config.get("budget", {})
     starting_budget = budget.get("quote_budget", 0)
     metrics, _ = _normalized_metrics_for_bot(bot, db) if bot else ({}, 0.0)
 
-    with EQUITY_HISTORY_LOCK:
-        points = list(EQUITY_HISTORY.get(bot_id, []))
-
-    if bot and bot.mode == "live":
-        if not points:
-            points = _build_live_equity_points_from_fills(
-                bot_id,
-                float(budget.get("quote_budget", 0.0) or 0.0),
-                float(budget.get("base_budget", 0.0) or 0.0),
-                db,
-            )
-        points = _rebuild_live_equity_points_from_fills(
-            bot_id,
-            points,
-            float(budget.get("quote_budget", 0.0) or 0.0),
-            float(budget.get("base_budget", 0.0) or 0.0),
-            db,
-        )
+    points = _get_bot_equity_points(bot, db) if bot else []
+    agg = _normalize_equity_aggregation(aggregation)
+    points = _aggregate_equity_points(points, agg)
 
     return {
         "points": points,
+        "aggregation": agg,
         "starting_budget": starting_budget,
         "total_equity": metrics.get("total_equity_quote", starting_budget),
         "pnl": _trade_based_pnl(metrics, float(starting_budget or 0.0)),
@@ -1588,14 +1732,13 @@ def get_equity_history(bot_id: str, db: DbSession) -> dict:
 
 
 @router.get("/bots/equity-history/total")
-def get_total_equity_history(db: DbSession) -> dict:
+def get_total_equity_history(db: DbSession, aggregation: str = "5m") -> dict:
     """Return combined equity data-points across all bots."""
-    from manager.app.events import EQUITY_HISTORY, EQUITY_HISTORY_LOCK
-
     bots = db.query(Bot).all()
     total_starting_budget = 0.0
     total_equity = 0.0
     total_pnl = 0.0
+    agg = _normalize_equity_aggregation(aggregation)
 
     for bot in bots:
         config = json.loads(bot.config_json) if bot else {}
@@ -1605,31 +1748,10 @@ def get_total_equity_history(db: DbSession) -> dict:
         total_equity += metrics.get("total_equity_quote", budget.get("quote_budget", 0))
         total_pnl += _trade_based_pnl(metrics, float(budget.get("quote_budget", 0) or 0))
 
-    # Merge all bot equity histories by timestamp
-    with EQUITY_HISTORY_LOCK:
-        all_series = {bid: list(pts) for bid, pts in EQUITY_HISTORY.items()}
-
-    # Build a combined timeline: for each timestamp sum the values
+    # Build a combined timeline by summing per-bucket values from each bot.
     ts_map: dict[str, float] = {}
     for bot in bots:
-        config = json.loads(bot.config_json or "{}")
-        budget = config.get("budget", {}) if isinstance(config, dict) else {}
-        pts = all_series.get(bot.id, [])
-        if bot.mode == "live":
-            if not pts:
-                pts = _build_live_equity_points_from_fills(
-                    bot.id,
-                    float(budget.get("quote_budget", 0.0) or 0.0),
-                    float(budget.get("base_budget", 0.0) or 0.0),
-                    db,
-                )
-            pts = _rebuild_live_equity_points_from_fills(
-                bot.id,
-                pts,
-                float(budget.get("quote_budget", 0.0) or 0.0),
-                float(budget.get("base_budget", 0.0) or 0.0),
-                db,
-            )
+        pts = _aggregate_equity_points(_get_bot_equity_points(bot, db), agg)
         for p in pts:
             t = str(p.get("t", ""))
             if not t:
@@ -1640,6 +1762,7 @@ def get_total_equity_history(db: DbSession) -> dict:
 
     return {
         "points": points,
+        "aggregation": agg,
         "starting_budget": total_starting_budget,
         "total_equity": total_equity,
         "pnl": total_pnl,
