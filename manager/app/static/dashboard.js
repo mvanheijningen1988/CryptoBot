@@ -2278,9 +2278,65 @@ document.getElementById("equity_chart")?.addEventListener("mouseleave", hideEqui
 
 const _ordersTableState = {
   events: [],
-  sorters: [{ field: "timestamp", dir: "desc" }],
+  sortField: "timestamp",
+  sortDir: "desc",
   filters: {},
 };
+
+const _ordersCategoricalFields = new Set(["market", "event_type", "side"]);
+const _ordersNumericFields = new Set(["price", "quote_amount", "fee_paid_quote", "trade_pnl"]);
+
+function _ordersEscapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function _ordersFilterType(field) {
+  if (_ordersCategoricalFields.has(field)) return "categorical";
+  if (_ordersNumericFields.has(field)) return "numeric";
+  return "none";
+}
+
+function _ordersParseNumberInput(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  const normalized = text.replace(",", ".");
+  const value = Number(normalized);
+  return Number.isFinite(value) ? value : null;
+}
+
+function _ordersIsFilterActive(filter) {
+  if (!filter || typeof filter !== "object") return false;
+  if (filter.type === "multi") return Array.isArray(filter.values) && filter.values.length > 0;
+  if (filter.type === "range") return filter.min !== null || filter.max !== null;
+  return false;
+}
+
+function _ordersOptionLabel(field, value) {
+  const str = String(value || "");
+  if (field === "event_type") {
+    if (str === "order_placed") return t("lbl_placed");
+    if (str === "order_filled") return t("lbl_filled");
+    if (str === "order_cancelled") return t("lbl_cancelled");
+    return str;
+  }
+  if (field === "side") return str.toUpperCase();
+  return str;
+}
+
+function _ordersUniqueFieldValues(field) {
+  const values = new Set();
+  for (const ev of _ordersTableState.events) {
+    const raw = _ordersFieldValue(ev, field);
+    const value = String(raw || "").trim();
+    if (value) values.add(value);
+  }
+  return Array.from(values).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
 
 function _ordersFieldValue(ev, field) {
   if (!ev) return null;
@@ -2316,38 +2372,38 @@ function _ordersCompare(a, b, field) {
   return String(av || "").localeCompare(String(bv || ""), undefined, { sensitivity: "base" });
 }
 
-function _setOrderSorter(field, dir, mode = "primary") {
-  const current = _ordersTableState.sorters.filter((s) => s.field !== field);
-  if (mode === "secondary") {
-    current.push({ field, dir });
-    _ordersTableState.sorters = current;
-    return;
-  }
-  _ordersTableState.sorters = [{ field, dir }, ...current];
+function _setOrderSorter(field, dir) {
+  _ordersTableState.sortField = field;
+  _ordersTableState.sortDir = dir;
 }
 
 function _clearOrderSorter(field) {
-  const remaining = _ordersTableState.sorters.filter((s) => s.field !== field);
-  _ordersTableState.sorters = remaining.length ? remaining : [{ field: "timestamp", dir: "desc" }];
+  if (_ordersTableState.sortField === field) {
+    _ordersTableState.sortField = "timestamp";
+    _ordersTableState.sortDir = "desc";
+  }
 }
 
 function _filteredAndSortedOrderEvents() {
   const entries = _ordersTableState.events.filter((ev) => {
-    for (const [field, rawFilter] of Object.entries(_ordersTableState.filters)) {
-      const filterValue = String(rawFilter || "").trim().toLowerCase();
-      if (!filterValue) continue;
-      const haystack = _ordersFieldDisplayValue(ev, field).toLowerCase();
-      if (!haystack.includes(filterValue)) return false;
+    for (const [field, filter] of Object.entries(_ordersTableState.filters)) {
+      if (!_ordersIsFilterActive(filter)) continue;
+      if (filter.type === "multi") {
+        const value = String(_ordersFieldValue(ev, field) || "");
+        if (!filter.values.includes(value)) return false;
+      }
+      if (filter.type === "range") {
+        const value = Number(_ordersFieldValue(ev, field) || 0);
+        if (filter.min !== null && value < filter.min) return false;
+        if (filter.max !== null && value > filter.max) return false;
+      }
     }
     return true;
   });
 
   entries.sort((left, right) => {
-    for (const sorter of _ordersTableState.sorters) {
-      const cmp = _ordersCompare(left, right, sorter.field);
-      if (cmp !== 0) return sorter.dir === "asc" ? cmp : -cmp;
-    }
-    return _ordersCompare(left, right, "timestamp") * -1;
+    const cmp = _ordersCompare(left, right, _ordersTableState.sortField);
+    return _ordersTableState.sortDir === "asc" ? cmp : -cmp;
   });
   return entries;
 }
@@ -2370,12 +2426,10 @@ function _ensureOrdersHeaderMenu() {
 function _updateOrdersHeaderState() {
   document.querySelectorAll(".orders-table th[data-order-field]").forEach((th) => {
     const field = th.dataset.orderField || "";
-    const sortIndex = _ordersTableState.sorters.findIndex((s) => s.field === field);
-    const sorter = sortIndex >= 0 ? _ordersTableState.sorters[sortIndex] : null;
-    th.classList.toggle("orders-sort-asc", sortIndex === 0 && sorter?.dir === "asc");
-    th.classList.toggle("orders-sort-desc", sortIndex === 0 && sorter?.dir === "desc");
-    th.classList.toggle("orders-sort-secondary", sortIndex > 0);
-    th.classList.toggle("orders-filtered", Boolean(String(_ordersTableState.filters[field] || "").trim()));
+    const isSortField = field === _ordersTableState.sortField;
+    th.classList.toggle("orders-sort-asc", isSortField && _ordersTableState.sortDir === "asc");
+    th.classList.toggle("orders-sort-desc", isSortField && _ordersTableState.sortDir === "desc");
+    th.classList.toggle("orders-filtered", _ordersIsFilterActive(_ordersTableState.filters[field]));
   });
 }
 
@@ -2385,23 +2439,25 @@ function _renderOrdersActiveChips() {
   if (!container) return;
 
   const chips = [];
-  const isDefaultSort = _ordersTableState.sorters.length === 1
-    && _ordersTableState.sorters[0]?.field === "timestamp"
-    && _ordersTableState.sorters[0]?.dir === "desc";
+  const isDefaultSort = _ordersTableState.sortField === "timestamp" && _ordersTableState.sortDir === "desc";
 
   if (!isDefaultSort) {
-    for (const sorter of _ordersTableState.sorters) {
-      const th = document.querySelector(`.orders-table th[data-order-field="${sorter.field}"]`);
-      const label = (th?.textContent || sorter.field).trim();
-      chips.push(`<span class="orders-chip">Sort: ${label} ${sorter.dir === "asc" ? "↑" : "↓"}<button type="button" data-chip-type="sort" data-field="${sorter.field}">×</button></span>`);
-    }
+    const th = document.querySelector(`.orders-table th[data-order-field="${_ordersTableState.sortField}"]`);
+    const label = (th?.textContent || _ordersTableState.sortField).trim();
+    chips.push(`<span class="orders-chip">Sort: ${_ordersEscapeHtml(label)} ${_ordersTableState.sortDir === "asc" ? "↑" : "↓"}<button type="button" data-chip-type="sort" data-field="${_ordersTableState.sortField}">×</button></span>`);
   }
-  for (const [field, value] of Object.entries(_ordersTableState.filters)) {
-    const filterValue = String(value || "").trim();
-    if (!filterValue) continue;
+  for (const [field, filter] of Object.entries(_ordersTableState.filters)) {
+    if (!_ordersIsFilterActive(filter)) continue;
     const th = document.querySelector(`.orders-table th[data-order-field="${field}"]`);
     const label = (th?.textContent || field).trim();
-    chips.push(`<span class="orders-chip">Filter: ${label} contains \"${filterValue.replace(/"/g, "&quot;")}\"<button type="button" data-chip-type="filter" data-field="${field}">×</button></span>`);
+    if (filter.type === "multi") {
+      const selected = filter.values.map((v) => _ordersOptionLabel(field, v)).join(", ");
+      chips.push(`<span class="orders-chip">Filter: ${_ordersEscapeHtml(label)} = ${_ordersEscapeHtml(selected)}<button type="button" data-chip-type="filter" data-field="${field}">×</button></span>`);
+    } else if (filter.type === "range") {
+      const minText = filter.min === null ? "-∞" : formatNumber(filter.min);
+      const maxText = filter.max === null ? "+∞" : formatNumber(filter.max);
+      chips.push(`<span class="orders-chip">Filter: ${_ordersEscapeHtml(label)} ${_ordersEscapeHtml(minText)} .. ${_ordersEscapeHtml(maxText)}<button type="button" data-chip-type="filter" data-field="${field}">×</button></span>`);
+    }
   }
 
   container.innerHTML = chips.join("");
@@ -2428,22 +2484,48 @@ function _openOrdersHeaderMenu(th) {
   if (!field) return;
 
   const menu = _ensureOrdersHeaderMenu();
-  const currentFilter = String(_ordersTableState.filters[field] || "");
+  const filterType = _ordersFilterType(field);
+  const currentFilter = _ordersTableState.filters[field];
+
+  let filterMarkup = "";
+  if (filterType === "categorical") {
+    const selectedValues = currentFilter?.type === "multi" ? new Set(currentFilter.values) : new Set();
+    const options = _ordersUniqueFieldValues(field);
+    const optionsMarkup = options.length
+      ? options.map((value) => {
+        const id = `orders_filter_${field}_${value.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+        const checked = selectedValues.has(value) ? "checked" : "";
+        return `<label for="${id}" class="orders-filter-option"><input id="${id}" type="checkbox" value="${_ordersEscapeHtml(value)}" ${checked} data-filter-option="1" /><span>${_ordersEscapeHtml(_ordersOptionLabel(field, value))}</span></label>`;
+      }).join("")
+      : `<div class="orders-filter-empty">${lang === "nl" ? "Geen opties" : "No options"}</div>`;
+    filterMarkup = `
+      <div class="orders-filter-section">
+        <span>${lang === "nl" ? "Selecteer opties" : "Select options"}</span>
+        <div class="orders-filter-options">${optionsMarkup}</div>
+      </div>
+    `;
+  } else if (filterType === "numeric") {
+    const currentMin = currentFilter?.type === "range" && currentFilter.min !== null ? String(currentFilter.min) : "";
+    const currentMax = currentFilter?.type === "range" && currentFilter.max !== null ? String(currentFilter.max) : "";
+    filterMarkup = `
+      <div class="orders-filter-section orders-filter-range">
+        <span>${lang === "nl" ? "Range" : "Range"}</span>
+        <div class="orders-filter-range-grid">
+          <input id="orders_header_filter_min" type="text" inputmode="decimal" placeholder="${lang === "nl" ? "Min" : "Min"}" value="${_ordersEscapeHtml(currentMin)}" />
+          <input id="orders_header_filter_max" type="text" inputmode="decimal" placeholder="${lang === "nl" ? "Max" : "Max"}" value="${_ordersEscapeHtml(currentMax)}" />
+        </div>
+      </div>
+    `;
+  }
+
+  const sortMarkup = `<div class="orders-header-actions"><button type="button" data-sort="asc">${lang === "nl" ? "Oplopend" : "Ascending"}</button><button type="button" data-sort="desc">${lang === "nl" ? "Aflopend" : "Descending"}</button></div>`;
+
   menu.innerHTML = `
     <div class="orders-header-title">${th.textContent.trim()}</div>
-    <div class="orders-header-actions orders-header-actions-4">
-      <button type="button" data-sort="asc" data-sort-mode="primary">${lang === "nl" ? "Primair ↑" : "Primary ↑"}</button>
-      <button type="button" data-sort="desc" data-sort-mode="primary">${lang === "nl" ? "Primair ↓" : "Primary ↓"}</button>
-      <button type="button" data-sort="asc" data-sort-mode="secondary">${lang === "nl" ? "Ook ↑" : "Also ↑"}</button>
-      <button type="button" data-sort="desc" data-sort-mode="secondary">${lang === "nl" ? "Ook ↓" : "Also ↓"}</button>
-    </div>
-    <label>
-      <span>${lang === "nl" ? "Filter bevat" : "Filter contains"}</span>
-      <input id="orders_header_filter_input" type="text" value="${currentFilter.replace(/"/g, "&quot;")}" />
-    </label>
+    ${sortMarkup}
+    ${filterMarkup}
     <div class="orders-header-actions">
-      <button type="button" data-action="apply-filter">${lang === "nl" ? "Filter toepassen" : "Apply filter"}</button>
-      <button type="button" data-action="clear-filter">${lang === "nl" ? "Filter wissen" : "Clear filter"}</button>
+      ${filterType !== "none" ? `<button type="button" data-action="clear-filter">${lang === "nl" ? "Filter wissen" : "Clear filter"}</button>` : ""}
       <button type="button" data-action="clear-sort">${lang === "nl" ? "Sortering wissen" : "Clear sort"}</button>
     </div>
   `;
@@ -2461,34 +2543,66 @@ function _openOrdersHeaderMenu(th) {
 
   menu.querySelectorAll("button[data-sort]").forEach((btn) => {
     btn.onclick = () => {
-      _setOrderSorter(
-        field,
-        btn.dataset.sort === "asc" ? "asc" : "desc",
-        btn.dataset.sortMode === "secondary" ? "secondary" : "primary",
-      );
+      _setOrderSorter(field, btn.dataset.sort === "asc" ? "asc" : "desc");
       _renderOrdersTable();
       _closeOrdersHeaderMenu();
     };
   });
 
-  const input = menu.querySelector("#orders_header_filter_input");
-  menu.querySelector("button[data-action='apply-filter']").onclick = () => {
-    _ordersTableState.filters[field] = input?.value || "";
+  const applyLiveFilter = () => {
+    if (filterType === "categorical") {
+      const selected = Array.from(menu.querySelectorAll("input[data-filter-option='1']:checked"))
+        .map((input) => String(input.value || "").trim())
+        .filter(Boolean);
+      if (selected.length) {
+        _ordersTableState.filters[field] = { type: "multi", values: selected };
+      } else {
+        delete _ordersTableState.filters[field];
+      }
+    }
+    if (filterType === "numeric") {
+      const min = _ordersParseNumberInput(menu.querySelector("#orders_header_filter_min")?.value || "");
+      const max = _ordersParseNumberInput(menu.querySelector("#orders_header_filter_max")?.value || "");
+      if (min !== null || max !== null) {
+        _ordersTableState.filters[field] = { type: "range", min, max };
+      } else {
+        delete _ordersTableState.filters[field];
+      }
+    }
     _renderOrdersTable();
-    _closeOrdersHeaderMenu();
   };
-  menu.querySelector("button[data-action='clear-filter']").onclick = () => {
-    delete _ordersTableState.filters[field];
-    _renderOrdersTable();
-    _closeOrdersHeaderMenu();
-  };
+
+  if (filterType === "categorical") {
+    menu.querySelectorAll("input[data-filter-option='1']").forEach((input) => {
+      input.addEventListener("change", applyLiveFilter);
+    });
+  }
+
+  if (filterType === "numeric") {
+    const minInput = menu.querySelector("#orders_header_filter_min");
+    const maxInput = menu.querySelector("#orders_header_filter_max");
+    minInput?.addEventListener("input", applyLiveFilter);
+    maxInput?.addEventListener("input", applyLiveFilter);
+  }
+
+  const clearFilterBtn = menu.querySelector("button[data-action='clear-filter']");
+  if (clearFilterBtn) {
+    clearFilterBtn.onclick = () => {
+      delete _ordersTableState.filters[field];
+      _renderOrdersTable();
+      _closeOrdersHeaderMenu();
+    };
+  }
+
   menu.querySelector("button[data-action='clear-sort']").onclick = () => {
     _clearOrderSorter(field);
     _renderOrdersTable();
     _closeOrdersHeaderMenu();
   };
-  input?.focus();
-  input?.select();
+
+  const firstInput = menu.querySelector("input");
+  firstInput?.focus();
+  if (firstInput instanceof HTMLInputElement && firstInput.type === "text") firstInput.select();
 }
 
 function _renderOrdersTable() {
@@ -2537,7 +2651,8 @@ function _initOrdersHeaderControls() {
     resetBtn.dataset.bound = "1";
     resetBtn.addEventListener("click", () => {
       _ordersTableState.filters = {};
-      _ordersTableState.sorters = [{ field: "timestamp", dir: "desc" }];
+      _ordersTableState.sortField = "timestamp";
+      _ordersTableState.sortDir = "desc";
       _renderOrdersTable();
       _closeOrdersHeaderMenu();
     });
