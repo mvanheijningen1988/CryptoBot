@@ -50,6 +50,15 @@ class Exchange(ABC):
         """Return ``(quote_balance, base_balance)``."""
         raise NotImplementedError
 
+    def get_market_summary(self) -> dict[str, float]:
+        """Return market summary fields (last/open/change/volume) when available."""
+        return {
+            "last_price": 0.0,
+            "open_24h": 0.0,
+            "change_24h_pct": 0.0,
+            "volume_24h_quote": 0.0,
+        }
+
     @abstractmethod
     def execute(self, signal: TradeSignal, price: float | None = None) -> bool:
         """
@@ -111,3 +120,13 @@ class Exchange(ABC):
     def cancel_all_orders(self) -> None:
         """Cancel all pending limit orders."""
         raise NotImplementedError
+
+    def update_limit_order(self, order_id: str, quote_amount: float, limit_price: float) -> bool:
+        """Update one tracked limit order on the exchange.
+
+        :param order_id: Local tracked order identifier.
+        :param quote_amount: New order size in quote currency.
+        :param limit_price: New/confirmed limit price for the order.
+        :return: True when the order update is accepted.
+        """
+        return False

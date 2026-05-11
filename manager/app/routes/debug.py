@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time as _time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -18,6 +20,17 @@ from manager.app.models import Agent, Bot
 router = APIRouter(prefix="/debug", tags=["debug"])
 
 DbSession = Annotated[Session, Depends(get_db)]
+
+_RETENTION_HOURS = 48
+_DEBUG_CACHE_TTL_SECONDS = 5.0
+_MAX_LOG_FILES_PER_KIND = 24
+_MAX_BYTES_PER_LOG_FILE = 1_000_000
+
+_LOGS_CACHE_LOCK = threading.Lock()
+_LOGS_CACHE: dict[tuple[str], tuple[float, dict[str, Any]]] = {}
+
+_INSTANCES_CACHE_LOCK = threading.Lock()
+_INSTANCES_CACHE: dict[str, Any] = {"ts": 0.0, "payload": {}}
 
 
 def _parse_ts(raw: object) -> datetime | None:
@@ -39,6 +52,28 @@ def _parse_ts(raw: object) -> datetime | None:
     return dt
 
 
+def _read_tail_lines(path: Path, max_bytes: int = _MAX_BYTES_PER_LOG_FILE) -> list[str]:
+    """Read only the tail of a log file to keep diagnostics endpoints responsive."""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            if size <= 0:
+                return []
+            read_size = min(size, max_bytes)
+            fh.seek(-read_size, 2)
+            chunk = fh.read(read_size)
+    except OSError:
+        return []
+
+    text = chunk.decode("utf-8", errors="ignore")
+    lines = text.splitlines()
+    # If we started mid-file, first line may be truncated JSON.
+    if read_size < size and lines:
+        lines = lines[1:]
+    return lines
+
+
 def _classify_instance(entry: dict[str, Any]) -> tuple[str, str]:
     bot_id = str(entry.get("bot_id") or "")
     if bot_id:
@@ -55,28 +90,31 @@ def _iter_entries(kind: str = "debug") -> list[dict[str, Any]]:
     if not logs_root.exists():
         return []
 
-    retention_hours = 48
-    cutoff = datetime.now(UTC) - timedelta(hours=retention_hours)
-    paths = sorted(logs_root.glob(f"*/{kind}/*.log"), reverse=True)
+    cutoff = datetime.now(UTC) - timedelta(hours=_RETENTION_HOURS)
+    cutoff_ts = cutoff.timestamp()
+    paths = sorted(logs_root.glob(f"*/{kind}/*.log"), reverse=True)[:_MAX_LOG_FILES_PER_KIND]
     entries: list[dict[str, Any]] = []
 
     for path in paths:
         try:
-            with path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    text = line.strip()
-                    if not text:
-                        continue
-                    try:
-                        item = json.loads(text)
-                    except json.JSONDecodeError:
-                        continue
-                    ts = _parse_ts(item.get("timestamp"))
-                    if ts and ts < cutoff:
-                        continue
-                    item["instance_type"], item["instance_id_resolved"] = _classify_instance(item)
-                    item["_sort_ts"] = ts.isoformat() if ts else ""
-                    entries.append(item)
+            # Skip files that are clearly older than retention to avoid expensive reads.
+            if path.stat().st_mtime < cutoff_ts:
+                continue
+
+            for line in _read_tail_lines(path):
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    item = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                ts = _parse_ts(item.get("timestamp"))
+                if ts and ts < cutoff:
+                    continue
+                item["instance_type"], item["instance_id_resolved"] = _classify_instance(item)
+                item["_sort_ts"] = ts.isoformat() if ts else ""
+                entries.append(item)
         except OSError:
             continue
 
@@ -124,6 +162,21 @@ def get_debug_logs(
     if safe_kind not in {"debug", "trace"}:
         raise HTTPException(status_code=400, detail="kind must be debug or trace")
 
+    cache_key = (
+        safe_kind,
+        str(instance_type or ""),
+        str(instance_id or ""),
+        str(service or ""),
+        str(component or ""),
+        str(level or ""),
+        str(limit or ""),
+    )
+    now = _time.time()
+    with _LOGS_CACHE_LOCK:
+        cached = _LOGS_CACHE.get(cache_key)
+        if cached and now - cached[0] <= _DEBUG_CACHE_TTL_SECONDS:
+            return dict(cached[1])
+
     rows = _iter_entries(safe_kind)
     rows = _filter_entries(
         rows,
@@ -141,7 +194,10 @@ def get_debug_logs(
         row.pop("_sort_ts", None)
         clean_rows.append(row)
 
-    return {"kind": safe_kind, "count": len(clean_rows), "logs": clean_rows}
+    result = {"kind": safe_kind, "count": len(clean_rows), "logs": clean_rows}
+    with _LOGS_CACHE_LOCK:
+        _LOGS_CACHE[cache_key] = (now, result)
+    return result
 
 
 @router.get("/logs/download")
@@ -177,6 +233,13 @@ def download_debug_logs(
 @router.get("/instances")
 def list_instances(db: DbSession) -> dict:
     """Return diagnostics instance overview including historical (log-derived) entries."""
+    now = _time.time()
+    with _INSTANCES_CACHE_LOCK:
+        ts = float(_INSTANCES_CACHE.get("ts", 0.0) or 0.0)
+        cached_payload = _INSTANCES_CACHE.get("payload")
+        if cached_payload and now - ts <= _DEBUG_CACHE_TTL_SECONDS:
+            return dict(cached_payload)
+
     rows = _iter_entries("debug")
 
     # Collect historical instances from logs.
@@ -252,7 +315,11 @@ def list_instances(db: DbSession) -> dict:
         key=lambda item: (str(item.get("instance_type") or ""), str(item.get("instance_id") or "")),
     )
 
-    return {
+    result = {
         "retention_hours": 48,
         "instances": instances,
     }
+    with _INSTANCES_CACHE_LOCK:
+        _INSTANCES_CACHE["ts"] = now
+        _INSTANCES_CACHE["payload"] = result
+    return result

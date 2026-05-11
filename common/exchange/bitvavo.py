@@ -44,6 +44,7 @@ class BitvavoExchange(Exchange):
         quote_currency: str,
         operator_id: int | None = None,
         bot_id: str | None = None,
+        rest_url: str = "https://api.bitvavo.com/v2",
         ws_url: str = "wss://ws.bitvavo.com/v2/",
     ) -> None:
         """
@@ -63,8 +64,8 @@ class BitvavoExchange(Exchange):
         self.market = market
         self.base_currency = base_currency
         self.quote_currency = quote_currency
+        self.rest_url = rest_url
         self.ws_url = ws_url
-        self.rest_url = "https://api.bitvavo.com/v2"
 
         self.ws: websocket.WebSocket | None = None
         self.reader_thread: threading.Thread | None = None
@@ -74,6 +75,9 @@ class BitvavoExchange(Exchange):
         self.lock = threading.Lock()
 
         self.latest_price: float | None = None
+        self.latest_open_24h: float = 0.0
+        self.latest_change_24h_pct: float = 0.0
+        self.latest_volume_24h_quote: float = 0.0
         self.quote_balance: float = 0.0
         self.base_balance: float = 0.0
 
@@ -176,11 +180,44 @@ class BitvavoExchange(Exchange):
                 "action": "subscribe",
                 "channels": [
                     {"name": "ticker", "markets": [self.market]},
+                    {"name": "ticker24h", "markets": [self.market]},
                     {"name": "account", "markets": [self.market]},
                 ],
             }
         )
         self.authenticated = True
+
+    def _update_market_summary_from_message(self, message: dict[str, Any]) -> None:
+        """Update cached 24h market summary from incoming websocket message fields."""
+        if not isinstance(message, dict):
+            return
+
+        open_price_raw = message.get("open")
+        if open_price_raw is not None:
+            self.latest_open_24h = self._to_float(open_price_raw)
+
+        volume_quote_raw = message.get("volumeQuote")
+        if volume_quote_raw is not None:
+            self.latest_volume_24h_quote = self._to_float(volume_quote_raw)
+
+        if self.latest_open_24h > 0 and self.latest_price is not None:
+            self.latest_change_24h_pct = ((self.latest_price - self.latest_open_24h) / self.latest_open_24h) * 100.0
+
+    def get_market_summary(self) -> dict[str, float]:
+        """Return latest ticker summary known by the live websocket session."""
+        last_price = float(self.latest_price or 0.0)
+        open_24h = float(self.latest_open_24h or 0.0)
+        change_24h_pct = (
+            ((last_price - open_24h) / open_24h) * 100.0
+            if open_24h > 0 and last_price > 0
+            else float(self.latest_change_24h_pct or 0.0)
+        )
+        return {
+            "last_price": last_price,
+            "open_24h": open_24h,
+            "change_24h_pct": change_24h_pct,
+            "volume_24h_quote": float(self.latest_volume_24h_quote or 0.0),
+        }
 
     def _reconnect_transport(self, reason: str) -> None:
         """Rebuild websocket transport and re-authenticate after transient errors."""
@@ -425,6 +462,7 @@ class BitvavoExchange(Exchange):
         return {
             "order_id": order_id,
             "exchange_order_id": str(order_state.get("orderId", "") or order_info.get("exchange_order_id", "")),
+            "order_status": status,
             "side": order_info["side"],
             "quote_amount": quote_amount,
             "fill_price": fill_price,
@@ -451,6 +489,16 @@ class BitvavoExchange(Exchange):
         try:
             return int(raw_operator) == int(self.operator_id)
         except (TypeError, ValueError):
+            # Some payload variants omit operatorId on open-order rows.
+            # In that case, only accept rows we can tie back to tracked bot orders.
+            exchange_order_id = str(item.get("orderId", "") or "")
+            if exchange_order_id and exchange_order_id in self._exchange_order_map:
+                return True
+            client_order_id = str(item.get("clientOrderId", "") or "")
+            if client_order_id:
+                for info in self._limit_orders.values():
+                    if str(info.get("client_order_id", "") or "") == client_order_id:
+                        return True
             return False
 
     def _index_open_orders_by_side_price(self, items: list[dict[str, Any]]) -> dict[tuple[str, str], list[dict[str, Any]]]:
@@ -519,9 +567,18 @@ class BitvavoExchange(Exchange):
         client_order_id = str(matched.get("clientOrderId", "") or self._client_order_id(local_order_id, client_reference))
         tracked_side = str(matched.get("side", "") or planned_side).lower()
         tracked_price = self._to_float(matched.get("price")) or limit_price
+        matched_filled_quote = self._to_float(matched.get("filledAmountQuote"))
+        matched_total_quote = self._to_float(matched.get("amountQuote"))
+        if matched_total_quote <= 0:
+            matched_amount_base = self._to_float(matched.get("amount"))
+            if matched_amount_base > 0 and tracked_price > 0:
+                matched_total_quote = matched_amount_base * tracked_price
+        tracked_quote_amount = max(0.0, matched_total_quote - max(0.0, matched_filled_quote))
+        if tracked_quote_amount <= 0:
+            tracked_quote_amount = quote_amount
         self._limit_orders[local_order_id] = {
             "side": tracked_side,
-            "quote_amount": float(self._format_amount_quote(quote_amount)),
+            "quote_amount": float(self._format_amount_quote(tracked_quote_amount)),
             "limit_price": float(self._format_price(tracked_price)),
             "level_index": level_index,
             "client_reference": client_reference,
@@ -951,6 +1008,7 @@ class BitvavoExchange(Exchange):
                 self.latest_price = price
                 self.price_update_event.set()
                 self._market_activity_event.set()
+            self._update_market_summary_from_message(message)
             return
 
         # Order fill events from the account channel
@@ -970,6 +1028,7 @@ class BitvavoExchange(Exchange):
                 self.latest_price = price
                 self.price_update_event.set()
                 self._market_activity_event.set()
+            self._update_market_summary_from_message(message)
 
     def _reader_loop(self) -> None:
         """Background loop that reads from the websocket until stopped."""
@@ -1277,10 +1336,8 @@ class BitvavoExchange(Exchange):
             return set()
 
         by_client_order_id = self._index_open_orders_by_client_order_id(items)
-        by_side_price = self._index_open_orders_by_side_price(items)
 
         matched_levels: set[int] = set()
-        used_exchange_ids: set[str] = set()
 
         for level_index in sorted(planned_open_orders.keys()):
             if level_index < 0 or level_index >= len(level_prices):
@@ -1291,16 +1348,6 @@ class BitvavoExchange(Exchange):
             expected_client_order_id = self._client_order_id(f"sync-{level_index}", expected_reference)
             matched = by_client_order_id.get(expected_client_order_id)
             match_method = "client_reference"
-            if matched is not None:
-                exchange_oid = str(matched.get("orderId", "") or "")
-                if exchange_oid:
-                    used_exchange_ids.add(exchange_oid)
-            else:
-                match_method = "price_fallback"
-                planned_price = self._price_key(level_prices[level_index])
-                key = (planned_side, planned_price)
-                candidates = by_side_price.get(key, [])
-                matched = self._take_first_unused(candidates, used_exchange_ids)
 
             if matched is None:
                 continue
@@ -1355,8 +1402,6 @@ class BitvavoExchange(Exchange):
 
         items = self._get_open_orders()
         open_by_client_order_id = self._index_open_orders_by_client_order_id(items)
-        by_side_price = self._index_open_orders_by_side_price(items)
-        used_exchange_ids: set[str] = set()
 
         # Rebuild local tracking from exchange open-order truth.
         self._limit_orders.clear()
@@ -1371,41 +1416,9 @@ class BitvavoExchange(Exchange):
 
             matched = open_by_client_order_id.get(expected_client_order_id)
             match_method = "client_reference"
-
-            if matched is not None:
-                exchange_oid = str(matched.get("orderId", "") or "")
-                if exchange_oid:
-                    used_exchange_ids.add(exchange_oid)
-                planned_side = str(matched.get("side", "") or "").lower()
-            else:
-                match_method = "price_fallback"
-                buy_candidates = by_side_price.get(("buy", self._price_key(level_price)), [])
-                sell_candidates = by_side_price.get(("sell", self._price_key(level_price)), [])
-
-                matched_buy = self._take_first_unused(buy_candidates, used_exchange_ids)
-                matched_sell = self._take_first_unused(sell_candidates, used_exchange_ids)
-
-                if matched_buy is None and matched_sell is None:
-                    continue
-                if matched_buy is None:
-                    matched = matched_sell
-                    planned_side = "sell"
-                elif matched_sell is None:
-                    matched = matched_buy
-                    planned_side = "buy"
-                else:
-                    # Ambiguous double-open level; choose one deterministically.
-                    buy_oid = str(matched_buy.get("orderId", "") or "")
-                    sell_oid = str(matched_sell.get("orderId", "") or "")
-                    if buy_oid >= sell_oid:
-                        matched = matched_buy
-                        planned_side = "buy"
-                    else:
-                        matched = matched_sell
-                        planned_side = "sell"
-
-                if matched is None:
-                    continue
+            if matched is None:
+                continue
+            planned_side = str(matched.get("side", "") or "").lower()
 
             self._track_existing_level_order(
                 matched=matched,
@@ -1453,7 +1466,7 @@ class BitvavoExchange(Exchange):
         return [item for item in items if isinstance(item, dict)]
 
     def _infer_level_index_from_order_state(self, order_state: dict[str, Any], level_prices: list[float]) -> int | None:
-        """Infer grid level index from clientOrderId first, then side+price fallback."""
+        """Infer grid level index from bot-specific clientOrderId only."""
         client_order_id = str(order_state.get("clientOrderId", "") or "")
         if client_order_id:
             for level_index in range(len(level_prices)):
@@ -1461,16 +1474,6 @@ class BitvavoExchange(Exchange):
                 expected_client_order_id = self._client_order_id(f"sync-{level_index}", expected_reference)
                 if client_order_id == expected_client_order_id:
                     return level_index
-
-        price_key = self._price_key(self._to_float(order_state.get("price")))
-        if not price_key:
-            return None
-        side = str(order_state.get("side", "") or "").lower()
-        if side not in {"buy", "sell"}:
-            return None
-        for level_index, level_price in enumerate(level_prices):
-            if self._price_key(level_price) == price_key:
-                return level_index
         return None
 
     def _collect_historical_fills_for_levels(self, level_prices: list[float], quote_amount: float) -> list[dict[str, Any]]:
@@ -1521,22 +1524,18 @@ class BitvavoExchange(Exchange):
         if not items:
             return {}
 
-        by_side_price = self._index_open_orders_by_side_price(items)
+        by_client_order_id = self._index_open_orders_by_client_order_id(items)
         discovered: dict[int, str] = {}
 
         for level_index, level_price in enumerate(level_prices):
-            price_key = self._price_key(level_price)
-            buy_candidates = by_side_price.get(("buy", price_key), [])
-            sell_candidates = by_side_price.get(("sell", price_key), [])
-
-            if buy_candidates and not sell_candidates:
-                discovered[level_index] = "buy"
+            expected_reference = self._grid_level_reference(level_index)
+            expected_client_order_id = self._client_order_id(f"sync-{level_index}", expected_reference)
+            matched = by_client_order_id.get(expected_client_order_id)
+            if not matched:
                 continue
-            if sell_candidates and not buy_candidates:
-                discovered[level_index] = "sell"
-                continue
-            # Ambiguous (both sides present at same rounded level) or none:
-            # leave unresolved and let existing restore state handle it.
+            side = str(matched.get("side", "") or "").lower()
+            if side in {"buy", "sell"}:
+                discovered[level_index] = side
 
         return discovered
 
@@ -1610,15 +1609,153 @@ class BitvavoExchange(Exchange):
 
     def cancel_all_orders(self) -> None:
         """Cancel all pending limit orders on Bitvavo."""
-        for order_id, info in self._limit_orders.items():
-            exchange_oid = info.get("exchange_order_id", "")
-            if exchange_oid:
-                try:
-                    self._call_action("privateCancelOrder", {
-                        "market": self.market,
-                        "orderId": exchange_oid,
-                    })
-                except Exception:
-                    pass
-                self._exchange_order_map.pop(exchange_oid, None)
+        self.cancel_operator_orders(side=None)
         self._limit_orders.clear()
+        self._exchange_order_map.clear()
+
+    def _remaining_base_from_order(self, order_state: dict[str, Any]) -> float:
+        """Return remaining base amount for one open order payload."""
+        amount_remaining = self._to_float(order_state.get("amountRemaining"))
+        if amount_remaining > 0:
+            return amount_remaining
+
+        amount_total = self._to_float(order_state.get("amount"))
+        filled_amount = self._to_float(order_state.get("filledAmount"))
+        remaining = amount_total - filled_amount
+        return remaining if remaining > 0 else 0.0
+
+    def cancel_operator_orders(self, side: str | None = None) -> dict[str, Any]:
+        """Cancel open orders on the exchange scoped to this operator and market.
+
+        :param side: Optional side filter ("buy" or "sell").
+        :return: Summary with cancelled count and cancelled sell base amount.
+        """
+        if not self.authenticated:
+            raise RuntimeError(self._not_authenticated_error)
+
+        target_side = str(side or "").lower()
+        if target_side and target_side not in {"buy", "sell"}:
+            raise ValueError("side must be 'buy', 'sell', or None")
+
+        try:
+            items = self._get_open_orders()
+        except Exception:
+            items = []
+
+        cancelled = 0
+        cancelled_sell_base_amount = 0.0
+        cancelled_order_ids: list[str] = []
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if not self._operator_matches(item):
+                continue
+
+            status = str(item.get("status", "") or "")
+            if status and not self._is_open_order_status(status):
+                continue
+
+            item_side = str(item.get("side", "") or "").lower()
+            if target_side and item_side != target_side:
+                continue
+
+            order_id = str(item.get("orderId", "") or "")
+            client_order_id = str(item.get("clientOrderId", "") or "")
+            if not order_id and not client_order_id:
+                continue
+
+            if item_side == "sell":
+                cancelled_sell_base_amount += self._remaining_base_from_order(item)
+
+            try:
+                cancel_body: dict[str, Any] = {
+                    "market": self.market,
+                }
+                if self.operator_id is not None:
+                    cancel_body["operatorId"] = self.operator_id
+                if client_order_id:
+                    cancel_body["clientOrderId"] = client_order_id
+                if order_id:
+                    cancel_body["orderId"] = order_id
+
+                response = self._call_action(
+                    "privateCancelOrder",
+                    cancel_body,
+                    timeout=10.0,
+                )
+            except Exception:
+                continue
+
+            if response.get("errorCode") is not None:
+                continue
+
+            cancelled += 1
+            cancelled_order_ids.append(order_id)
+
+        for exchange_oid in cancelled_order_ids:
+            local_id = self._exchange_order_map.pop(exchange_oid, None)
+            if local_id:
+                self._limit_orders.pop(local_id, None)
+
+        return {
+            "cancelled": cancelled,
+            "cancelled_sell_base_amount": round(cancelled_sell_base_amount, 12),
+        }
+
+    def update_limit_order(self, order_id: str, quote_amount: float, limit_price: float) -> bool:
+        """Update one existing tracked limit order on Bitvavo."""
+        if not self.authenticated:
+            raise RuntimeError(self._not_authenticated_error)
+
+        order_info = self._limit_orders.get(order_id)
+        if not isinstance(order_info, dict):
+            return False
+
+        side = str(order_info.get("side", "") or "").lower()
+        if side not in {"buy", "sell"}:
+            return False
+        if quote_amount <= 0 or limit_price <= 0:
+            return False
+
+        body: dict[str, Any] = {
+            "market": self.market,
+            "operatorId": self.operator_id,
+            "price": self._format_price(limit_price),
+            "amount": self._format_amount_base(quote_amount / limit_price),
+            "postOnly": True,
+        }
+
+        exchange_oid = str(order_info.get("exchange_order_id", "") or "")
+        client_order_id = str(order_info.get("client_order_id", "") or "")
+        if client_order_id:
+            body["clientOrderId"] = client_order_id
+        elif exchange_oid:
+            body["orderId"] = exchange_oid
+        else:
+            body["clientOrderId"] = self._client_order_id(order_id, str(order_info.get("client_reference", "") or None))
+
+        response = self._call_action("privateUpdateOrder", body, timeout=10.0)
+        if response.get("errorCode") is not None:
+            return False
+
+        resp = self._extract_action_response(response)
+        if isinstance(resp, dict):
+            updated_exchange_oid = str(resp.get("orderId", "") or exchange_oid)
+            updated_client_order_id = str(resp.get("clientOrderId", "") or client_order_id)
+            updated_price = self._to_float(resp.get("price")) or limit_price
+        else:
+            updated_exchange_oid = exchange_oid
+            updated_client_order_id = client_order_id
+            updated_price = limit_price
+
+        if exchange_oid and exchange_oid != updated_exchange_oid:
+            self._exchange_order_map.pop(exchange_oid, None)
+        if updated_exchange_oid:
+            self._exchange_order_map[updated_exchange_oid] = order_id
+
+        order_info["quote_amount"] = float(self._format_amount_quote(quote_amount))
+        order_info["limit_price"] = float(self._format_price(updated_price))
+        order_info["exchange_order_id"] = updated_exchange_oid
+        order_info["client_order_id"] = updated_client_order_id
+        return True

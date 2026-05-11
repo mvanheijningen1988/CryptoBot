@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Body, Depends, HTTPException
@@ -38,6 +38,7 @@ from manager.app.schemas import (
     UpdateBudgetRequest,
 )
 from manager.app.services.agent_client import post_json
+from manager.app.services.agent_ws_bus import send_agent_command_ws
 
 router = APIRouter()
 
@@ -285,20 +286,21 @@ def _sum_filled_trade_pnl(bot_id: str, db: Session | None = None) -> float:
             db.close()
 
 
-def _compute_live_unrealized_pnl_from_fills(
+def _compute_live_pnl_state_from_fills(
     bot_id: str,
     current_price: float,
     db: Session | None = None,
-) -> tuple[float, float, float]:
-    """Compute unrealized PnL for remaining open base inventory from filled events.
+) -> tuple[float, float, float, float]:
+    """Compute realized+unrealized PnL state from filled events using FIFO lots.
 
     Returns a tuple of:
+    - realized_pnl_quote
     - unrealized_pnl_quote
     - open_base_amount
     - average_buy_price_for_open_base
     """
     if current_price <= 0:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
 
     owns_session = db is None
     if db is None:
@@ -313,59 +315,27 @@ def _compute_live_unrealized_pnl_from_fills(
             .all()
         )
     except SQLAlchemyError:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
     finally:
         if owns_session:
             db.close()
 
     # FIFO lots: each entry tracks remaining base qty and quote cost basis.
     lots: list[dict[str, float]] = []
+    realized_pnl = 0.0
 
     for fill in fills:
-        side = str(fill.side or "").lower()
-        quote_amount = float(fill.quote_amount or 0.0)
-        fill_price = float(fill.price or 0.0)
-        fee_paid_quote = float(fill.fee_paid_quote or 0.0)
-        if quote_amount <= 0 or fill_price <= 0:
-            continue
-
-        base_amount = quote_amount / fill_price
-
-        if side == "buy":
-            # Mirror runner/accounting behavior: fee is accounted by receiving less base.
-            net_base = max(0.0, base_amount - (fee_paid_quote / fill_price if fee_paid_quote > 0 else 0.0))
-            if net_base > 0:
-                lots.append({"qty": net_base, "cost": quote_amount})
-            continue
-
-        if side == "sell":
-            remaining_to_close = max(0.0, base_amount)
-            lot_idx = 0
-            while remaining_to_close > 1e-12 and lot_idx < len(lots):
-                lot = lots[lot_idx]
-                lot_qty = float(lot.get("qty", 0.0) or 0.0)
-                lot_cost = float(lot.get("cost", 0.0) or 0.0)
-                if lot_qty <= 1e-12:
-                    lot_idx += 1
-                    continue
-
-                take_qty = min(lot_qty, remaining_to_close)
-                unit_cost = lot_cost / lot_qty if lot_qty > 0 else 0.0
-                lot["qty"] = lot_qty - take_qty
-                lot["cost"] = max(0.0, lot_cost - (unit_cost * take_qty))
-                remaining_to_close -= take_qty
-                if lot["qty"] <= 1e-12:
-                    lot_idx += 1
+        realized_pnl += _apply_fill_to_open_lots(lots, fill)
 
     open_base = sum(max(0.0, float(l.get("qty", 0.0) or 0.0)) for l in lots)
     open_cost_quote = sum(max(0.0, float(l.get("cost", 0.0) or 0.0)) for l in lots)
     if open_base <= 0:
-        return 0.0, 0.0, 0.0
+        return realized_pnl, 0.0, 0.0, 0.0
 
     avg_buy_price = open_cost_quote / open_base if open_base > 0 else 0.0
     open_value_quote = open_base * float(current_price)
     unrealized_pnl = open_value_quote - open_cost_quote
-    return unrealized_pnl, open_base, avg_buy_price
+    return realized_pnl, unrealized_pnl, open_base, avg_buy_price
 
 
 def _reconstruct_live_balances_from_fills(
@@ -476,10 +446,10 @@ _EQUITY_AGGREGATION_TO_SECONDS: dict[str, int] = {
 
 def _normalize_equity_aggregation(raw: str | None) -> str:
     """Normalize and validate aggregation interval tokens."""
-    value = str(raw or "5m").strip().lower()
+    value = str(raw or "1m").strip().lower()
     if value in _EQUITY_AGGREGATION_TO_SECONDS or value == "1mo":
         return value
-    return "5m"
+    return "1m"
 
 
 def _bucket_start_for_aggregation(ts: object, aggregation: str) -> tuple[str, float] | None:
@@ -579,14 +549,65 @@ def _get_bot_equity_points(bot: Bot, db: Session) -> list[dict[str, object]]:
     with EQUITY_HISTORY_LOCK:
         memory_points = list(EQUITY_HISTORY.get(bot.id, []))
 
-    points = _build_persisted_equity_points(bot.id, db)
-    if bot.mode == "live" and not points:
-        points = _build_live_equity_points_from_fills(
-            bot.id,
-            float(budget.get("quote_budget", 0.0) or 0.0),
-            float(budget.get("base_budget", 0.0) or 0.0),
-            db,
+    if bot.mode == "live":
+        start_quote = float(budget.get("quote_budget", 0.0) or 0.0)
+        start_base = float(budget.get("base_budget", 0.0) or 0.0)
+
+        # Persistent-first for live mode: reconstruct from DB fills so the
+        # trend does not reset when in-memory history is truncated/restarted.
+        fill_points = _build_live_equity_points_from_fills(bot.id, start_quote, start_base, db)
+
+        merged: dict[str, dict[str, object]] = {
+            str(p.get("t", "")): {
+                "t": p.get("t"),
+                "v": float(p.get("v", 0.0) or 0.0),
+                "p": float(p.get("p", 0.0) or 0.0),
+            }
+            for p in fill_points
+            if p.get("t")
+        }
+
+        # Memory points are optional timeline anchors for denser price samples.
+        for p in memory_points:
+            t = str(p.get("t", ""))
+            if not t:
+                continue
+            merged[t] = {
+                "t": t,
+                "v": float(p.get("v", 0.0) or 0.0),
+                "p": float(p.get("p", 0.0) or 0.0),
+            }
+
+        timeline = sorted(
+            merged.values(),
+            key=lambda p: float(_timestamp_to_epoch_seconds(p.get("t")) or 0.0),
         )
+        if timeline:
+            return _rebuild_live_equity_points_from_fills(
+                bot.id,
+                timeline,
+                start_quote,
+                start_base,
+                db,
+            )
+
+        # No fills/timeline yet: fall back to memory points if available.
+        if memory_points:
+            return sorted(
+                [
+                    {
+                        "t": p.get("t"),
+                        "v": float(p.get("v", 0.0) or 0.0),
+                        "p": float(p.get("p", 0.0) or 0.0),
+                    }
+                    for p in memory_points
+                    if p.get("t")
+                ],
+                key=lambda p: float(_timestamp_to_epoch_seconds(p.get("t")) or 0.0),
+            )
+        return []
+
+    points = _build_persisted_equity_points(bot.id, db)
 
     if memory_points:
         merged: dict[str, dict[str, object]] = {
@@ -603,15 +624,9 @@ def _get_bot_equity_points(bot: Bot, db: Session) -> list[dict[str, object]]:
                 "v": float(p.get("v", 0.0) or 0.0),
                 "p": float(p.get("p", 0.0) or 0.0),
             }
-        points = sorted(merged.values(), key=lambda p: str(p.get("t", "")))
-
-    if bot.mode == "live":
-        points = _rebuild_live_equity_points_from_fills(
-            bot.id,
-            points,
-            float(budget.get("quote_budget", 0.0) or 0.0),
-            float(budget.get("base_budget", 0.0) or 0.0),
-            db,
+        points = sorted(
+            merged.values(),
+            key=lambda p: float(_timestamp_to_epoch_seconds(p.get("t")) or 0.0),
         )
 
     return points
@@ -637,24 +652,26 @@ def _apply_fill_to_balances(quote_balance: float, base_balance: float, fill: Tra
     return quote_balance, base_balance
 
 
-def _apply_fill_to_open_lots(lots: list[dict[str, float]], fill: TradeEvent) -> None:
-    """Apply one fill event to FIFO open lots used for unrealized PnL."""
+def _apply_fill_to_open_lots(lots: list[dict[str, float]], fill: TradeEvent) -> float:
+    """Apply one fill event to FIFO lots and return realized PnL delta."""
     side = str(fill.side or "").lower()
     quote_amount = float(fill.quote_amount or 0.0)
     fill_price = float(fill.price or 0.0)
     fee_paid_quote = float(fill.fee_paid_quote or 0.0)
     if quote_amount <= 0 or fill_price <= 0:
-        return
+        return 0.0
 
     base_amount = quote_amount / fill_price
     if side == "buy":
         net_base = max(0.0, base_amount - (fee_paid_quote / fill_price if fee_paid_quote > 0 else 0.0))
         if net_base > 0:
             lots.append({"qty": net_base, "cost": quote_amount})
-        return
+        return 0.0
 
     if side == "sell":
         remaining_to_close = max(0.0, base_amount)
+        matched_qty = 0.0
+        matched_cost = 0.0
         lot_idx = 0
         while remaining_to_close > 1e-12 and lot_idx < len(lots):
             lot = lots[lot_idx]
@@ -666,11 +683,21 @@ def _apply_fill_to_open_lots(lots: list[dict[str, float]], fill: TradeEvent) -> 
 
             take_qty = min(lot_qty, remaining_to_close)
             unit_cost = lot_cost / lot_qty if lot_qty > 0 else 0.0
+            matched_qty += take_qty
+            matched_cost += unit_cost * take_qty
             lot["qty"] = lot_qty - take_qty
             lot["cost"] = max(0.0, lot_cost - (unit_cost * take_qty))
             remaining_to_close -= take_qty
             if lot["qty"] <= 1e-12:
                 lot_idx += 1
+
+        if base_amount > 1e-12 and matched_qty > 0:
+            net_sell_quote = max(0.0, quote_amount - fee_paid_quote)
+            matched_ratio = min(1.0, matched_qty / base_amount)
+            matched_proceeds = net_sell_quote * matched_ratio
+            return matched_proceeds - matched_cost
+
+    return 0.0
 
 
 def _unrealized_from_open_lots(lots: list[dict[str, float]], point_price: float) -> float:
@@ -730,8 +757,7 @@ def _rebuild_live_equity_points_from_fills(
     for point_ts, point in parsed_points:
         while fill_idx < len(parsed_fills) and parsed_fills[fill_idx][0] <= point_ts:
             _, fill = parsed_fills[fill_idx]
-            realized_pnl += float(fill.trade_pnl or 0.0)
-            _apply_fill_to_open_lots(open_lots, fill)
+            realized_pnl += _apply_fill_to_open_lots(open_lots, fill)
             fill_idx += 1
 
         point_price = float(point.get("p", 0.0) or 0.0)
@@ -769,17 +795,20 @@ def _build_live_equity_points_from_fills(
         fill_price = float(fill.price or 0.0)
         if fill_price <= 0:
             continue
-        ts = fill.timestamp.isoformat() if isinstance(fill.timestamp, datetime) else ""
+        ts_dt = fill.timestamp if isinstance(fill.timestamp, datetime) else None
+        ts = ts_dt.isoformat() if ts_dt else ""
         if ts and not seen_start:
+            # Emit a baseline point just before first fill so chart reconstruction
+            # contains both pre-fill and post-fill equity values.
+            start_ts = (ts_dt - timedelta(seconds=1)).isoformat() if ts_dt else ts
             points.append({
-                "t": ts,
+                "t": start_ts,
                 "v": float(start_quote),
                 "p": fill_price,
             })
             seen_start = True
 
-        realized_pnl += float(fill.trade_pnl or 0.0)
-        _apply_fill_to_open_lots(open_lots, fill)
+        realized_pnl += _apply_fill_to_open_lots(open_lots, fill)
         unrealized_pnl = _unrealized_from_open_lots(open_lots, fill_price)
 
         if ts:
@@ -828,9 +857,8 @@ def _normalized_metrics_for_bot(bot: Bot, db: Session | None = None) -> tuple[di
     # - PnL = completed trade result + unrealized result on open base inventory.
     # - Equity = start budget + that total PnL.
     if bot.mode == "live":
-        trade_pnl_total = _sum_filled_trade_pnl(bot.id, db)
         current_price = float(latest_metrics.get("price", 0.0) or 0.0)
-        unrealized_pnl, open_base_amount, open_base_avg_buy_price = _compute_live_unrealized_pnl_from_fills(
+        trade_pnl_total, unrealized_pnl, open_base_amount, open_base_avg_buy_price = _compute_live_pnl_state_from_fills(
             bot.id,
             current_price,
             db,
@@ -984,8 +1012,13 @@ def resolve_agent_url(agent_id: str, db: Session) -> str:
     return agent.base_url
 
 
-def _find_running_agent_for_bot(bot_id: str, db: Session) -> Agent | None:
-    """Best-effort lookup: find an approved online agent currently running this bot."""
+def _find_running_agent_for_bot(bot_id: str, db: Session, include_stopped: bool = False) -> Agent | None:
+    """Best-effort lookup: find an approved online agent currently hosting this bot.
+
+    :param bot_id: Bot identifier to locate.
+    :param db: Database session.
+    :param include_stopped: When True, also match runners that exist but are not running.
+    """
     agents = (
         db.query(Agent)
         .filter(Agent.status == "online", Agent.approval_status == "approved")
@@ -1008,9 +1041,34 @@ def _find_running_agent_for_bot(bot_id: str, db: Session) -> Agent | None:
         for item in payload:
             if not isinstance(item, dict):
                 continue
-            if item.get("bot_id") == bot_id and bool(item.get("running")):
+            if item.get("bot_id") == bot_id and (include_stopped or bool(item.get("running"))):
                 return agent
     return None
+
+
+def _dispatch_agent_command(
+    agent: Agent,
+    action: str,
+    payload: dict,
+    http_url: str,
+    ws_timeout_seconds: float = 6.0,
+) -> tuple[bool, str, dict | None]:
+    """Send a command to an agent, preferring websocket and falling back to HTTP."""
+    ws_ok, ws_message, ws_data = send_agent_command_ws(
+        agent_id=agent.id,
+        action=action,
+        payload=payload,
+        timeout_seconds=ws_timeout_seconds,
+    )
+    if ws_ok:
+        return True, ws_message, ws_data
+
+    ok, message = post_json(http_url, payload)
+    if ok:
+        return True, message, None
+    if ws_message and ws_message not in {"", "ws_command_failed"}:
+        return False, f"{message} (ws: {ws_message})", None
+    return False, message, None
 
 
 @router.post("/bots", responses={400: {"description": "Agent not approved"}, 404: {"description": "Agent not found"}})
@@ -1191,9 +1249,15 @@ def start_bot(bot_id: str, payload: StartBotRequest, db: DbSession) -> dict:
     if saved_state is not None:
         start_payload["runner_state"] = saved_state
 
-    ok, message = post_json(
-        f"{agent_url}/agent/bots/{bot.id}/start",
-        start_payload,
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
+
+    ok, message, _ = _dispatch_agent_command(
+        agent=agent,
+        action="start_bot",
+        payload=start_payload,
+        http_url=f"{agent_url}/agent/bots/{bot.id}/start",
     )
     if not ok:
         with scoped_context(bot_id=bot.id, agent_id=agent_id, component="manager.routes.bots.start"):
@@ -1261,9 +1325,11 @@ def move_bot(bot_id: str, payload: MoveBotRequest, db: DbSession) -> dict:
     if was_active and source_agent_id:
         source = db.query(Agent).filter(Agent.id == source_agent_id).first()
         if source and source.id != target.id:
-            ok, message = post_json(
-                f"{source.base_url}/agent/bots/{bot.id}/stop",
-                {"bot_id": bot.id},
+            ok, message, _ = _dispatch_agent_command(
+                agent=source,
+                action="stop_bot",
+                payload={"bot_id": bot.id},
+                http_url=f"{source.base_url}/agent/bots/{bot.id}/stop",
             )
             if not ok:
                 raise HTTPException(status_code=502, detail=f"Source agent stop failed: {message}")
@@ -1277,9 +1343,11 @@ def move_bot(bot_id: str, payload: MoveBotRequest, db: DbSession) -> dict:
         if saved_state:
             start_payload["runner_state"] = saved_state
 
-        ok, message = post_json(
-            f"{target.base_url}/agent/bots/{bot.id}/start",
-            start_payload,
+        ok, message, _ = _dispatch_agent_command(
+            agent=target,
+            action="start_bot",
+            payload=start_payload,
+            http_url=f"{target.base_url}/agent/bots/{bot.id}/start",
         )
         if not ok:
             raise HTTPException(status_code=502, detail=f"Target agent start failed: {message}")
@@ -1326,9 +1394,11 @@ def stop_bot(bot_id: str, db: DbSession) -> dict:
     if bot.assigned_agent_id:
         agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
         if agent and agent.approval_status == "approved":
-            ok, message = post_json(
-                f"{agent.base_url}/agent/bots/{bot.id}/stop",
-                {"bot_id": bot.id},
+            ok, message, _ = _dispatch_agent_command(
+                agent=agent,
+                action="stop_bot",
+                payload={"bot_id": bot.id},
+                http_url=f"{agent.base_url}/agent/bots/{bot.id}/stop",
             )
             if not ok:
                 logger.warning(
@@ -1374,9 +1444,11 @@ def delete_bot(bot_id: str, db: DbSession, payload: DeleteBotRequest | None = Bo
             agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
             if not agent or agent.approval_status != "approved":
                 raise HTTPException(status_code=502, detail="Assigned agent unavailable for delete preparation")
-            ok, message = post_json(
-                f"{agent.base_url}/agent/bots/{bot.id}/prepare-delete",
-                {"bot_id": bot.id, "delete_mode": delete_mode},
+            ok, message, _ = _dispatch_agent_command(
+                agent=agent,
+                action="prepare_delete",
+                payload={"bot_id": bot.id, "delete_mode": delete_mode},
+                http_url=f"{agent.base_url}/agent/bots/{bot.id}/prepare-delete",
             )
             if not ok:
                 raise HTTPException(status_code=502, detail=f"Agent delete preparation failed: {message}")
@@ -1386,10 +1458,28 @@ def delete_bot(bot_id: str, db: DbSession, payload: DeleteBotRequest | None = Bo
             bot.updated_at = datetime.now(UTC)
             db.commit()
         else:
+            inferred_agent = _find_running_agent_for_bot(bot.id, db, include_stopped=True)
+            if inferred_agent:
+                ok, message, _ = _dispatch_agent_command(
+                    agent=inferred_agent,
+                    action="prepare_delete",
+                    payload={"bot_id": bot.id, "delete_mode": delete_mode},
+                    http_url=f"{inferred_agent.base_url}/agent/bots/{bot.id}/prepare-delete",
+                )
+                if not ok:
+                    raise HTTPException(status_code=502, detail=f"Agent delete preparation failed: {message}")
+
+                # Preserve recovered routing for diagnostics until record removal.
+                bot.assigned_agent_id = inferred_agent.id
+                bot.status = "stopped"
+                _set_manual_stop_flag(bot, True)
+                bot.updated_at = datetime.now(UTC)
+                db.commit()
+
             saved_state = _load_saved_runner_state(bot) or {}
             saved_open_orders = saved_state.get("open_orders") if isinstance(saved_state, dict) else {}
             has_saved_open_orders = isinstance(saved_open_orders, dict) and bool(saved_open_orders)
-            if bot.status in _ACTIVE_BOT_STATUSES or has_saved_open_orders:
+            if not inferred_agent and (bot.status in _ACTIVE_BOT_STATUSES or has_saved_open_orders):
                 raise HTTPException(status_code=409, detail="Bot has no assigned agent to cancel open orders before delete")
     elif bot.status in _ACTIVE_BOT_STATUSES:
         if not bot.assigned_agent_id:
@@ -1397,9 +1487,11 @@ def delete_bot(bot_id: str, db: DbSession, payload: DeleteBotRequest | None = Bo
         agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
         if not agent or agent.approval_status != "approved":
             raise HTTPException(status_code=502, detail="Assigned agent unavailable for delete preparation")
-        ok, message = post_json(
-            f"{agent.base_url}/agent/bots/{bot.id}/prepare-delete",
-            {"bot_id": bot.id, "delete_mode": delete_mode},
+        ok, message, _ = _dispatch_agent_command(
+            agent=agent,
+            action="prepare_delete",
+            payload={"bot_id": bot.id, "delete_mode": delete_mode},
+            http_url=f"{agent.base_url}/agent/bots/{bot.id}/prepare-delete",
         )
         if not ok:
             raise HTTPException(status_code=502, detail=f"Agent delete preparation failed: {message}")
@@ -1447,16 +1539,21 @@ def update_budget(bot_id: str, payload: UpdateBudgetRequest, db: DbSession) -> d
     bot.updated_at = datetime.now(UTC)
 
     if bot.assigned_agent_id and bot.status in _ACTIVE_BOT_STATUSES:
-        agent_url = resolve_agent_url(bot.assigned_agent_id, db)
-        ok, message = post_json(
-            f"{agent_url}/agent/bots/{bot.id}/budget",
-            {
-                "bot_id": bot.id,
-                "budget": {
-                    "quote_budget": payload.quote_budget,
-                    "base_budget": payload.base_budget,
-                },
+        agent = db.query(Agent).filter(Agent.id == bot.assigned_agent_id).first()
+        if not agent:
+            raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
+        budget_payload = {
+            "bot_id": bot.id,
+            "budget": {
+                "quote_budget": payload.quote_budget,
+                "base_budget": payload.base_budget,
             },
+        }
+        ok, message, _ = _dispatch_agent_command(
+            agent=agent,
+            action="update_budget",
+            payload=budget_payload,
+            http_url=f"{agent.base_url}/agent/bots/{bot.id}/budget",
         )
         if not ok:
             raise HTTPException(status_code=502, detail=f"Agent budget update failed: {message}")
@@ -1496,9 +1593,11 @@ def sync_bot(bot_id: str, db: DbSession) -> dict:
             agent_url=agent.base_url,
         )
 
-    ok, message = post_json(
-        f"{agent.base_url}/agent/bots/{bot.id}/sync",
-        {"bot_id": bot.id},
+    ok, message, details = _dispatch_agent_command(
+        agent=agent,
+        action="sync_bot",
+        payload={"bot_id": bot.id},
+        http_url=f"{agent.base_url}/agent/bots/{bot.id}/sync",
     )
     if not ok:
         with scoped_context(bot_id=bot.id, agent_id=agent.id, component="manager.routes.bots.sync"):
@@ -1524,13 +1623,20 @@ def sync_bot(bot_id: str, db: DbSession) -> dict:
             agent_id=agent.id,
         )
 
-    return {"ok": True, "bot_id": bot.id, "agent_id": agent.id, "message": message}
+    result: dict = {"ok": True, "bot_id": bot.id, "agent_id": agent.id, "message": message}
+    if details:
+        result["details"] = details
+    return result
 
 
 @router.post("/agents/{agent_id}/bots/{bot_id}/metrics", responses={404: {"description": "Bot not found"}})
 def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: DbSession) -> dict:
+    return ingest_agent_metrics(agent_id=agent_id, bot_id=bot_id, payload=payload, db=db)
+
+
+def ingest_agent_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Session) -> dict:
     """
-    Accept a metrics snapshot from an agent for a specific bot.
+    Ingest an agent metrics snapshot for a specific bot.
 
     Records the equity data-point for the budget trend chart and
     generates trade events when the trade count increases.
@@ -1538,7 +1644,7 @@ def push_metrics(agent_id: str, bot_id: str, payload: MetricsPushRequest, db: Db
     :param agent_id: Unique identifier of the reporting agent.
     :param bot_id: Unique identifier of the bot.
     :param payload: Metrics data containing a BotSnapshot.
-    :param db: Database session (injected).
+    :param db: Database session.
     :return: Dict with ok status.
     :raises HTTPException: 404 if bot not found.
     """
@@ -1708,7 +1814,7 @@ def get_single_trade_event(event_id: str) -> dict:
 
 
 @router.get("/bots/{bot_id}/equity-history")
-def get_equity_history(bot_id: str, db: DbSession, aggregation: str = "5m") -> dict:
+def get_equity_history(bot_id: str, db: DbSession, aggregation: str = "1m") -> dict:
     """Return equity data-points and budget info for the trend chart.
 
     :param bot_id: The bot to fetch history for.
@@ -1734,34 +1840,76 @@ def get_equity_history(bot_id: str, db: DbSession, aggregation: str = "5m") -> d
     }
 
 
+def _build_total_equity_series_entry(bot: Bot, db: Session, agg: str) -> tuple[dict | None, float, float, float]:
+    config = json.loads(bot.config_json or "{}")
+    budget = config.get("budget", {})
+    starting_budget = float(budget.get("quote_budget", 0) or 0.0)
+    metrics, _ = _normalized_metrics_for_bot(bot, db)
+    bot_total_equity = float(metrics.get("total_equity_quote", starting_budget) or starting_budget)
+    bot_pnl = _trade_based_pnl(metrics, starting_budget)
+
+    points = _aggregate_equity_points(_get_bot_equity_points(bot, db), agg)
+    if points:
+        last = dict(points[-1])
+        last["v"] = bot_total_equity
+        points[-1] = last
+
+    if not points:
+        return None, starting_budget, bot_total_equity, bot_pnl
+
+    quote_currency = str(config.get("quote_currency", "") or budget.get("quote_currency", "") or "")
+    return (
+        {
+            "bot_id": bot.id,
+            "bot_name": bot.name,
+            "quote_currency": quote_currency,
+            "starting_budget": starting_budget,
+            "total_equity": bot_total_equity,
+            "pnl": bot_pnl,
+            "points": points,
+        },
+        starting_budget,
+        bot_total_equity,
+        bot_pnl,
+    )
+
+
+def _build_total_equity_points(series: list[dict]) -> list[dict[str, float | str | int]]:
+    ts_map: dict[str, float] = {}
+    for entry in series:
+        points = list(entry.get("points") or [])
+        for point in points:
+            t = str(point.get("t", ""))
+            if not t:
+                continue
+            ts_map[t] = ts_map.get(t, 0.0) + float(point.get("v", 0.0) or 0.0)
+    return [{"t": t, "v": v, "p": 0} for t, v in sorted(ts_map.items())]
+
+
 @router.get("/bots/equity-history/total")
-def get_total_equity_history(db: DbSession, aggregation: str = "5m") -> dict:
-    """Return combined equity data-points across all bots."""
+def get_total_equity_history(db: DbSession, aggregation: str = "1m") -> dict:
+    """Return combined equity data-points across all bots.
+
+    Besides the aggregated total line, this endpoint also returns one
+    per-bot equity series so the frontend can render separate compound
+    lines in "all bots" mode (including quote currency labels).
+    """
     bots = db.query(Bot).all()
     total_starting_budget = 0.0
     total_equity = 0.0
     total_pnl = 0.0
     agg = _normalize_equity_aggregation(aggregation)
+    series: list[dict] = []
 
     for bot in bots:
-        config = json.loads(bot.config_json) if bot else {}
-        budget = config.get("budget", {})
-        total_starting_budget += budget.get("quote_budget", 0)
-        metrics, _ = _normalized_metrics_for_bot(bot, db) if bot else ({}, 0.0)
-        total_equity += metrics.get("total_equity_quote", budget.get("quote_budget", 0))
-        total_pnl += _trade_based_pnl(metrics, float(budget.get("quote_budget", 0) or 0))
+        entry, starting_budget, bot_total_equity, bot_pnl = _build_total_equity_series_entry(bot, db, agg)
+        total_starting_budget += starting_budget
+        total_equity += bot_total_equity
+        total_pnl += bot_pnl
+        if entry:
+            series.append(entry)
 
-    # Build a combined timeline by summing per-bucket values from each bot.
-    ts_map: dict[str, float] = {}
-    for bot in bots:
-        pts = _aggregate_equity_points(_get_bot_equity_points(bot, db), agg)
-        for p in pts:
-            t = str(p.get("t", ""))
-            if not t:
-                continue
-            ts_map[t] = ts_map.get(t, 0.0) + float(p.get("v", 0.0) or 0.0)
-
-    points = [{"t": t, "v": v, "p": 0} for t, v in sorted(ts_map.items())]
+    points = _build_total_equity_points(series)
 
     return {
         "points": points,
@@ -1769,6 +1917,7 @@ def get_total_equity_history(db: DbSession, aggregation: str = "5m") -> dict:
         "starting_budget": total_starting_budget,
         "total_equity": total_equity,
         "pnl": total_pnl,
+        "series": series,
     }
 
 

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CryptoBot Manager</title>
-    <link rel="stylesheet" href="/static/dashboard.css?v=20260511fix20" />
+    <link rel="stylesheet" href="/static/dashboard.css?v=20260511fix22" />
   </head>
   <body>
     <header>
@@ -26,29 +26,26 @@
         <button class="tab-btn active" data-tab="tab_dashboard" data-i18n="tab_dashboard">Dashboard</button>
         <button class="tab-btn" data-tab="tab_agents" data-i18n="tab_agents">Agents</button>
         <button class="tab-btn" data-tab="tab_diagnostics" data-i18n="tab_diagnostics">Diagnostics</button>
+        <button class="tab-btn" data-tab="tab_settings" data-i18n="tab_settings">Settings</button>
       </div>
 
       <!-- Dashboard tab -->
       <div id="tab_dashboard" class="tab-pane active">
-        <div style="margin-bottom:12px" id="new_bot_wrapper">
-          <button id="open_create_bot" style="width:auto;padding:8px 20px;" data-i18n="btn_new_bot">+ New Bot</button>
-        </div>
         <div class="dashboard-grid">
           <section class="card bots-card">
-            <h2 data-i18n="bots_title">Bots</h2>
+            <div class="bots-card-header">
+              <h2 data-i18n="bots_title">Bots</h2>
+              <div id="new_bot_wrapper">
+                <button id="open_create_bot" class="bots-add-btn" type="button" aria-label="New bot" title="New bot">+</button>
+              </div>
+            </div>
             <div class="bots-table-wrap">
             <table>
               <thead>
                 <tr>
                   <th data-i18n="th_name">Name</th>
                   <th data-i18n="th_market">Market</th>
-                  <th data-i18n="th_mode">Mode</th>
                   <th data-i18n="th_status">Status</th>
-                  <th data-i18n="th_agent">Agent</th>
-                  <th data-i18n="th_last_price">Price</th>
-                  <th data-i18n="th_equity">Equity</th>
-                  <th data-i18n="th_pnl">PnL</th>
-                  <th data-i18n="th_trades">Trades</th>
                   <th data-i18n="th_runtime">Runtime</th>
                   <th data-i18n="th_actions">Actions</th>
                 </tr>
@@ -57,63 +54,30 @@
             </table>
             </div>
           </section>
-        </div>
-        <div style="margin-top:12px">
-          <section class="card notification-card">
-            <h2 data-i18n="notifications_title">Notifications</h2>
-            <div class="notification-tabs">
-              <button class="ntab-btn active" data-ntab="trade_events_list" data-i18n="ntab_trades">Trades</button>
-              <button class="ntab-btn" data-ntab="orders_list" data-i18n="ntab_orders">Orders</button>
-              <button class="ntab-btn" data-ntab="events_list" data-i18n="ntab_agents">Agents</button>
-            </div>
-            <div id="trade_events_list" class="events-list ntab-pane active"></div>
-            <div id="orders_list" class="ntab-pane">
-              <div class="orders-toolbar">
-                <div id="orders_active_chips" class="orders-active-chips" aria-live="polite"></div>
-                <button id="orders_reset_all" type="button" class="secondary">Reset all filters</button>
+          <section class="card equity-card">
+            <div class="equity-card-header">
+              <h2 data-i18n="equity_chart_title">Budget Trend</h2>
+              <div class="chart-controls">
+                <select id="equity_chart_bot">
+                  <option value="" data-i18n="lbl_select_bot">Select a bot…</option>
+                </select>
+                <select id="equity_chart_aggregation">
+                  <option value="1m" data-i18n="agg_1m">1 min</option>
+                  <option value="5m" data-i18n="agg_5m">5 min</option>
+                  <option value="10m" data-i18n="agg_10m">10 min</option>
+                  <option value="15m" data-i18n="agg_15m">15 min</option>
+                  <option value="30m" data-i18n="agg_30m">30 min</option>
+                  <option value="1h" data-i18n="agg_1h">1 hour</option>
+                  <option value="2h" data-i18n="agg_2h">2 hours</option>
+                  <option value="4h" data-i18n="agg_4h">4 hours</option>
+                  <option value="6h" data-i18n="agg_6h">6 hours</option>
+                  <option value="8h" data-i18n="agg_8h">8 hours</option>
+                  <option value="12h" data-i18n="agg_12h">12 hours</option>
+                  <option value="1d" data-i18n="agg_1d">1 day</option>
+                  <option value="1w" data-i18n="agg_1w">1 week</option>
+                  <option value="1mo" data-i18n="agg_1mo">1 month</option>
+                </select>
               </div>
-              <table class="orders-table">
-                <thead>
-                  <tr>
-                    <th data-i18n="th_time" data-order-field="timestamp">Time</th>
-                    <th data-i18n="th_market" data-order-field="market">Market</th>
-                    <th data-i18n="th_type" data-order-field="event_type">Type</th>
-                    <th data-i18n="th_side" data-order-field="side">Side</th>
-                    <th data-i18n="th_price" data-order-field="price">Price</th>
-                    <th data-i18n="th_amount" data-order-field="quote_amount">Amount</th>
-                    <th data-i18n="th_fee_amount" data-order-field="fee_paid_quote">Fee</th>
-                    <th data-i18n="lbl_pnl" data-order-field="trade_pnl">PnL</th>
-                  </tr>
-                </thead>
-                <tbody id="orders_body"></tbody>
-              </table>
-            </div>
-            <div id="events_list" class="events-list ntab-pane"></div>
-          </section>
-        </div>
-        <div style="margin-top:12px">
-          <section class="card">
-            <h2 data-i18n="equity_chart_title">Budget Trend</h2>
-            <div class="chart-controls">
-              <select id="equity_chart_bot">
-                <option value="" data-i18n="lbl_select_bot">Select a bot…</option>
-              </select>
-              <select id="equity_chart_aggregation">
-                <option value="1m" data-i18n="agg_1m">1 min</option>
-                <option value="5m" data-i18n="agg_5m">5 min</option>
-                <option value="10m" data-i18n="agg_10m">10 min</option>
-                <option value="15m" data-i18n="agg_15m">15 min</option>
-                <option value="30m" data-i18n="agg_30m">30 min</option>
-                <option value="1h" data-i18n="agg_1h">1 hour</option>
-                <option value="2h" data-i18n="agg_2h">2 hours</option>
-                <option value="4h" data-i18n="agg_4h">4 hours</option>
-                <option value="6h" data-i18n="agg_6h">6 hours</option>
-                <option value="8h" data-i18n="agg_8h">8 hours</option>
-                <option value="12h" data-i18n="agg_12h">12 hours</option>
-                <option value="1d" data-i18n="agg_1d">1 day</option>
-                <option value="1w" data-i18n="agg_1w">1 week</option>
-                <option value="1mo" data-i18n="agg_1mo">1 month</option>
-              </select>
             </div>
             <div id="equity_chart_info" class="chart-info" style="display:none;">
               <span><strong data-i18n="lbl_starting_budget">Budget</strong>: <span id="equity_info_budget">-</span></span>
@@ -121,6 +85,84 @@
               <span><strong data-i18n="lbl_total">Total</strong>: <span id="equity_info_total">-</span></span>
             </div>
             <canvas id="equity_chart" width="800" height="220"></canvas>
+          </section>
+        </div>
+        <div style="margin-top:12px">
+          <section class="card notification-card">
+            <div class="notification-tabs">
+              <button class="ntab-btn active" data-ntab="balance_list" data-i18n="ntab_balance">Balance</button>
+              <button class="ntab-btn" data-ntab="open_orders_list"><span data-i18n="ntab_open_orders">Open Orders</span> <span id="open_orders_count">(0)</span></button>
+              <button class="ntab-btn" data-ntab="order_history_list" data-i18n="ntab_order_history">Order History</button>
+              <button class="ntab-btn" data-ntab="trade_history_list" data-i18n="ntab_trade_history">Trade History</button>
+            </div>
+            <div id="balance_list" class="ntab-pane active">
+              <table class="notif-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th_asset">Asset</th>
+                    <th data-i18n="th_price">Price</th>
+                    <th data-i18n="th_24h_change">24h change</th>
+                    <th data-i18n="th_euro_value">Euro value</th>
+                    <th data-i18n="th_balance">Balance</th>
+                    <th data-i18n="th_available_balance">Available balance</th>
+                    <th data-i18n="th_in_orders">In orders</th>
+                  </tr>
+                </thead>
+                <tbody id="balance_body"></tbody>
+              </table>
+            </div>
+            <div id="open_orders_list" class="ntab-pane">
+              <table class="notif-table notif-table-clickable">
+                <thead>
+                  <tr>
+                    <th data-i18n="th_market">Market</th>
+                    <th data-i18n="th_order_type">Order type</th>
+                    <th data-i18n="th_side">Side</th>
+                    <th data-i18n="th_total">Total</th>
+                    <th data-i18n="th_trigger_price">Trigger price</th>
+                    <th data-i18n="th_limit_price">Limit price</th>
+                    <th data-i18n="th_total_amount">Total amount</th>
+                    <th data-i18n="th_open_amount">Open amount</th>
+                    <th data-i18n="th_filled_amount">Filled amount</th>
+                    <th data-i18n="th_time">Date & Time</th>
+                  </tr>
+                </thead>
+                <tbody id="open_orders_body"></tbody>
+              </table>
+            </div>
+            <div id="order_history_list" class="ntab-pane">
+              <table class="notif-table notif-table-clickable">
+                <thead>
+                  <tr>
+                    <th data-i18n="th_market">Market</th>
+                    <th data-i18n="th_order_type">Order type</th>
+                    <th data-i18n="th_side">Side</th>
+                    <th data-i18n="th_total">Total</th>
+                    <th data-i18n="th_amount">Amount</th>
+                    <th data-i18n="th_price">Price</th>
+                    <th data-i18n="th_order_status">Order status</th>
+                    <th data-i18n="th_time">Date & Time</th>
+                  </tr>
+                </thead>
+                <tbody id="order_history_body"></tbody>
+              </table>
+            </div>
+            <div id="trade_history_list" class="ntab-pane">
+              <table class="notif-table notif-table-clickable">
+                <thead>
+                  <tr>
+                    <th data-i18n="th_market">Market</th>
+                    <th data-i18n="th_side">Side</th>
+                    <th data-i18n="th_total">Total</th>
+                    <th data-i18n="th_amount">Amount</th>
+                    <th data-i18n="th_price">Price</th>
+                    <th data-i18n="th_fee">Fee</th>
+                    <th data-i18n="th_time">Date & Time</th>
+                  </tr>
+                </thead>
+                <tbody id="trade_history_body"></tbody>
+              </table>
+            </div>
           </section>
         </div>
         <div style="margin-top:12px">
@@ -203,6 +245,68 @@
             </div>
           </div>
           <div id="diag_debug_logs" class="diag-log-list"></div>
+        </section>
+      </div>
+
+      <!-- Settings tab -->
+      <div id="tab_settings" class="tab-pane">
+        <section class="card" style="margin-bottom:12px;">
+          <h2 data-i18n="settings_title">Configuration Settings</h2>
+          <p class="diag-hint" data-i18n="settings_hint">Configure settings through form fields. Changes are stored in the database.</p>
+          <div class="diag-actions" style="margin-bottom:12px;">
+            <button id="settings_reload_btn" class="secondary" data-i18n="btn_refresh">Refresh now</button>
+            <button id="settings_save_btn" data-i18n="settings_save_btn">Save Settings</button>
+          </div>
+          <div id="settings_status" class="diag-hint"></div>
+        </section>
+
+        <section class="card">
+          <div class="settings-subtabs">
+            <button class="settings-subtab-btn active" data-settings-tab="General" data-i18n="settings_subtab_general">General</button>
+            <button class="settings-subtab-btn" data-settings-tab="Agent" data-i18n="settings_subtab_agent">Agent</button>
+            <button class="settings-subtab-btn" data-settings-tab="Manager" data-i18n="settings_subtab_manager">Manager</button>
+            <button class="settings-subtab-btn" data-settings-tab="Exchange" data-i18n="settings_subtab_exchange">Exchange</button>
+          </div>
+          <div id="settings_fields"></div>
+          <div id="settings_exchanges" style="display:none;"></div>
+          <div id="settings_exchange_form" class="settings-exchange-form" style="display:none;">
+            <h3 id="settings_exchange_form_title" data-i18n="settings_exchange_add">Add exchange</h3>
+            <div class="settings-grid">
+              <label class="settings-field">
+                <span class="settings-key" data-i18n="settings_field_name">Name</span>
+                <input id="exchange_name" type="text" />
+              </label>
+              <label class="settings-field">
+                <span class="settings-key" data-i18n="settings_field_description">Description</span>
+                <input id="exchange_description" type="text" />
+              </label>
+              <label class="settings-field">
+                <span class="settings-key" data-i18n="settings_exchange_base_url">Base URL</span>
+                <input id="exchange_base_url" type="text" />
+              </label>
+              <label class="settings-field">
+                <span class="settings-key" data-i18n="settings_exchange_ws_url">WebSocket URL</span>
+                <input id="exchange_ws_url" type="text" />
+              </label>
+              <label class="settings-field">
+                <span class="settings-key" data-i18n="settings_exchange_endpoints_key">Endpoints key</span>
+                <input id="exchange_endpoints_key" type="text" />
+              </label>
+              <label class="settings-field">
+                <span class="settings-key" data-i18n="settings_exchange_secret">Secret</span>
+                <input id="exchange_secret" type="password" />
+              </label>
+              <label class="settings-field">
+                <span class="settings-key" data-i18n="settings_exchange_default_market">Default market</span>
+                <input id="exchange_default_market" type="text" placeholder="BTC-EUR" />
+              </label>
+            </div>
+            <div class="diag-actions" style="margin-top:10px;">
+              <button id="settings_exchange_add_btn" class="secondary" data-i18n="settings_exchange_add">Add exchange</button>
+              <button id="settings_exchange_update_btn" style="display:none;" data-i18n="settings_exchange_update">Update exchange</button>
+              <button id="settings_exchange_cancel_btn" class="secondary" style="display:none;" data-i18n="settings_exchange_cancel">Cancel</button>
+            </div>
+          </div>
         </section>
       </div>
     </main>
@@ -436,6 +540,40 @@
       </div>
     </dialog>
 
+    <!-- Notifications detail modal -->
+    <dialog id="notification_detail_modal" class="modal-backdrop">
+      <div class="modal" style="width:min(620px,92vw);grid-template-rows:auto 1fr auto;">
+        <div class="modal-header">
+          <h3 class="modal-title" id="notification_detail_title" data-i18n="notif_detail_title">Details</h3>
+        </div>
+        <div class="modal-body" style="padding:14px;max-height:72vh;overflow-y:auto;">
+          <div id="notification_detail_content"></div>
+        </div>
+        <div class="modal-footer">
+          <div class="bot-actions">
+            <button id="close_notification_detail" data-i18n="btn_close">Close</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- Bot detail modal -->
+    <dialog id="bot_detail_modal" class="modal-backdrop">
+      <div class="modal" style="width:min(700px,94vw);grid-template-rows:auto 1fr auto;">
+        <div class="modal-header">
+          <h3 class="modal-title" id="bot_detail_title" data-i18n="bot_detail_title">Bot Details</h3>
+        </div>
+        <div class="modal-body" style="padding:14px;max-height:72vh;overflow-y:auto;">
+          <div id="bot_detail_content"></div>
+        </div>
+        <div class="modal-footer">
+          <div class="bot-actions">
+            <button id="close_bot_detail_modal" data-i18n="btn_close">Close</button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
     <!-- Delete bot mode modal -->
     <dialog id="delete_bot_modal" class="modal-backdrop">
       <div class="modal" style="width:min(560px,92vw);grid-template-rows:auto 1fr auto;">
@@ -491,7 +629,7 @@
     </dialog>
 
     <!-- Scripts: i18n dictionary must load before dashboard.js -->
-    <script src="/static/i18n.js?v=20260511fix18"></script>
-    <script src="/static/dashboard.js?v=20260511fix18"></script>
+    <script src="/static/i18n.js?v=20260511fix22"></script>
+    <script src="/static/dashboard.js?v=20260511fix32"></script>
   </body>
 </html>

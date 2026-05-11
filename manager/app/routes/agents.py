@@ -17,6 +17,7 @@ from manager.app.events import add_agent_event
 from manager.app.failover import detach_bots_for_agent
 from manager.app.models import Agent, Bot
 from manager.app.routes.bots import _normalized_metrics_for_bot
+from manager.app.services.settings_store import build_runtime_snapshot, ensure_settings_seeded
 from manager.app.schemas import AgentHeartbeatRequest, AgentRegisterRequest
 
 router = APIRouter()
@@ -71,7 +72,8 @@ def register_agent(payload: AgentRegisterRequest, db: DbSession) -> dict:
             agent.status = "pending"
         agent.last_heartbeat = datetime.now(UTC)
     db.commit()
-    return {"ok": True, "approval_status": agent.approval_status}
+    ensure_settings_seeded(db)
+    return {"ok": True, "approval_status": agent.approval_status, "settings": build_runtime_snapshot(db)}
 
 
 @router.post("/agents/{agent_id}/heartbeat", responses={404: {"description": "Agent not found"}})
@@ -252,6 +254,16 @@ def list_agents(db: DbSession) -> list[dict]:
         }
         for a in agents
     ]
+
+
+@router.get("/agents/{agent_id}/settings-runtime", responses={404: {"description": "Agent not found"}})
+def get_agent_runtime_settings(agent_id: str, db: DbSession) -> dict:
+    """Return the effective runtime settings snapshot for one registered agent."""
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail=_AGENT_NOT_FOUND)
+    ensure_settings_seeded(db)
+    return {"ok": True, "settings": build_runtime_snapshot(db)}
 
 
 @router.get("/agent-events")

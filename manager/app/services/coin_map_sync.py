@@ -10,14 +10,9 @@ from pathlib import Path
 
 import requests
 
-logger = logging.getLogger(__name__)
+from manager.app.services.runtime_settings import get_float, get_int, get_setting
 
-COIN_MAP_SOURCE_URL = os.getenv(
-    "COIN_MAP_SOURCE_URL",
-    "https://raw.githubusercontent.com/ErikThiart/cryptocurrency-icons/refs/heads/master/coin_map.json",
-)
-COIN_MAP_SYNC_INTERVAL_SECONDS = max(300, int(os.getenv("COIN_MAP_SYNC_INTERVAL_SECONDS", "86400")))
-COIN_MAP_HTTP_TIMEOUT_SECONDS = float(os.getenv("COIN_MAP_HTTP_TIMEOUT_SECONDS", "20"))
+logger = logging.getLogger(__name__)
 
 
 def _coin_map_output_path() -> Path:
@@ -53,7 +48,13 @@ def _validate_payload(payload: object) -> list[dict]:
 def sync_coin_map_once() -> bool:
     """Download and atomically replace the local coin_map.json file."""
     try:
-        response = requests.get(COIN_MAP_SOURCE_URL, timeout=COIN_MAP_HTTP_TIMEOUT_SECONDS)
+        response = requests.get(
+            get_setting(
+                "COIN_MAP_SOURCE_URL",
+                "https://raw.githubusercontent.com/ErikThiart/cryptocurrency-icons/refs/heads/master/coin_map.json",
+            ),
+            timeout=max(1.0, float(get_float("COIN_MAP_HTTP_TIMEOUT_SECONDS", 20.0))),
+        )
         response.raise_for_status()
         payload = response.json()
         normalized = _validate_payload(payload)
@@ -77,5 +78,5 @@ def coin_map_sync_loop() -> None:
     """Run immediate sync at startup, then continue with fixed interval."""
     sync_coin_map_once()
     while True:
-        time.sleep(COIN_MAP_SYNC_INTERVAL_SECONDS)
+        time.sleep(max(300, get_int("COIN_MAP_SYNC_INTERVAL_SECONDS", 86400)))
         sync_coin_map_once()

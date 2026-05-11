@@ -31,6 +31,9 @@ from common import (
     StaticGridStrategy,
     TradeSignal,
 )
+from agent.app.runtime_settings import get_exchange as get_runtime_exchange
+from agent.app.runtime_settings import get_float as get_runtime_float
+from agent.app.runtime_settings import get_setting as get_runtime_setting
 
 
 logger = logging.getLogger(__name__)
@@ -176,6 +179,7 @@ class BotRunner:
         runtime_seconds = 0
         if self.started_at is not None:
             runtime_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
+        market_summary = self.exchange.get_market_summary() if hasattr(self.exchange, "get_market_summary") else {}
         return BotSnapshot(
             bot_id=self.bot_id,
             runtime_seconds=runtime_seconds,
@@ -187,6 +191,10 @@ class BotRunner:
             total_equity_quote=total_equity,
             realized_pnl_quote=self.realized_pnl,
             unrealized_pnl_quote=total_equity - self.initial_equity,
+            market_last_price=float(market_summary.get("last_price", self.price) or 0.0),
+            market_open_24h=float(market_summary.get("open_24h", 0.0) or 0.0),
+            market_change_24h_pct=float(market_summary.get("change_24h_pct", 0.0) or 0.0),
+            market_volume_24h_quote=float(market_summary.get("volume_24h_quote", 0.0) or 0.0),
             skimmed_quote=self.skimmed_quote,
             trade_count=self.trade_count,
             status=status,
@@ -244,22 +252,23 @@ class BotRunner:
         :raises RuntimeError: If live mode credentials are missing or provider unsupported.
         """
         if config.mode == "live":
-            provider = os.getenv("LIVE_EXCHANGE_PROVIDER", "bitvavo").lower()
+            provider = get_runtime_setting("LIVE_EXCHANGE_PROVIDER", "bitvavo").lower()
             if provider != "bitvavo":
                 raise RuntimeError(f"Unsupported live exchange provider: {provider}")
 
-            api_key = os.getenv("BITVAVO_API_KEY", "")
-            api_secret = os.getenv("BITVAVO_API_SECRET", "")
+            exchange = get_runtime_exchange("bitvavo")
+            api_key = str(exchange.get("endpoints_key", "") or "").strip() or str(os.getenv("BITVAVO_API_KEY", "") or "").strip()
+            api_secret = str(exchange.get("secret", "") or "").strip() or str(os.getenv("BITVAVO_API_SECRET", "") or "").strip()
             if not api_key or not api_secret:
                 missing: list[str] = []
                 if not api_key:
-                    missing.append("BITVAVO_API_KEY")
+                    missing.append("endpoints_key")
                 if not api_secret:
-                    missing.append("BITVAVO_API_SECRET")
+                    missing.append("secret")
                 missing_list = ", ".join(missing)
                 raise RuntimeError(
                     f"Missing live-mode credentials: {missing_list}. "
-                    "Set them in agent/.env (or an env_file loaded by the agent service)."
+                    "Set them in the Exchange settings tab."
                 )
 
             return BitvavoExchange(
@@ -270,13 +279,14 @@ class BotRunner:
                 market=config.market,
                 base_currency=config.base_currency,
                 quote_currency=config.quote_currency,
+                rest_url=str(exchange.get("base_url", "") or "").strip() or "https://api.bitvavo.com/v2",
             )
 
         # Always use SimulatedExchange with market, which will fetch price from Bitvavo
         return SimulatedExchange(
             config.budget,
             market=config.market,
-            fee_rate=float(config.fee_rate or os.getenv("SIM_MAKER_FEE_RATE", os.getenv("SIM_FEE_RATE", "0.0"))),
+            fee_rate=float(config.fee_rate or get_runtime_float("SIM_MAKER_FEE_RATE", get_runtime_float("SIM_FEE_RATE", 0.0))),
         )
 
     def _apply_live_fill_to_virtual_balances(self, fill: dict) -> None:
@@ -471,9 +481,15 @@ class BotRunner:
     def prepare_delete(self, delete_mode: Literal["delete_open_orders", "delete_as_is", "transform_to_base", "transform_to_quote"]) -> dict:
         """Execute bot delete preparation on the connected exchange before stopping."""
         self.running = False
-        quote_before, base_before = self.exchange.get_balances()
-        self.exchange.quote_balance = quote_before
-        self.exchange.base_balance = base_before
+        is_live = self.config.mode == "live"
+        if is_live:
+            # Keep delete actions bot-scoped; do not overwrite with full account balances.
+            quote_before = float(self.exchange.quote_balance)
+            base_before = float(self.exchange.base_balance)
+        else:
+            quote_before, base_before = self.exchange.get_balances()
+            self.exchange.quote_balance = quote_before
+            self.exchange.base_balance = base_before
 
         details = {
             "mode": delete_mode,
@@ -482,9 +498,27 @@ class BotRunner:
             "actions": [],
         }
 
+        cancel_operator_orders = getattr(self.exchange, "cancel_operator_orders", None)
+
+        def _cancel_scoped(side: str | None = None) -> dict:
+            if is_live and callable(cancel_operator_orders):
+                result = cancel_operator_orders(side=side)
+                if not isinstance(result, dict):
+                    return {"cancelled": 0, "cancelled_sell_base_amount": 0.0}
+                return {
+                    "cancelled": int(result.get("cancelled", 0) or 0),
+                    "cancelled_sell_base_amount": float(result.get("cancelled_sell_base_amount", 0.0) or 0.0),
+                }
+            if side is None:
+                self.exchange.cancel_all_orders()
+            return {"cancelled": 0, "cancelled_sell_base_amount": 0.0}
+
         if delete_mode == "delete_open_orders":
-            self.exchange.cancel_all_orders()
+            buy_cancel = _cancel_scoped("buy")
+            sell_cancel = _cancel_scoped("sell")
             details["actions"].append("cancel_open_orders")
+            details["cancelled_buy_orders"] = buy_cancel["cancelled"]
+            details["cancelled_sell_orders"] = sell_cancel["cancelled"]
             self.exchange.stop()
             self.log_store.add(
                 "bot_delete_prepared",
@@ -506,8 +540,12 @@ class BotRunner:
             )
             return details
 
-        self.exchange.cancel_all_orders()
+        buy_cancel = _cancel_scoped("buy")
+        sell_cancel = _cancel_scoped("sell")
         details["actions"].append("cancel_open_orders")
+        details["cancelled_buy_orders"] = buy_cancel["cancelled"]
+        details["cancelled_sell_orders"] = sell_cancel["cancelled"]
+        details["cancelled_sell_base_amount"] = round(float(sell_cancel.get("cancelled_sell_base_amount", 0.0) or 0.0), 12)
 
         price = self.price
         if price <= 0:
@@ -522,7 +560,7 @@ class BotRunner:
                     raise RuntimeError("Failed to transform quote balance into base at market price")
                 details["actions"].append("buy_base_with_all_quote")
         elif delete_mode == "transform_to_quote":
-            base_to_sell = max(self.exchange.base_balance, 0.0)
+            base_to_sell = max(self.exchange.base_balance, 0.0) + max(float(sell_cancel.get("cancelled_sell_base_amount", 0.0) or 0.0), 0.0)
             quote_to_receive = base_to_sell * price
             if quote_to_receive > 0:
                 ok = self.exchange.execute(TradeSignal(side="sell", quote_amount=quote_to_receive), price=price)
@@ -530,9 +568,13 @@ class BotRunner:
                     raise RuntimeError("Failed to transform base balance into quote at market price")
                 details["actions"].append("sell_all_base_to_quote")
 
-        quote_after, base_after = self.exchange.get_balances()
-        self.exchange.quote_balance = quote_after
-        self.exchange.base_balance = base_after
+        if is_live:
+            quote_after = float(self.exchange.quote_balance)
+            base_after = float(self.exchange.base_balance)
+        else:
+            quote_after, base_after = self.exchange.get_balances()
+            self.exchange.quote_balance = quote_after
+            self.exchange.base_balance = base_after
         details["quote_after"] = quote_after
         details["base_after"] = base_after
         details["price_used"] = price
@@ -563,6 +605,11 @@ class BotRunner:
             data={"quote_budget": budget.quote_budget, "base_budget": budget.base_budget},
             category="system",
         )
+
+    def reload_runtime_settings(self, snapshot: dict | None = None) -> None:
+        """Accept a refreshed runtime settings snapshot from the manager."""
+        if snapshot:
+            self._runtime_settings_snapshot = snapshot
 
     def sync_with_exchange(self) -> dict:
         """Force-sync balances/open orders with exchange and push a fresh snapshot."""
@@ -722,8 +769,23 @@ class BotRunner:
         """
         events = list(self._pending_trade_events)
         self._pending_trade_events = []
+        runner_state = self.get_runner_state()
+
+        from agent.app.manager_ws import ws_send_event
+
+        ws_ok = ws_send_event(
+            "bot_metrics",
+            {
+                "bot_id": self.bot_id,
+                "snapshot": snapshot.model_dump(mode="json"),
+                "runner_state": runner_state.model_dump(mode="json"),
+                "trade_events": events,
+            },
+        )
+        if ws_ok:
+            return
+
         try:
-            runner_state = self.get_runner_state()
             with scoped_context(
                 correlation_id=self.trace_id,
                 agent_id=self.agent_id,
@@ -878,6 +940,9 @@ class BotRunner:
                     return round(matched_base * limit_price, 8)
             return base_order_size
 
+        if self.config.budget.profit_mode != "compound":
+            return base_order_size
+
         start_quote_budget = float(self.config.budget.quote_budget)
         if start_quote_budget <= 0:
             return base_order_size
@@ -886,6 +951,99 @@ class BotRunner:
         compound_factor = 1.0 + (realized_gain / start_quote_budget)
         adjusted_order_size = base_order_size * compound_factor
         return round(adjusted_order_size, 8)
+
+    def _update_compound_open_buy_orders(self, context: str = "compound-rebalance") -> int:
+        """Resize existing BUY orders on exchange when compound size grows."""
+        if self.config.mode != "live":
+            return 0
+        if self.config.budget.profit_mode != "compound":
+            return 0
+        update_limit_order = getattr(self.exchange, "update_limit_order", None)
+        if not callable(update_limit_order):
+            return 0
+
+        open_orders = getattr(self.exchange, "_limit_orders", None)
+        if not isinstance(open_orders, dict):
+            return 0
+
+        updates = 0
+        for order_id, info in list(open_orders.items()):
+            if not isinstance(info, dict):
+                continue
+            side = str(info.get("side", "") or "").lower()
+            if side != "buy":
+                continue
+
+            level_index = info.get("level_index")
+            if level_index is None:
+                continue
+            try:
+                level_index = int(level_index)
+            except (TypeError, ValueError):
+                continue
+
+            limit_price = float(info.get("limit_price") or 0.0)
+            if limit_price <= 0 and 0 <= level_index < len(self.strategy.levels):
+                limit_price = float(self.strategy.levels[level_index])
+            if limit_price <= 0:
+                continue
+
+            current_quote = float(info.get("quote_amount") or 0.0)
+            target_quote = self._quote_amount_for_new_order("buy", level_index, limit_price)
+            if target_quote <= current_quote + 1e-8:
+                continue
+
+            ready, reason, details = self._limit_order_readiness(level_index, "buy", limit_price, target_quote)
+            if not ready:
+                self.log_store.add(
+                    "order_update_waiting",
+                    f"Waiting to grow BUY at level {level_index} (price {limit_price:.6f}): {reason}",
+                    bot_id=self.bot_id,
+                    data={"context": context, "reason": reason, **(details or {})},
+                    category="trading",
+                )
+                continue
+
+            try:
+                ok = bool(update_limit_order(order_id=order_id, quote_amount=target_quote, limit_price=limit_price))
+            except Exception as exc:
+                self.log_store.add(
+                    "order_update_failed",
+                    f"Failed to grow BUY order at level {level_index}: {exc}",
+                    bot_id=self.bot_id,
+                    data={
+                        "context": context,
+                        "order_id": order_id,
+                        "level_index": level_index,
+                        "price": limit_price,
+                        "current_quote_amount": current_quote,
+                        "target_quote_amount": target_quote,
+                        "error": str(exc),
+                    },
+                    category="trading",
+                )
+                continue
+
+            if not ok:
+                continue
+
+            updates += 1
+            self.log_store.add(
+                "order_updated",
+                f"Updated BUY order at level {level_index} from {current_quote:.4f} to {target_quote:.4f} quote.",
+                bot_id=self.bot_id,
+                data={
+                    "context": context,
+                    "order_id": order_id,
+                    "level_index": level_index,
+                    "price": limit_price,
+                    "old_quote_amount": current_quote,
+                    "new_quote_amount": target_quote,
+                },
+                category="trading",
+            )
+
+        return updates
 
     def _place_ready_open_orders(self, context: str = "", log_deferred: bool = False) -> None:
         """Try to place currently open strategy orders that are valid to post now."""
@@ -1197,11 +1355,6 @@ class BotRunner:
                         quote_balance, base_balance = self.exchange.get_balances()
                         self.exchange.quote_balance = quote_balance
                         self.exchange.base_balance = base_balance
-                    after_equity = self._calculate_total_equity()
-                    trade_pnl = after_equity - before_equity
-                    self.realized_pnl += trade_pnl
-                    self.trade_count += 1
-
                     matched_buy_base = 0.0
                     base_remainder_after_sell = 0.0
                     filled_base_amount = self._base_amount_from_fill(fill, side)
@@ -1230,6 +1383,35 @@ class BotRunner:
                                 sold_base=round(filled_base_amount, 12),
                                 base_remainder_after_sell=round(base_remainder_after_sell, 12),
                             )
+
+                    after_equity = self._calculate_total_equity()
+
+                    # In live mode, report realized PnL from executed sell vs matched
+                    # buy cost basis. Using equity deltas per fill can overstate PnL
+                    # when virtual balances are intentionally bot-scoped.
+                    if self.config.mode == "live":
+                        if side == "sell":
+                            buy_origin = idx - 1
+                            buy_price = (
+                                float(self.strategy.levels[buy_origin])
+                                if 0 <= buy_origin < len(self.strategy.levels)
+                                else 0.0
+                            )
+                            sold_base = max(0.0, filled_base_amount)
+                            net_sell_quote = max(0.0, float(fill.get("quote_amount", 0.0) or 0.0) - float(fill.get("fee_paid_quote", 0.0) or 0.0))
+                            cost_quote = sold_base * buy_price if buy_price > 0 else 0.0
+                            trade_pnl = net_sell_quote - cost_quote
+                        else:
+                            trade_pnl = 0.0
+                    else:
+                        trade_pnl = after_equity - before_equity
+
+                    self.realized_pnl += trade_pnl
+                    self.trade_count += 1
+
+                    fill_status = str(fill.get("order_status", "filled") or "filled").lower()
+                    if side == "sell" and fill_status == "filled":
+                        self._update_compound_open_buy_orders("sell-fill")
 
                     self.log_store.add(
                         "trade_executed",
@@ -1355,6 +1537,14 @@ class RunnerManager:
         if not runner:
             return
         runner.update_budget(budget)
+
+    def reload_runtime_settings(self, snapshot: dict | None = None) -> None:
+        """Propagate refreshed runtime settings to all running bots."""
+        for runner in self.runners.values():
+            try:
+                runner.reload_runtime_settings(snapshot)
+            except Exception:
+                continue
 
     def sync_bot(self, bot_id: str) -> dict:
         """Force a running bot to sync balances/open orders with the exchange."""

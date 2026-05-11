@@ -23,6 +23,8 @@ def run_migrations(engine: Engine) -> None:
     _ensure_trade_events_table(engine)
     _ensure_agent_uptime_column(engine)
     _add_trade_event_columns(engine)
+    _ensure_app_settings_columns(engine)
+    _normalize_settings_sources(engine)
 
 
 def _ensure_agent_approval_column(engine: Engine) -> None:
@@ -226,6 +228,53 @@ def _add_trade_event_columns(engine: Engine) -> None:
                 conn.exec_driver_sql(
                     "ALTER TABLE trade_events ADD COLUMN fill_count INTEGER DEFAULT 0"
                 )
+            conn.commit()
+        except Exception:
+            pass
+
+
+def _ensure_app_settings_columns(engine: Engine) -> None:
+    """Add newer app_settings columns if they are missing."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(app_settings)").fetchall()
+            columns = {row[1] for row in rows}
+            if "name" not in columns:
+                conn.exec_driver_sql("ALTER TABLE app_settings ADD COLUMN name VARCHAR(128) DEFAULT ''")
+            if "description" not in columns:
+                conn.exec_driver_sql("ALTER TABLE app_settings ADD COLUMN description TEXT DEFAULT ''")
+            conn.commit()
+        except Exception:
+            pass
+
+
+def _normalize_settings_sources(engine: Engine) -> None:
+    """Map legacy seed labels onto the new settings source names."""
+    with engine.connect() as conn:
+        try:
+            rows = conn.exec_driver_sql("PRAGMA table_info(app_settings)").fetchall()
+            columns = {row[1] for row in rows}
+            if not columns:
+                return
+            conn.exec_driver_sql(
+                """
+                UPDATE app_settings
+                SET source = CASE
+                    WHEN source = 'manager_env' THEN 'Manager'
+                    WHEN source = 'agent_env' THEN 'Agent'
+                    WHEN source LIKE 'compose:manager%' THEN 'Manager'
+                    WHEN source LIKE 'compose:agent%' THEN 'Agent'
+                    WHEN source LIKE 'compose:%' THEN 'General'
+                    ELSE source
+                END
+                """
+            )
+            conn.exec_driver_sql(
+                "UPDATE app_settings SET name = key WHERE (name IS NULL OR name = '') AND key IS NOT NULL"
+            )
+            conn.exec_driver_sql(
+                "UPDATE app_settings SET description = '' WHERE description IS NULL"
+            )
             conn.commit()
         except Exception:
             pass

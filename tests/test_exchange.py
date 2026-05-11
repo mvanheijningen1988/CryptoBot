@@ -1106,6 +1106,7 @@ class TestBitvavoSyncOpenOrders:
 
     def test_sync_open_orders_tracks_matching_operator_and_level(self):
         ex = self._make_exchange()
+        expected_client_order_id = ex._client_order_id("sync-0", "level-0")
 
         open_orders_response = {
             "response": [
@@ -1115,7 +1116,7 @@ class TestBitvavoSyncOpenOrders:
                     "side": "buy",
                     "price": "100.00000000",
                     "status": "new",
-                    "clientOrderId": "cid-match",
+                    "clientOrderId": expected_client_order_id,
                 },
                 {
                     "orderId": "ex-other-operator",
@@ -1155,6 +1156,7 @@ class TestBitvavoSyncOpenOrders:
 
     def test_sync_open_orders_falls_back_to_get_orders_on_invalid_action(self):
         ex = self._make_exchange()
+        expected_client_order_id = ex._client_order_id("sync-0", "level-0")
 
         fallback_open_orders = {
             "response": [
@@ -1164,7 +1166,7 @@ class TestBitvavoSyncOpenOrders:
                     "side": "buy",
                     "price": "100.00000000",
                     "status": "new",
-                    "clientOrderId": "cid-fallback",
+                    "clientOrderId": expected_client_order_id,
                 }
             ]
         }
@@ -1188,6 +1190,31 @@ class TestBitvavoSyncOpenOrders:
 
         assert calls == ["privateGetOrdersOpen", "privateGetOrders"]
         assert matched == {0}
+
+    def test_sync_open_orders_does_not_match_by_price_without_client_order_id(self):
+        ex = self._make_exchange()
+
+        open_orders_response = {
+            "response": [
+                {
+                    "orderId": "ex-manual",
+                    "operatorId": 42,
+                    "side": "buy",
+                    "price": "100.00000000",
+                    "status": "new",
+                    "clientOrderId": "manual-order-id",
+                }
+            ]
+        }
+
+        with patch.object(ex, "_call_action", return_value=open_orders_response):
+            matched = ex.sync_open_orders_for_levels(
+                planned_open_orders={0: "buy"},
+                level_prices=[100.0],
+                quote_amount=100.0,
+            )
+
+        assert matched == set()
 
     def test_sync_open_orders_matches_stable_level_client_order_id_before_price(self):
         ex = self._make_exchange()
@@ -1226,6 +1253,136 @@ class TestBitvavoSyncOpenOrders:
         assert matches[0]["match_method"] == "client_reference"
         assert matches[0]["client_reference"] == "level-0"
         assert matches[0]["client_order_id"] == expected_client_order_id
+
+
+class TestBitvavoCancelOperatorOrders:
+
+    def _make_exchange(self) -> BitvavoExchange:
+        ex = BitvavoExchange(
+            api_key="test", api_secret="secret",
+            market="BTC-EUR", base_currency="BTC", quote_currency="EUR", operator_id=42,
+        )
+        ex.authenticated = True
+        return ex
+
+    def test_cancel_operator_orders_sends_required_operator_id(self):
+        ex = self._make_exchange()
+        ex._exchange_order_map["ex-1"] = "local-1"
+        ex._limit_orders["local-1"] = {
+            "exchange_order_id": "ex-1",
+            "client_order_id": "cid-1",
+            "side": "buy",
+            "quote_amount": 100.0,
+            "limit_price": 100.0,
+        }
+
+        open_items = [{
+            "orderId": "ex-1",
+            "clientOrderId": "cid-1",
+            "operatorId": 42,
+            "side": "buy",
+            "status": "new",
+        }]
+        calls: list[dict] = []
+
+        def _call(action, body, timeout=6.0):  # noqa: ARG001
+            calls.append(dict(body))
+            return {"response": {"orderId": "ex-1"}}
+
+        with patch.object(ex, "_get_open_orders", return_value=open_items), patch.object(ex, "_call_action", side_effect=_call):
+            result = ex.cancel_operator_orders(side=None)
+
+        assert result["cancelled"] == 1
+        assert calls
+        assert calls[0]["market"] == "BTC-EUR"
+        assert calls[0]["operatorId"] == 42
+        assert calls[0]["orderId"] == "ex-1"
+        assert calls[0]["clientOrderId"] == "cid-1"
+        assert "local-1" not in ex._limit_orders
+
+    def test_cancel_operator_orders_does_not_count_error_code_response(self):
+        ex = self._make_exchange()
+        ex._exchange_order_map["ex-2"] = "local-2"
+        ex._limit_orders["local-2"] = {
+            "exchange_order_id": "ex-2",
+            "client_order_id": "cid-2",
+            "side": "buy",
+            "quote_amount": 100.0,
+            "limit_price": 100.0,
+        }
+
+        open_items = [{
+            "orderId": "ex-2",
+            "clientOrderId": "cid-2",
+            "operatorId": 42,
+            "side": "buy",
+            "status": "new",
+        }]
+
+        with patch.object(ex, "_get_open_orders", return_value=open_items), patch.object(
+            ex, "_call_action", return_value={"errorCode": 401, "error": "missing operatorId"}
+        ):
+            result = ex.cancel_operator_orders(side=None)
+
+        assert result["cancelled"] == 0
+        assert "local-2" in ex._limit_orders
+
+    def test_cancel_operator_orders_allows_tracked_order_when_operator_id_missing_in_row(self):
+        ex = self._make_exchange()
+        ex._exchange_order_map["ex-3"] = "local-3"
+        ex._limit_orders["local-3"] = {
+            "exchange_order_id": "ex-3",
+            "client_order_id": "cid-3",
+            "side": "sell",
+            "quote_amount": 200.0,
+            "limit_price": 200.0,
+        }
+
+        open_items = [{
+            "orderId": "ex-3",
+            "clientOrderId": "cid-3",
+            "side": "sell",
+            "status": "new",
+            # operatorId is omitted by some payload variants
+        }]
+
+        with patch.object(ex, "_get_open_orders", return_value=open_items), patch.object(
+            ex, "_call_action", return_value={"response": {"orderId": "ex-3"}}
+        ):
+            result = ex.cancel_operator_orders(side=None)
+
+        assert result["cancelled"] == 1
+        assert "local-3" not in ex._limit_orders
+
+    def test_sync_open_orders_tracks_remaining_quote_from_exchange(self):
+        ex = self._make_exchange()
+        expected_client_order_id = ex._client_order_id("sync-0", "level-0")
+
+        open_orders_response = {
+            "response": [
+                {
+                    "orderId": "ex-level-0",
+                    "operatorId": 42,
+                    "side": "buy",
+                    "price": "100.00000000",
+                    "status": "partiallyFilled",
+                    "clientOrderId": expected_client_order_id,
+                    "amountQuote": "150",
+                    "filledAmountQuote": "40",
+                }
+            ]
+        }
+
+        with patch.object(ex, "_call_action", return_value=open_orders_response):
+            matched = ex.sync_open_orders_for_levels(
+                planned_open_orders={0: "buy"},
+                level_prices=[100.0],
+                quote_amount=100.0,
+            )
+
+        assert matched == {0}
+        tracked = next(iter(ex._limit_orders.values()))
+        assert tracked["quote_amount"] == pytest.approx(110.0)
 
 
 # ===================================================================

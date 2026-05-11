@@ -68,6 +68,10 @@ class BotSnapshot(BaseModel):
     total_equity_quote: float
     realized_pnl_quote: float
     unrealized_pnl_quote: float
+    market_last_price: float = 0.0
+    market_open_24h: float = 0.0
+    market_change_24h_pct: float = 0.0
+    market_volume_24h_quote: float = 0.0
     skimmed_quote: float
     trade_count: int = 0
     status: str

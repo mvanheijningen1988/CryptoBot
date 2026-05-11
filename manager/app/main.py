@@ -24,6 +24,8 @@ from manager.app.failover import failover_maintenance_loop
 from manager.app.migrations import run_migrations
 from manager.app.routes import v1
 from manager.app.services.coin_map_sync import coin_map_sync_loop
+from manager.app.services.runtime_settings import refresh_runtime_settings
+from manager.app.services.settings_store import ensure_settings_seeded
 from manager.app.version import __version__
 
 # ── Database bootstrap ──────────────────────────────────────────────
@@ -85,6 +87,8 @@ def startup_event() -> None:
     db = SessionLocal()
     try:
         ensure_admin_user(db)
+        ensure_settings_seeded(db)
+        refresh_runtime_settings(db)
     finally:
         db.close()
     thread = Thread(target=failover_maintenance_loop, args=(SessionLocal,), daemon=True)

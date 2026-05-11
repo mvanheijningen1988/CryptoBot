@@ -6,6 +6,8 @@ import time
 import requests
 
 from agent.app.config import AGENT_BASE_URL, AGENT_ID, AGENT_START_TIME, MANAGER_URL, runner_manager
+from agent.app.manager_ws import ws_send_event
+from agent.app.runtime_settings import apply_runtime_settings
 from agent.app.version import __version__
 
 
@@ -24,6 +26,13 @@ def register_agent() -> bool:
     try:
         response = requests.post(f"{MANAGER_URL}/api/v1/agents/register", json=payload, timeout=5)
         if response.status_code < 400:
+            try:
+                response_payload = response.json()
+            except ValueError:
+                response_payload = {}
+            settings = response_payload.get("settings") if isinstance(response_payload, dict) else None
+            if isinstance(settings, dict):
+                apply_runtime_settings(settings)
             runner_manager.log_system(
                 "register_ok",
                 "Agent registered to manager.",
@@ -39,6 +48,14 @@ def register_agent() -> bool:
     except requests.RequestException:
         runner_manager.log_system("register_failed", "Agent registration request failed.")
         return False
+    finally:
+        ws_send_event(
+            "agent_event",
+            {
+                "event_type": "register_attempt",
+                "message": f"Agent {AGENT_ID} registration attempted.",
+            },
+        )
 
 
 def heartbeat_loop() -> None:
@@ -55,15 +72,17 @@ def heartbeat_loop() -> None:
             registered = register_agent()
 
         try:
+            heartbeat_payload = {
+                "status": "online",
+                "version": __version__,
+                "uptime_seconds": int(time.time() - AGENT_START_TIME),
+            }
             response = requests.post(
                 f"{MANAGER_URL}/api/v1/agents/{AGENT_ID}/heartbeat",
-                json={
-                    "status": "online",
-                    "version": __version__,
-                    "uptime_seconds": int(time.time() - AGENT_START_TIME),
-                },
+                json=heartbeat_payload,
                 timeout=5,
             )
+            ws_send_event("heartbeat", heartbeat_payload)
             if response.status_code == 404:
                 registered = False
             state = "online" if response.status_code < 400 else f"heartbeat_error_{response.status_code}"
