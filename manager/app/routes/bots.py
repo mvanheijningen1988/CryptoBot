@@ -289,6 +289,8 @@ def _sum_filled_trade_pnl(bot_id: str, db: Session | None = None) -> float:
 def _compute_live_pnl_state_from_fills(
     bot_id: str,
     current_price: float,
+    start_base: float = 0.0,
+    start_price: float = 0.0,
     db: Session | None = None,
 ) -> tuple[float, float, float, float]:
     """Compute realized+unrealized PnL state from filled events using FIFO lots.
@@ -322,6 +324,8 @@ def _compute_live_pnl_state_from_fills(
 
     # FIFO lots: each entry tracks remaining base qty and quote cost basis.
     lots: list[dict[str, float]] = []
+    if start_base > 0 and start_price > 0:
+        lots.append({"qty": float(start_base), "cost": float(start_base) * float(start_price)})
     realized_pnl = 0.0
 
     for fill in fills:
@@ -552,10 +556,14 @@ def _get_bot_equity_points(bot: Bot, db: Session) -> list[dict[str, object]]:
     if bot.mode == "live":
         start_quote = float(budget.get("quote_budget", 0.0) or 0.0)
         start_base = float(budget.get("base_budget", 0.0) or 0.0)
+        start_price = float(
+            (config.get("start_price") if isinstance(config, dict) else 0.0)
+            or 0.0
+        )
 
         # Persistent-first for live mode: reconstruct from DB fills so the
         # trend does not reset when in-memory history is truncated/restarted.
-        fill_points = _build_live_equity_points_from_fills(bot.id, start_quote, start_base, db)
+        fill_points = _build_live_equity_points_from_fills(bot.id, start_quote, start_base, start_price, db)
 
         merged: dict[str, dict[str, object]] = {
             str(p.get("t", "")): {
@@ -588,6 +596,7 @@ def _get_bot_equity_points(bot: Bot, db: Session) -> list[dict[str, object]]:
                 timeline,
                 start_quote,
                 start_base,
+                start_price,
                 db,
             )
 
@@ -716,6 +725,7 @@ def _rebuild_live_equity_points_from_fills(
     points: list[dict[str, object]],
     start_quote: float,
     start_base: float,
+    start_price: float,
     db: Session | None = None,
 ) -> list[dict[str, object]]:
     """Recompute live equity points using dashboard-equity convention.
@@ -747,10 +757,11 @@ def _rebuild_live_equity_points_from_fills(
             continue
         parsed_fills.append((ts, fill))
 
-    # start_base is intentionally excluded from dashboard-equity convention.
-    _ = start_base
+    starting_equity = float(start_quote) + max(0.0, float(start_base)) * max(0.0, float(start_price))
     realized_pnl = 0.0
     open_lots: list[dict[str, float]] = []
+    if start_base > 0 and start_price > 0:
+        open_lots.append({"qty": float(start_base), "cost": float(start_base) * float(start_price)})
     fill_idx = 0
     rebuilt: list[dict[str, object]] = []
 
@@ -762,7 +773,7 @@ def _rebuild_live_equity_points_from_fills(
 
         point_price = float(point.get("p", 0.0) or 0.0)
         unrealized_pnl = _unrealized_from_open_lots(open_lots, point_price)
-        point_equity = float(start_quote) + realized_pnl + unrealized_pnl
+        point_equity = starting_equity + realized_pnl + unrealized_pnl
 
         rebuilt.append({
             "t": point.get("t"),
@@ -777,6 +788,7 @@ def _build_live_equity_points_from_fills(
     bot_id: str,
     start_quote: float,
     start_base: float,
+    start_price: float,
     db: Session | None = None,
 ) -> list[dict[str, object]]:
     """Build live equity series from fills using dashboard-equity convention."""
@@ -784,10 +796,11 @@ def _build_live_equity_points_from_fills(
     if not fills:
         return []
 
-    # start_base is intentionally excluded from dashboard-equity convention.
-    _ = start_base
+    starting_equity = float(start_quote) + max(0.0, float(start_base)) * max(0.0, float(start_price))
     realized_pnl = 0.0
     open_lots: list[dict[str, float]] = []
+    if start_base > 0 and start_price > 0:
+        open_lots.append({"qty": float(start_base), "cost": float(start_base) * float(start_price)})
     points: list[dict[str, object]] = []
     seen_start = False
 
@@ -801,9 +814,10 @@ def _build_live_equity_points_from_fills(
             # Emit a baseline point just before first fill so chart reconstruction
             # contains both pre-fill and post-fill equity values.
             start_ts = (ts_dt - timedelta(seconds=1)).isoformat() if ts_dt else ts
+            baseline_unrealized = _unrealized_from_open_lots(open_lots, fill_price)
             points.append({
                 "t": start_ts,
-                "v": float(start_quote),
+                "v": starting_equity + baseline_unrealized,
                 "p": fill_price,
             })
             seen_start = True
@@ -814,7 +828,7 @@ def _build_live_equity_points_from_fills(
         if ts:
             points.append({
                 "t": ts,
-                "v": float(start_quote) + realized_pnl + unrealized_pnl,
+                "v": starting_equity + realized_pnl + unrealized_pnl,
                 "p": fill_price,
             })
 
@@ -861,10 +875,12 @@ def _normalized_metrics_for_bot(bot: Bot, db: Session | None = None) -> tuple[di
         trade_pnl_total, unrealized_pnl, open_base_amount, open_base_avg_buy_price = _compute_live_pnl_state_from_fills(
             bot.id,
             current_price,
+            float(budget.get("base_budget", 0.0) or 0.0),
+            start_price,
             db,
         )
         total_pnl = trade_pnl_total + unrealized_pnl
-        total_equity = float(budget.get("quote_budget", 0.0) or 0.0) + total_pnl
+        total_equity = starting_equity + total_pnl
         latest_metrics["dashboard_pnl_quote"] = total_pnl
         latest_metrics["realized_pnl_quote"] = trade_pnl_total
         latest_metrics["unrealized_pnl_quote"] = unrealized_pnl
