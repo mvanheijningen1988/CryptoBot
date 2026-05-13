@@ -1840,12 +1840,38 @@ def get_equity_history(bot_id: str, db: DbSession, aggregation: str = "1m") -> d
     bot = db.query(Bot).filter(Bot.id == bot_id).first()
     config = json.loads(bot.config_json) if bot else {}
     budget = config.get("budget", {})
-    starting_budget = budget.get("quote_budget", 0)
     metrics, _ = _normalized_metrics_for_bot(bot, db) if bot else ({}, 0.0)
+    start_price = float(
+        (config.get("start_price") if isinstance(config, dict) else 0.0)
+        or metrics.get("price", 0.0)
+        or 0.0
+    )
+    starting_budget = float(budget.get("quote_budget", 0.0) or 0.0) + float(budget.get("base_budget", 0.0) or 0.0) * start_price
 
     points = _get_bot_equity_points(bot, db) if bot else []
+
+    if bot and not points:
+        now_dt = datetime.now(UTC)
+        start_dt = bot.created_at if isinstance(bot.created_at, datetime) else now_dt - timedelta(minutes=1)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=UTC)
+        start_ts = start_dt.isoformat().replace("+00:00", "Z")
+        now_ts = now_dt.isoformat().replace("+00:00", "Z")
+        current_price = float(metrics.get("price", start_price) or start_price)
+        total_equity = float(metrics.get("total_equity_quote", starting_budget) or starting_budget)
+        points = [
+            {"t": start_ts, "v": starting_budget, "p": current_price},
+            {"t": now_ts, "v": total_equity, "p": current_price},
+        ]
+
     agg = _normalize_equity_aggregation(aggregation)
     points = _aggregate_equity_points(points, agg)
+    if len(points) == 1:
+        first = points[0]
+        first_ts = _timestamp_to_epoch_seconds(first.get("t"))
+        if first_ts is not None:
+            prev_ts = datetime.fromtimestamp(max(0.0, first_ts - 1.0), tz=UTC).isoformat().replace("+00:00", "Z")
+            points = [{"t": prev_ts, "v": float(first.get("v", 0.0) or 0.0), "p": float(first.get("p", 0.0) or 0.0)}, first]
 
     return {
         "points": points,
@@ -1862,19 +1888,39 @@ def _build_total_equity_series_entry(bot: Bot | None, db: Session, agg: str) -> 
 
     config = json.loads(bot.config_json or "{}")
     budget = config.get("budget", {})
-    starting_budget = float(budget.get("quote_budget", 0) or 0.0)
     metrics, _ = _normalized_metrics_for_bot(bot, db)
+    start_price = float(
+        (config.get("start_price") if isinstance(config, dict) else 0.0)
+        or metrics.get("price", 0.0)
+        or 0.0
+    )
+    starting_budget = float(budget.get("quote_budget", 0) or 0.0) + float(budget.get("base_budget", 0.0) or 0.0) * start_price
     bot_total_equity = float(metrics.get("total_equity_quote", starting_budget) or starting_budget)
     bot_pnl = _trade_based_pnl(metrics, starting_budget)
 
     points = _aggregate_equity_points(_get_bot_equity_points(bot, db), agg)
+    if not points:
+        now_dt = datetime.now(UTC)
+        start_dt = bot.created_at if isinstance(bot.created_at, datetime) else now_dt - timedelta(minutes=1)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=UTC)
+        price = float(metrics.get("price", start_price) or start_price)
+        points = [
+            {"t": start_dt.isoformat().replace("+00:00", "Z"), "v": starting_budget, "p": price},
+            {"t": now_dt.isoformat().replace("+00:00", "Z"), "v": bot_total_equity, "p": price},
+        ]
+
     if points:
         last = dict(points[-1])
         last["v"] = bot_total_equity
         points[-1] = last
 
-    if not points:
-        return None, starting_budget, bot_total_equity, bot_pnl
+    if len(points) == 1:
+        first = points[0]
+        first_ts = _timestamp_to_epoch_seconds(first.get("t"))
+        if first_ts is not None:
+            prev_ts = datetime.fromtimestamp(max(0.0, first_ts - 1.0), tz=UTC).isoformat().replace("+00:00", "Z")
+            points = [{"t": prev_ts, "v": float(first.get("v", 0.0) or 0.0), "p": float(first.get("p", 0.0) or 0.0)}, first]
 
     quote_currency = str(config.get("quote_currency", "") or budget.get("quote_currency", "") or "")
     return (

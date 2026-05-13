@@ -2099,6 +2099,7 @@ class TestListMarkets:
         markets = r.json()
         assert len(markets) == 2
         assert all(m["status"] == "trading" for m in markets)
+        assert all("price_precision" in m for m in markets)
 
     @patch("manager.app.routes.market.requests.get")
     def test_list_markets_api_error(self, mock_get, client):

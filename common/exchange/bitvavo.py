@@ -328,8 +328,18 @@ class BitvavoExchange(Exchange):
             return
 
         item: dict[str, Any] | None = None
-        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
-            item = payload[0]
+        if isinstance(payload, list) and payload:
+            normalized_market = str(self.market or "").upper()
+            for candidate in payload:
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("market", "") or "").upper() == normalized_market:
+                    item = candidate
+                    break
+            if item is None:
+                first_dict = next((candidate for candidate in payload if isinstance(candidate, dict)), None)
+                if isinstance(first_dict, dict):
+                    item = first_dict
         elif isinstance(payload, dict):
             item = payload
         if not item:
@@ -413,6 +423,39 @@ class BitvavoExchange(Exchange):
         if level_index is None:
             return None
         return f"level-{int(level_index)}"
+
+    def _is_invalid_price_tick_error(self, response: dict[str, Any]) -> bool:
+        """Return whether one exchange response indicates a price tick-size mismatch."""
+        message = str(response.get("error") or "").lower()
+        return "tick size" in message and "price" in message
+
+    def _retry_with_lower_price_precision(
+        self,
+        body: dict[str, Any],
+        limit_price: float,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Retry create-order with progressively fewer price decimals.
+
+        Returns the first successful response+payload pair, or the last failed pair.
+        """
+        original_decimals = max(0, min(int(self._price_decimals), 6))
+        current_response: dict[str, Any] = {"errorCode": -1, "error": "retry not attempted"}
+        current_body = dict(body)
+
+        for decimals in range(original_decimals - 1, -1, -1):
+            retry_body = dict(body)
+            retry_body["price"] = self._format_decimal(limit_price, decimals)
+            retry_response = self._call_action("privateCreateOrder", retry_body, timeout=10.0)
+            current_response = retry_response
+            current_body = retry_body
+            if retry_response.get("errorCode") is None:
+                # Keep using the accepted precision to reduce repeated tick-size failures.
+                self._price_decimals = decimals
+                return retry_response, retry_body
+            if not self._is_invalid_price_tick_error(retry_response):
+                return retry_response, retry_body
+
+        return current_response, current_body
 
     def _client_order_id(self, order_id: str, client_reference: str | None = None) -> str:
         """Return a Bitvavo-compatible UUID for one logical open order."""
@@ -1256,11 +1299,14 @@ class BitvavoExchange(Exchange):
                 raise RuntimeError(f"Bitvavo privateCreateOrder failed: {exc}") from exc
 
         if response.get("errorCode") is not None:
-            raise self._raise_action_error(
-                "privateCreateOrder",
-                body,
-                f"Bitvavo privateCreateOrder failed: {response.get('error') or response.get('errorCode')}",
-            )
+            if self._is_invalid_price_tick_error(response):
+                response, body = self._retry_with_lower_price_precision(body, limit_price)
+            if response.get("errorCode") is not None:
+                raise self._raise_action_error(
+                    "privateCreateOrder",
+                    body,
+                    f"Bitvavo privateCreateOrder failed: {response.get('error') or response.get('errorCode')}",
+                )
 
         resp = self._extract_action_response(response)
         exchange_oid = str(resp.get("orderId", "") or response.get("orderId", ""))

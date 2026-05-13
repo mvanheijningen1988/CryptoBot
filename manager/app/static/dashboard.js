@@ -166,6 +166,26 @@ function bindMaxDecimalInput(id, decimals = MAX_DECIMALS) {
   el.addEventListener("input", () => clampInputDecimals(el, decimals));
 }
 
+function getMarketPriceDecimals(market = normalizeMarketValue(getMarketInput()?.value)) {
+  const meta = marketMeta.get(market) || {};
+  const raw = Number(meta.price_precision ?? meta.pricePrecision ?? MAX_DECIMALS);
+  if (!Number.isFinite(raw)) return MAX_DECIMALS;
+  return Math.max(0, Math.min(Math.trunc(raw), MAX_DECIMALS));
+}
+
+function normalizeGridPriceInputsToMarketPrecision() {
+  const decimals = getMarketPriceDecimals();
+  for (const id of ["lower_price", "upper_price"]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    clampInputDecimals(el, decimals);
+    const n = Number(el.value);
+    if (Number.isFinite(n) && n > 0) {
+      el.value = String(roundToDecimals(n, decimals));
+    }
+  }
+}
+
 function placeFloatingMenu(anchorEl, menuEl, maxHeight = 240) {
   if (!anchorEl || !menuEl) return;
   const rect = anchorEl.getBoundingClientRect();
@@ -456,6 +476,7 @@ function onMarketValueCommitted() {
   const input = getMarketInput();
   if (!input) return;
   input.value = normalizeMarketValue(input.value);
+  normalizeGridPriceInputsToMarketPrecision();
   renderMarketInputIcon();
   closeMarketSuggestions();
   startMarketRealtime();
@@ -800,6 +821,7 @@ async function sendManagerUiRpc({ method, path, query = {}, body = null }) {
 function currentConfig() {
   const market = normalizeMarketValue(document.getElementById("market").value);
   const marketInfo = marketMeta.get(market) || {};
+  const priceDecimals = getMarketPriceDecimals(market);
   const split = market.split("-");
   return {
     market,
@@ -810,8 +832,8 @@ function currentConfig() {
     fee_rate: roundToDecimals(Number(lastFeeSnapshot?.applied_fee_rate || 0)),
     start_price: 0,
     grid: {
-      lower_price: roundToDecimals(Number(document.getElementById("lower_price").value)),
-      upper_price: roundToDecimals(Number(document.getElementById("upper_price").value)),
+      lower_price: roundToDecimals(Number(document.getElementById("lower_price").value), priceDecimals),
+      upper_price: roundToDecimals(Number(document.getElementById("upper_price").value), priceDecimals),
       levels: Number(document.getElementById("levels").value),
       order_size_quote: roundToDecimals(Number(document.getElementById("order_size_quote").value)),
     },
@@ -1224,6 +1246,7 @@ async function loadMarkets() {
     renderMarketInputIcon();
     renderMarketSuggestions(input.value);
     closeMarketSuggestions();
+    normalizeGridPriceInputsToMarketPrecision();
     renderMinimumOrderHint();
   } catch (err) {
     console.error("Failed to load markets", err);
@@ -1416,10 +1439,12 @@ function startMarketRealtime() {
  */
 async function checkGridProfitability() {
   try {
+    const market = normalizeMarketValue(getMarketInput()?.value);
+    const priceDecimals = getMarketPriceDecimals(market);
     const basePayload = {
       grid: {
-        lower_price: Number(document.getElementById("lower_price").value),
-        upper_price: Number(document.getElementById("upper_price").value),
+        lower_price: roundToDecimals(Number(document.getElementById("lower_price").value), priceDecimals),
+        upper_price: roundToDecimals(Number(document.getElementById("upper_price").value), priceDecimals),
         levels: Number(document.getElementById("levels").value),
         order_size_quote: Number(document.getElementById("order_size_quote").value),
       },
@@ -2992,6 +3017,8 @@ document.getElementById("trade_history_body")?.addEventListener("click", (e) => 
 // ──────────────────────────────────────────────────────────────
 
 let _equityChartMarkers = [];
+let _equityChartHoverX = null;
+let _equityChartRenderState = null;
 
 const _defaultEquityAggregation = "5m";
 const _equityAggregationOptions = new Set(["1m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1w", "1mo"]);
@@ -3099,7 +3126,7 @@ function updateEquityChartTooltip(marker, event) {
   tip.style.top = `${top}px`;
 }
 
-function drawEquityChartSeries(seriesEntries, startingBudget = null) {
+function drawEquityChartSeries(seriesEntries, startingBudget = null, hoverX = null) {
   const canvas = document.getElementById("equity_chart");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -3120,6 +3147,22 @@ function drawEquityChartSeries(seriesEntries, startingBudget = null) {
       ...entry,
       points: Array.isArray(entry?.points) ? entry.points.filter((point) => point?.t != null && Number.isFinite(Number(point?.v))) : [],
     }))
+    .map((entry) => {
+      if (entry.points.length === 1) {
+        const only = entry.points[0];
+        const ts = new Date(only.t).getTime();
+        if (Number.isFinite(ts)) {
+          return {
+            ...entry,
+            points: [
+              { ...only, t: new Date(ts - 1000).toISOString() },
+              only,
+            ],
+          };
+        }
+      }
+      return entry;
+    })
     .filter((entry) => entry.points.length >= 2);
 
   if (!cleanedSeries.length) {
@@ -3252,6 +3295,18 @@ function drawEquityChartSeries(seriesEntries, startingBudget = null) {
     }
   });
 
+  if (Number.isFinite(hoverX) && hoverX >= pad.left && hoverX <= pad.left + plotW) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(226,232,240,0.95)";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(hoverX, pad.top);
+    ctx.lineTo(hoverX, pad.top + plotH);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   const legendX = pad.left + 8;
   let legendY = pad.top + 6;
   ctx.font = "11px sans-serif";
@@ -3311,7 +3366,7 @@ function drawEquityChartSeries(seriesEntries, startingBudget = null) {
  * @param {Array<{t: string, v: number}>} data - Equity data-points.
  * @param {number} [startingBudget] - Base budget to draw as reference line.
  */
-function drawEquityChart(data, startingBudget) {
+function drawEquityChart(data, startingBudget, hoverX = null) {
   const canvas = document.getElementById("equity_chart");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -3328,7 +3383,16 @@ function drawEquityChart(data, startingBudget) {
 
   ctx.clearRect(0, 0, W, H);
 
-  if (!data || data.length < 2) {
+  let safeData = Array.isArray(data) ? [...data] : [];
+  if (safeData.length === 1) {
+    const only = safeData[0] || {};
+    const ts = new Date(only.t).getTime();
+    if (Number.isFinite(ts)) {
+      safeData = [{ ...only, t: new Date(ts - 1000).toISOString() }, only];
+    }
+  }
+
+  if (!safeData || safeData.length < 2) {
     hideEquityChartTooltip();
     ctx.fillStyle = "#94a3b8";
     ctx.font = "14px sans-serif";
@@ -3341,7 +3405,7 @@ function drawEquityChart(data, startingBudget) {
   const plotW = W - pad.left - pad.right;
   const plotH = H - pad.top - pad.bottom;
 
-  const values = data.map((d) => d.v);
+  const values = safeData.map((d) => d.v);
   let minV = Math.min(...values);
   let maxV = Math.max(...values);
   if (startingBudget != null) {
@@ -3351,8 +3415,8 @@ function drawEquityChart(data, startingBudget) {
   const range = maxV - minV || 1;
 
   // Map data to pixel coordinates
-  const points = data.map((d, i) => ({
-    x: pad.left + (i / (data.length - 1)) * plotW,
+  const points = safeData.map((d, i) => ({
+    x: pad.left + (i / (safeData.length - 1)) * plotW,
     y: pad.top + plotH - ((d.v - minV) / range) * plotH,
   }));
 
@@ -3387,7 +3451,7 @@ function drawEquityChart(data, startingBudget) {
 
   // X-axis labels (first, middle, last)
   ctx.textAlign = "center";
-  const timestamps = data.map((d) => new Date(d.t));
+  const timestamps = safeData.map((d) => new Date(d.t));
   const timeFmt = (d) => d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   ctx.fillText(timeFmt(timestamps[0]), points[0].x, pad.top + plotH + 18);
   const mid = Math.floor(data.length / 2);
@@ -3418,7 +3482,7 @@ function drawEquityChart(data, startingBudget) {
   ctx.fillStyle = "rgba(96, 165, 250, 0.45)";
   for (let i = 0; i < points.length; i++) {
     const p = points[i];
-    const d = data[i] || {};
+    const d = safeData[i] || {};
     ctx.beginPath();
     ctx.arc(p.x, p.y, i === 0 || i === points.length - 1 ? 3 : 2, 0, Math.PI * 2);
     ctx.fill();
@@ -3446,6 +3510,18 @@ function drawEquityChart(data, startingBudget) {
     ctx.restore();
   }
 
+  if (Number.isFinite(hoverX) && hoverX >= pad.left && hoverX <= pad.left + plotW) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(226,232,240,0.95)";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(hoverX, pad.top);
+    ctx.lineTo(hoverX, pad.top + plotH);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // Draw dots at endpoints
   for (const p of [points[0], points[points.length - 1]]) {
     ctx.beginPath();
@@ -3455,12 +3531,54 @@ function drawEquityChart(data, startingBudget) {
   }
 }
 
+function _equityChartCacheKey(botId, aggregation) {
+  return `cryptobot_equity_chart_cache:${String(botId || "")}::${String(aggregation || "1m")}`;
+}
+
+function _saveEquityChartCache(botId, aggregation, payload) {
+  try {
+    localStorage.setItem(_equityChartCacheKey(botId, aggregation), JSON.stringify(payload || {}));
+  } catch {
+    // Ignore cache write failures (quota/private mode).
+  }
+}
+
+function _loadEquityChartCache(botId, aggregation) {
+  try {
+    const raw = localStorage.getItem(_equityChartCacheKey(botId, aggregation));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.points)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function _mergeEquitySeriesToTotalPoints(series) {
+  if (!Array.isArray(series) || series.length === 0) return [];
+  const totalsByTs = new Map();
+  for (const entry of series) {
+    const points = Array.isArray(entry?.points) ? entry.points : [];
+    for (const p of points) {
+      const ts = String(p?.t || "");
+      if (!ts) continue;
+      const current = Number(totalsByTs.get(ts) || 0);
+      totalsByTs.set(ts, current + Number(p?.v || 0));
+    }
+  }
+  return Array.from(totalsByTs.entries())
+    .map(([t, v]) => ({ t, v: Number(v || 0) }))
+    .sort((a, b) => new Date(a.t).getTime() - new Date(b.t).getTime());
+}
+
 /** Fetch equity history for the selected bot and redraw the chart. */
 async function loadEquityChart() {
   const botId = document.getElementById("equity_chart_bot")?.value;
   const aggregation = getSelectedEquityAggregation();
   const infoDiv = document.getElementById("equity_chart_info");
   if (!botId) {
+    _equityChartRenderState = { mode: "single", points: [], startingBudget: 0 };
     drawEquityChart([]);
     if (infoDiv) infoDiv.style.display = "none";
     return;
@@ -3472,10 +3590,57 @@ async function loadEquityChart() {
       : `/api/v1/bots/${botId}/equity-history?${params.toString()}`;
     const resp = await api(url);
     const totalSeries = botId === "__total__" && Array.isArray(resp.series) ? resp.series : null;
-    const points = Array.isArray(resp.points) ? [...resp.points] : [];
+    let points = Array.isArray(resp.points) ? [...resp.points] : [];
     const startingBudget = resp.starting_budget || 0;
     const pnl = resp.pnl || 0;
     const totalEquity = resp.total_equity || 0;
+    const mergedTotalPoints = botId === "__total__" ? _mergeEquitySeriesToTotalPoints(totalSeries) : [];
+    if (botId === "__total__" && points.length === 0 && mergedTotalPoints.length > 0) {
+      points = mergedTotalPoints;
+    }
+
+    if (points.length === 0 && !(totalSeries && totalSeries.length > 0)) {
+      const cached = _loadEquityChartCache(botId, aggregation);
+      if (cached) {
+        const cachedSeries = botId === "__total__" && Array.isArray(cached.series) ? cached.series : null;
+        const cachedPoints = Array.isArray(cached.points) ? cached.points : [];
+        const cachedStartingBudget = Number(cached.starting_budget || 0);
+        const cachedPnl = Number(cached.pnl || 0);
+        const cachedTotalEquity = Number(cached.total_equity || 0);
+
+        if (infoDiv) {
+          infoDiv.style.display = "";
+          document.getElementById("equity_info_budget").textContent = formatNumber(cachedStartingBudget);
+          const pnlEl = document.getElementById("equity_info_pnl");
+          pnlEl.textContent = (cachedPnl >= 0 ? "+" : "") + formatNumber(cachedPnl);
+          pnlEl.className = cachedPnl >= 0 ? "pnl-positive" : "pnl-negative";
+          document.getElementById("equity_info_total").textContent = formatNumber(cachedTotalEquity);
+        }
+
+        const mergedCachedPoints = botId === "__total__" ? _mergeEquitySeriesToTotalPoints(cachedSeries) : [];
+        if (botId === "__total__" && mergedCachedPoints.length > 0) {
+          _equityChartRenderState = { mode: "single", points: mergedCachedPoints, startingBudget: cachedStartingBudget };
+          drawEquityChart(mergedCachedPoints, cachedStartingBudget, _equityChartHoverX);
+        } else if (cachedSeries && cachedSeries.length > 0) {
+          _equityChartRenderState = { mode: "series", series: cachedSeries, startingBudget: cachedStartingBudget };
+          drawEquityChartSeries(cachedSeries, cachedStartingBudget, _equityChartHoverX);
+        } else {
+          _equityChartRenderState = { mode: "single", points: cachedPoints, startingBudget: cachedStartingBudget };
+          drawEquityChart(cachedPoints, cachedStartingBudget, _equityChartHoverX);
+        }
+        return;
+      }
+    }
+
+    if (points.length > 0 || (totalSeries && totalSeries.length > 0)) {
+      _saveEquityChartCache(botId, aggregation, {
+        points,
+        series: totalSeries || [],
+        starting_budget: startingBudget,
+        pnl,
+        total_equity: totalEquity,
+      });
+    }
 
     // Keep the trend endpoint anchored to the same normalized equity that is
     // shown in the bots table/info panel.
@@ -3494,12 +3659,49 @@ async function loadEquityChart() {
       document.getElementById("equity_info_total").textContent = formatNumber(totalEquity);
     }
 
-    if (totalSeries && totalSeries.length > 0) {
-      drawEquityChartSeries(totalSeries, startingBudget);
+    if (botId === "__total__") {
+      _equityChartRenderState = { mode: "single", points, startingBudget };
+      drawEquityChart(points, startingBudget, _equityChartHoverX);
+    } else if (totalSeries && totalSeries.length > 0) {
+      _equityChartRenderState = { mode: "series", series: totalSeries, startingBudget };
+      drawEquityChartSeries(totalSeries, startingBudget, _equityChartHoverX);
     } else {
-      drawEquityChart(points, startingBudget);
+      _equityChartRenderState = { mode: "single", points, startingBudget };
+      drawEquityChart(points, startingBudget, _equityChartHoverX);
     }
   } catch {
+    const cached = _loadEquityChartCache(botId, aggregation);
+    if (cached) {
+      const cachedSeries = botId === "__total__" && Array.isArray(cached.series) ? cached.series : null;
+      const cachedPoints = Array.isArray(cached.points) ? cached.points : [];
+      const cachedStartingBudget = Number(cached.starting_budget || 0);
+      const cachedPnl = Number(cached.pnl || 0);
+      const cachedTotalEquity = Number(cached.total_equity || 0);
+
+      if (infoDiv) {
+        infoDiv.style.display = "";
+        document.getElementById("equity_info_budget").textContent = formatNumber(cachedStartingBudget);
+        const pnlEl = document.getElementById("equity_info_pnl");
+        pnlEl.textContent = (cachedPnl >= 0 ? "+" : "") + formatNumber(cachedPnl);
+        pnlEl.className = cachedPnl >= 0 ? "pnl-positive" : "pnl-negative";
+        document.getElementById("equity_info_total").textContent = formatNumber(cachedTotalEquity);
+      }
+
+      const mergedCachedPoints = botId === "__total__" ? _mergeEquitySeriesToTotalPoints(cachedSeries) : [];
+      if (botId === "__total__" && mergedCachedPoints.length > 0) {
+        _equityChartRenderState = { mode: "single", points: mergedCachedPoints, startingBudget: cachedStartingBudget };
+        drawEquityChart(mergedCachedPoints, cachedStartingBudget, _equityChartHoverX);
+      } else if (cachedSeries && cachedSeries.length > 0) {
+        _equityChartRenderState = { mode: "series", series: cachedSeries, startingBudget: cachedStartingBudget };
+        drawEquityChartSeries(cachedSeries, cachedStartingBudget, _equityChartHoverX);
+      } else {
+        _equityChartRenderState = { mode: "single", points: cachedPoints, startingBudget: cachedStartingBudget };
+        drawEquityChart(cachedPoints, cachedStartingBudget, _equityChartHoverX);
+      }
+      return;
+    }
+
+    _equityChartRenderState = { mode: "single", points: [], startingBudget: 0 };
     drawEquityChart([]);
     if (infoDiv) infoDiv.style.display = "none";
   }
@@ -3539,10 +3741,33 @@ document.getElementById("equity_chart")?.addEventListener("mousemove", (e) => {
     }
   }
 
-  if (best && bestDistance <= 12) updateEquityChartTooltip(best, e);
-  else hideEquityChartTooltip();
+  if (best && bestDistance <= 12) {
+    _equityChartHoverX = best.x;
+    if (_equityChartRenderState?.mode === "series") {
+      drawEquityChartSeries(_equityChartRenderState.series || [], _equityChartRenderState.startingBudget, _equityChartHoverX);
+    } else {
+      drawEquityChart(_equityChartRenderState?.points || [], _equityChartRenderState?.startingBudget || 0, _equityChartHoverX);
+    }
+    updateEquityChartTooltip(best, e);
+  } else {
+    _equityChartHoverX = null;
+    if (_equityChartRenderState?.mode === "series") {
+      drawEquityChartSeries(_equityChartRenderState.series || [], _equityChartRenderState.startingBudget, null);
+    } else {
+      drawEquityChart(_equityChartRenderState?.points || [], _equityChartRenderState?.startingBudget || 0, null);
+    }
+    hideEquityChartTooltip();
+  }
 });
-document.getElementById("equity_chart")?.addEventListener("mouseleave", hideEquityChartTooltip);
+document.getElementById("equity_chart")?.addEventListener("mouseleave", () => {
+  _equityChartHoverX = null;
+  if (_equityChartRenderState?.mode === "series") {
+    drawEquityChartSeries(_equityChartRenderState.series || [], _equityChartRenderState.startingBudget, null);
+  } else {
+    drawEquityChart(_equityChartRenderState?.points || [], _equityChartRenderState?.startingBudget || 0, null);
+  }
+  hideEquityChartTooltip();
+});
 
 // ──────────────────────────────────────────────────────────────
 // Orders overview table
@@ -3991,6 +4216,7 @@ async function loadOrders() {
         cells[9].textContent = _formatDateTime(row.date_time);
       }
     );
+    await refreshTradeChartOpenOrders();
   } catch {
     if (countEl) countEl.textContent = "(0)";
     _renderNotificationEmpty(tbody, 10);
@@ -4142,6 +4368,9 @@ async function openOrdersModal(bot) {
 
   // Build full grid levels from config
   const grid = bot.config?.grid || {};
+  const currentPrice = Number(bot?.latest_metrics?.price || 0);
+  const availableQuote = Number(bot?.latest_metrics?.quote_balance || 0);
+  const orderSizeQuote = Number(grid?.order_size_quote || 0);
   const levels = [];
   if (grid.lower_price && grid.upper_price && grid.levels > 1) {
     const step = (grid.upper_price - grid.lower_price) / (grid.levels - 1);
@@ -4174,7 +4403,7 @@ async function openOrdersModal(bot) {
 
     // Render full grid
     for (const lv of levels) {
-      const tr = document.createElement("tr");
+      const rowEl = document.createElement("tr");
       const order = orderMap[lv.index];
       let statusHtml;
       if (order) {
@@ -4182,20 +4411,58 @@ async function openOrdersModal(bot) {
         const cls = orderSide === "buy" ? "order-buy" : orderSide === "sell" ? "order-sell" : "";
         statusHtml = `<span class="${cls}">${orderSide ? orderSide.toUpperCase() : "-"}</span>`;
       } else {
-        statusHtml = `<span class="grid-idle">—</span>`;
+        let reason = "";
+        if (currentPrice > 0) {
+          if (lv.price < currentPrice) {
+            if (orderSizeQuote > 0 && availableQuote + 1e-12 < orderSizeQuote) {
+              reason = tr("lbl_grid_waiting_insufficient_quote", "waiting: insufficient quote budget");
+            } else {
+              reason = tr("lbl_grid_waiting_reconcile", "waiting: reconcile/place cycle");
+            }
+          } else if (lv.price > currentPrice) {
+            reason = tr("lbl_grid_above_market", "above current price");
+          } else {
+            reason = tr("lbl_grid_at_market", "at current price");
+          }
+        }
+        const safeReason = reason ? _notificationEscapeHtml(reason) : "";
+        statusHtml = reason ? `<span class="grid-idle" title="${safeReason}">—</span>` : `<span class="grid-idle">—</span>`;
       }
-      tr.innerHTML = `<td>${lv.index}</td><td>${formatNumber(lv.price)}</td><td>${statusHtml}</td>`;
-      gridBody.appendChild(tr);
+      rowEl.innerHTML = `<td>${lv.index}</td><td>${formatNumber(lv.price)}</td><td>${statusHtml}</td>`;
+      gridBody.appendChild(rowEl);
     }
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="5">${e.message}</td></tr>`;
   }
 }
 
-/** Cached pixel points and trade markers for tooltip hit-testing. */
+/** Cached trade and grid markers for tooltip hit-testing. */
 let _tradeChartMarkers = [];
 let _tradeChartGridMarkers = [];
 let _tradeChartBot = null;
+let _tradeChartData = null;
+let _tradeChartHoverX = null;
+
+async function refreshTradeChartOpenOrders() {
+  const modal = document.getElementById("trade_chart_modal");
+  if (!modal?.open || !_tradeChartBot || !_tradeChartData) return;
+
+  try {
+    const resp = await api(`/api/v1/bots/${_tradeChartBot.id}/open-orders`);
+    const openOrders = Array.isArray(resp?.orders) ? resp.orders : [];
+    _tradeChartData.openOrders = openOrders;
+    drawTradeChart(
+      _tradeChartData.history,
+      _tradeChartData.trades,
+      _tradeChartData.grid,
+      openOrders,
+      _tradeChartData.fallbackPrice,
+      _tradeChartHoverX,
+    );
+  } catch {
+    // Keep existing chart if refresh fails temporarily.
+  }
+}
 
 /**
  * Open the trade chart modal for a bot, fetch its price history
@@ -4225,12 +4492,52 @@ async function openTradeChart(bot) {
     openOrders = resp.orders || [];
   } catch {}
 
+  // Build a denser price history for the chart from both equity snapshots and
+  // trade events, then append the latest live price if available.
+  const mergedPricePoints = [];
+  for (const point of history || []) {
+    const ts = String(point?.t || "");
+    const p = Number(point?.p || 0);
+    if (ts && p > 0) mergedPricePoints.push({ t: ts, p });
+  }
+  for (const ev of trades || []) {
+    const ts = String(ev?.timestamp || "");
+    const p = Number(ev?.price || 0);
+    if (ts && p > 0) mergedPricePoints.push({ t: ts, p });
+  }
+  if (Number(fallbackPrice) > 0) {
+    mergedPricePoints.push({ t: new Date().toISOString(), p: Number(fallbackPrice) });
+  }
+
+  if (mergedPricePoints.length) {
+    const byTs = new Map();
+    for (const row of mergedPricePoints) {
+      byTs.set(String(row.t), { t: String(row.t), p: Number(row.p || 0) });
+    }
+    const sorted = Array.from(byTs.values())
+      .filter((row) => Number.isFinite(new Date(row.t).getTime()) && row.p > 0)
+      .sort((a, b) => new Date(a.t).getTime() - new Date(b.t).getTime());
+    history = sorted;
+  }
+
+  _tradeChartData = {
+    history,
+    trades,
+    openOrders,
+    grid,
+    fallbackPrice,
+  };
+
   drawTradeChart(history, trades, grid, openOrders, fallbackPrice);
 }
 
 document.getElementById("close_trade_chart")?.addEventListener("click", () => {
   document.getElementById("trade_chart_modal").close();
   _tradeChartMarkers = [];
+  _tradeChartGridMarkers = [];
+  _tradeChartBot = null;
+  _tradeChartData = null;
+  _tradeChartHoverX = null;
 });
 
 document.getElementById("close_orders_modal")?.addEventListener("click", () => {
@@ -4245,8 +4552,9 @@ document.getElementById("close_orders_modal")?.addEventListener("click", () => {
  * @param {{lower_price:number,upper_price:number,levels:number}} grid
  * @param {Array<{level:number,price:number,side:string}>} openOrders
  * @param {number} fallbackPrice
+ * @param {number|null} hoverX
  */
-function drawTradeChart(history, trades, grid, openOrders = [], fallbackPrice = 0) {
+function drawTradeChart(history, trades, grid, openOrders = [], fallbackPrice = 0, hoverX = null) {
   const canvas = document.getElementById("trade_chart_canvas");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -4316,7 +4624,10 @@ function drawTradeChart(history, trades, grid, openOrders = [], fallbackPrice = 
   const openOrderMap = new Map();
   for (const order of openOrders || []) {
     if (order && Number.isInteger(Number(order.level))) {
-      openOrderMap.set(Number(order.level), order);
+      openOrderMap.set(Number(order.level), {
+        ...order,
+        side: _normalizeSideValue(order.side),
+      });
     }
   }
 
@@ -4350,8 +4661,9 @@ function drawTradeChart(history, trades, grid, openOrders = [], fallbackPrice = 
   ctx.fillText(timeFmt(new Date(priceData[midIdx].t)), toX(priceData[midIdx].t), pad.top + plotH + 18);
   ctx.fillText(timeFmt(new Date(priceData[priceData.length - 1].t)), toX(priceData[priceData.length - 1].t), pad.top + plotH + 18);
 
-  // Draw grid levels using order state: open buys green, open sells red,
-  // and future sells above the current price as dark red.
+  // Draw grid levels using order state:
+  // - open buys/sells: light green/red
+  // - non-open levels: dark green below current price, dark red above current price
   if (grid.lower_price && grid.upper_price && grid.levels >= 2) {
     const step = (grid.upper_price - grid.lower_price) / (grid.levels - 1);
     ctx.save();
@@ -4362,17 +4674,22 @@ function drawTradeChart(history, trades, grid, openOrders = [], fallbackPrice = 
       const y = toY(lvl);
       if (y < pad.top || y > pad.top + plotH) continue;
       const order = openOrderMap.get(i);
-      let strokeStyle = "rgba(250,204,21,0.35)";
-      let fillStyle = "rgba(250,204,21,0.55)";
+      let strokeStyle = "rgba(34,64,34,0.85)";
+      let fillStyle = "rgba(34,64,34,0.75)";
       if (order?.side === "buy") {
-        strokeStyle = "rgba(34,197,94,0.95)";
-        fillStyle = "rgba(34,197,94,0.9)";
+        strokeStyle = "rgba(110,231,183,0.98)";
+        fillStyle = "rgba(110,231,183,0.95)";
       } else if (order?.side === "sell") {
-        strokeStyle = "rgba(239,68,68,0.95)";
-        fillStyle = "rgba(239,68,68,0.9)";
-      } else if (currentPrice > 0 && lvl > currentPrice) {
-        strokeStyle = "rgba(127,29,29,0.95)";
-        fillStyle = "rgba(127,29,29,0.75)";
+        strokeStyle = "rgba(252,165,165,0.98)";
+        fillStyle = "rgba(252,165,165,0.95)";
+      } else if (currentPrice > 0) {
+        if (lvl > currentPrice) {
+          strokeStyle = "rgba(127,29,29,0.95)";
+          fillStyle = "rgba(127,29,29,0.75)";
+        } else {
+          strokeStyle = "rgba(20,83,45,0.95)";
+          fillStyle = "rgba(20,83,45,0.75)";
+        }
       }
       ctx.strokeStyle = strokeStyle;
       ctx.beginPath();
@@ -4383,6 +4700,7 @@ function drawTradeChart(history, trades, grid, openOrders = [], fallbackPrice = 
       const isOpenBuy = order?.side === "buy";
       const isOpenSell = order?.side === "sell";
       const isFutureSell = !order && currentPrice > 0 && lvl > currentPrice;
+      const isFutureBuy = !order && currentPrice > 0 && lvl <= currentPrice;
       const expectedPnl = isOpenSell && i > 0 ? lvl - (grid.lower_price + (i - 1) * step) : null;
       _tradeChartGridMarkers.push({
         x1: pad.left,
@@ -4394,6 +4712,7 @@ function drawTradeChart(history, trades, grid, openOrders = [], fallbackPrice = 
         isOpenBuy,
         isOpenSell,
         isFutureSell,
+        isFutureBuy,
         expectedPnl,
       });
     }
@@ -4411,22 +4730,33 @@ function drawTradeChart(history, trades, grid, openOrders = [], fallbackPrice = 
   ctx.setLineDash([]);
   ctx.stroke();
 
-  // Draw trade level lines
+  // Draw neutral trade points and cache them for hover tooltips.
   for (const tr of trades) {
+    const ts = tr?.timestamp;
+    if (!ts) continue;
+    const x = toX(ts);
     const y = toY(tr.price);
-    if (y < pad.top || y > pad.top + plotH) continue;
-    const isBuy = tr.side === "buy" || tr.trade_pnl < 0;
-    const lineColor = isBuy ? "rgba(34,197,94,0.9)" : "rgba(239,68,68,0.9)";
+    if (x < pad.left || x > pad.left + plotW || y < pad.top || y > pad.top + plotH) continue;
     ctx.save();
-    ctx.setLineDash([8, 5]);
-    ctx.strokeStyle = lineColor;
-    ctx.lineWidth = 2;
+    ctx.fillStyle = "rgba(226,232,240,0.95)";
     ctx.beginPath();
-    ctx.moveTo(pad.left, y);
-    ctx.lineTo(pad.left + plotW, y);
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    _tradeChartMarkers.push({ x, y, trade: tr });
+  }
+
+  // Draw vertical guide line last so it always stays visible above chart layers.
+  if (Number.isFinite(hoverX) && hoverX >= pad.left && hoverX <= pad.left + plotW) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(226,232,240,0.95)";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(hoverX, pad.top);
+    ctx.lineTo(hoverX, pad.top + plotH);
     ctx.stroke();
     ctx.restore();
-    _tradeChartMarkers.push({ x1: pad.left, x2: pad.left + plotW, y, trade: tr });
   }
 }
 
@@ -4435,14 +4765,59 @@ function _updateTradeChartTooltip(marker, canvas, mx) {
   if (!tip || !marker) return;
 
   if (marker.trade) {
-    const tr = marker.trade;
-    const time = new Date(tr.timestamp).toLocaleString();
-    const pnl = Number(tr.trade_pnl || 0);
-    const pnlCls = pnl >= 0 ? "color:#22c55e" : "color:#ef4444";
-    tip.innerHTML = `<div><strong>#${tr.trade_number}</strong> @ ${formatNumber(tr.price)}</div><div>${time}</div><div style="${pnlCls}">PnL: ${pnl >= 0 ? "+" : ""}${formatNumber(pnl)}</div>`;
+    const trade = marker.trade;
+    const marketValue = normalizeMarketValue(trade.market || _tradeChartBot?.config?.market || "");
+    const marketParts = marketValue.split("-");
+    const baseCurrency = String(trade.base_currency || _tradeChartBot?.config?.base_currency || marketParts[0] || "").trim().toUpperCase();
+    const quoteCurrency = String(trade.quote_currency || _tradeChartBot?.config?.quote_currency || marketParts[1] || "").trim().toUpperCase();
+    const withUnit = (value, unit) => {
+      const normalizedUnit = String(unit || "").trim();
+      const formatted = formatNumber(value || 0);
+      return normalizedUnit ? `${formatted} ${_notificationEscapeHtml(normalizedUnit)}` : formatted;
+    };
+    const tradeId = String(trade.id || trade.order_id || trade.exchange_order_id || "-");
+    const timestamp = trade.timestamp ? new Date(trade.timestamp) : null;
+    const time = timestamp && !Number.isNaN(timestamp.getTime()) ? timestamp.toLocaleString() : "-";
+    const price = Number(trade.price || 0);
+    const pnl = Number(trade.trade_pnl || 0);
+    const fee = Number(trade.fee_paid_quote ?? trade.fee ?? trade.transaction_fee ?? 0);
+    const total = Number(trade.total_amount ?? trade.total ?? trade.quote_amount ?? 0);
+    let amount = Number(trade.amount ?? trade.base_amount ?? trade.filled_amount ?? 0);
+    if (!(amount > 0) && price > 0 && total > 0) amount = total / price;
+    const pnlColor = pnl >= 0 ? "#22c55e" : "#ef4444";
+    const side = _normalizeSideValue(trade.side);
+    const sideTag = side ? `<span style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;padding:2px 6px;border-radius:999px;background:rgba(148,163,184,.2);color:#cbd5e1">${_notificationEscapeHtml(side)}</span>` : "";
+
+    const rows = [
+      [tr("lbl_trade_id", "Trade ID"), _notificationEscapeHtml(tradeId)],
+      [tr("th_time", "Date/Time"), _notificationEscapeHtml(time)],
+      [tr("th_price", "Price"), withUnit(price, quoteCurrency)],
+      [tr("th_amount", "Amount"), withUnit(amount, baseCurrency)],
+      [tr("th_total", "Total"), withUnit(total, quoteCurrency)],
+      [tr("th_fee", "Fee"), withUnit(fee, quoteCurrency)],
+    ];
+
+    tip.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;">
+        <div style="font-weight:700;">${tr("lbl_trade_details", "Trade Details")}</div>
+        ${sideTag}
+      </div>
+      <div style="display:grid;grid-template-columns:auto auto;column-gap:14px;row-gap:4px;align-items:baseline;">
+        ${rows.map(([label, value]) => `<div style="color:#94a3b8;">${_notificationEscapeHtml(String(label))}</div><div style="text-align:right;color:#e2e8f0;">${value}</div>`).join("")}
+      </div>
+      <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(148,163,184,.25);display:flex;justify-content:space-between;align-items:center;">
+        <div style="color:#94a3b8;">PnL</div>
+        <div style="font-weight:700;color:${pnlColor};">${pnl >= 0 ? "+" : ""}${formatNumber(pnl)}</div>
+      </div>
+    `;
   } else {
     const parts = [];
-    const sideLabel = marker.isOpenBuy ? "Open buy order" : marker.isOpenSell ? "Open sell order" : marker.isFutureSell ? "Future sell order" : marker.side === "buy" ? "Buy level" : "Sell level";
+    const sideLabel = marker.isOpenBuy ? "Open buy order"
+      : marker.isOpenSell ? "Open sell order"
+      : marker.isFutureSell ? "Grid sell level"
+      : marker.isFutureBuy ? "Grid buy level"
+      : marker.side === "buy" ? "Grid buy level"
+      : "Grid sell level";
     parts.push(`<div><strong>${sideLabel}</strong> #${marker.level + 1}</div>`);
     parts.push(`<div>Price: ${formatNumber(marker.price)}</div>`);
     if (marker.isOpenSell) {
@@ -4461,15 +4836,33 @@ document.getElementById("trade_chart_canvas")?.addEventListener("mousemove", (e)
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
+  _tradeChartHoverX = mx;
+
+  if (_tradeChartData) {
+    drawTradeChart(
+      _tradeChartData.history,
+      _tradeChartData.trades,
+      _tradeChartData.grid,
+      _tradeChartData.openOrders,
+      _tradeChartData.fallbackPrice,
+      _tradeChartHoverX,
+    );
+  }
 
   let hit = null;
-  for (const m of _tradeChartGridMarkers) {
-    const withinX = mx >= m.x1 && mx <= m.x2;
-    const withinY = Math.abs(my - m.y) <= 6;
-    if (withinX && withinY) { hit = m; break; }
+  let bestTrade = null;
+  let bestTradeDx = Infinity;
+  for (const m of _tradeChartMarkers) {
+    const dx = Math.abs(mx - m.x);
+    if (dx <= 8 && dx < bestTradeDx) {
+      bestTrade = m;
+      bestTradeDx = dx;
+    }
   }
-  if (!hit) {
-    for (const m of _tradeChartMarkers) {
+  if (bestTrade) {
+    hit = bestTrade;
+  } else {
+    for (const m of _tradeChartGridMarkers) {
       const withinX = mx >= m.x1 && mx <= m.x2;
       const withinY = Math.abs(my - m.y) <= 6;
       if (withinX && withinY) { hit = m; break; }
@@ -4479,6 +4872,17 @@ document.getElementById("trade_chart_canvas")?.addEventListener("mousemove", (e)
   else document.getElementById("trade_chart_tooltip").style.display = "none";
 });
 document.getElementById("trade_chart_canvas")?.addEventListener("mouseleave", () => {
+  _tradeChartHoverX = null;
+  if (_tradeChartData) {
+    drawTradeChart(
+      _tradeChartData.history,
+      _tradeChartData.trades,
+      _tradeChartData.grid,
+      _tradeChartData.openOrders,
+      _tradeChartData.fallbackPrice,
+      null,
+    );
+  }
   document.getElementById("trade_chart_tooltip").style.display = "none";
 });
 
@@ -4633,8 +5037,16 @@ function scheduleGridCheck() {
   (id) => document.getElementById(id)?.addEventListener("input", scheduleGridCheck)
 );
 document.getElementById("order_size_quote")?.addEventListener("input", () => renderMinimumOrderHint());
-document.getElementById("lower_price")?.addEventListener("input", () => renderMinimumOrderHint());
-document.getElementById("upper_price")?.addEventListener("input", () => renderMinimumOrderHint());
+document.getElementById("lower_price")?.addEventListener("input", () => {
+  clampInputDecimals(document.getElementById("lower_price"), getMarketPriceDecimals());
+  renderMinimumOrderHint();
+});
+document.getElementById("upper_price")?.addEventListener("input", () => {
+  clampInputDecimals(document.getElementById("upper_price"), getMarketPriceDecimals());
+  renderMinimumOrderHint();
+});
+document.getElementById("lower_price")?.addEventListener("blur", normalizeGridPriceInputsToMarketPrecision);
+document.getElementById("upper_price")?.addEventListener("blur", normalizeGridPriceInputsToMarketPrecision);
 document.getElementById("mode")?.addEventListener("change", () => renderMinimumOrderHint());
 
 /**
@@ -4643,14 +5055,16 @@ document.getElementById("mode")?.addEventListener("change", () => renderMinimumO
  */
 document.getElementById("btn_suggest_range").onclick = async () => {
   const market = normalizeMarketValue(getMarketInput()?.value);
+  const priceDecimals = getMarketPriceDecimals(market);
   const days = Number(document.getElementById("lookback_days").value) || 7;
   const btn = document.getElementById("btn_suggest_range");
   btn.disabled = true;
   btn.textContent = "…";
   try {
     const r = await api(`/api/v1/market/price-range?market=${encodeURIComponent(market)}&days=${days}`);
-    document.getElementById("lower_price").value = formatNumber(r.avg_low);
-    document.getElementById("upper_price").value = formatNumber(r.avg_high);
+    document.getElementById("lower_price").value = String(roundToDecimals(Number(r.avg_low || 0), priceDecimals));
+    document.getElementById("upper_price").value = String(roundToDecimals(Number(r.avg_high || 0), priceDecimals));
+    normalizeGridPriceInputsToMarketPrecision();
     syncBudgetAndOrderSize("levels");
   } catch (err) {
     showToast(t("grid_calc_error"), String(err.message || err), "warn", 4000);

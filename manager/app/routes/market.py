@@ -710,6 +710,7 @@ def list_markets(status: str = "trading") -> list[dict]:
                 "base": item.get("base"),
                 "quote": item.get("quote"),
                 "status": item.get("status"),
+                "price_precision": item.get("pricePrecision"),
                 "min_order_in_quote_asset": item.get("minOrderInQuoteAsset"),
                 "min_order_in_base_asset": item.get("minOrderInBaseAsset"),
             }

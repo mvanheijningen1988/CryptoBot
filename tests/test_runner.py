@@ -181,6 +181,28 @@ def test_runner_waits_with_sell_orders_until_enough_base(monkeypatch):
     assert waiting_logs == []
 
 
+def test_reconcile_missing_grid_buys_adds_levels_below_current_price(monkeypatch):
+    exchange = _StubExchange([100.0])
+
+    monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
+
+    runner = BotRunner("bot-grid-reconcile", _config(), "http://manager:8000", "agent-1", AgentLogStore())
+    runner.running = True
+    runner.price = 106.0
+
+    # Simulate startup seeded buys only up to level 1, while price moved higher.
+    runner.state.open_orders = {0: "buy", 1: "buy"}
+    runner.state.filled_buys = {2}
+
+    added = runner._reconcile_missing_grid_buys()
+
+    # Grid levels are [90,95,100,105,110], so level 3 is newly below 106.
+    assert added == 1
+    assert runner.state.open_orders[3] == "buy"
+    # Filled buy levels should not be re-added as open buy.
+    assert 2 not in runner.state.open_orders
+
+
 def test_quote_amount_for_new_buy_order_only_compounds_in_compound_mode(monkeypatch):
     exchange = _StubExchange([100.0])
     monkeypatch.setattr(BotRunner, "_build_exchange", lambda self, config: exchange)
@@ -541,6 +563,23 @@ def test_runner_manager_prepare_delete_keeps_runner_on_failure():
         manager.prepare_delete("bot-delete-fail", "delete_open_orders")
 
     assert "bot-delete-fail" in manager.runners
+
+
+def test_runner_manager_prepare_delete_is_idempotent_after_success():
+    class _DeleteOkRunner:
+        def prepare_delete(self, mode):
+            return {"mode": mode, "ok": True}
+
+    manager = RunnerManager("http://manager:8000", "agent-1")
+    manager.runners["bot-delete-idempotent"] = _DeleteOkRunner()  # type: ignore[assignment]
+
+    first = manager.prepare_delete("bot-delete-idempotent", "delete_open_orders")
+    second = manager.prepare_delete("bot-delete-idempotent", "delete_open_orders")
+
+    assert first["ok"] is True
+    assert second["already_prepared"] is True
+    assert second["mode"] == "delete_open_orders"
+    assert "bot-delete-idempotent" not in manager.runners
 
 
 def test_prepare_delete_open_orders_live_cancels_buy_and_sell_scoped(monkeypatch):

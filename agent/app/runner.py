@@ -1279,6 +1279,44 @@ class BotRunner:
 
         self._place_ready_open_orders(context, log_deferred=True)
 
+    def _reconcile_missing_grid_buys(self) -> int:
+        """Ensure BUY levels below market are present in planned open orders.
+
+        The strategy seeds buys below the current price at startup, but live
+        markets can move up afterwards. This periodic reconciliation keeps the
+        ladder complete by adding missing BUY levels that are now below market
+        and not currently represented by open orders or held-filled positions.
+        """
+        if not self.running:
+            return 0
+        if self.price <= 0:
+            return 0
+
+        added_levels: list[int] = []
+        for idx, level_price in enumerate(self.strategy.levels):
+            if level_price >= self.price:
+                continue
+            if idx in self.state.open_orders:
+                continue
+            if idx in self.state.filled_buys:
+                continue
+            self.state.open_orders[idx] = "buy"
+            added_levels.append(idx)
+
+        if added_levels:
+            self.log_store.add(
+                "grid_reconciled",
+                f"Added {len(added_levels)} missing BUY level(s) below market.",
+                bot_id=self.bot_id,
+                data={
+                    "price": self.price,
+                    "added_levels": added_levels,
+                },
+                category="system",
+            )
+
+        return len(added_levels)
+
     def _loop(self) -> None:
         """Main trading loop: wait for price updates, check for filled limit orders."""
         while self.running:
@@ -1463,6 +1501,9 @@ class BotRunner:
 
             self._process_cancelled_orders("pending-sync")
 
+            # Keep the planned ladder aligned with the current market regime.
+            self._reconcile_missing_grid_buys()
+
             # Re-check waiting orders as market price / balances change.
             self._place_ready_open_orders("pending")
 
@@ -1484,6 +1525,9 @@ class RunnerManager:
         self.agent_id = agent_id
         self.runners: dict[str, BotRunner] = {}
         self.log_store = AgentLogStore()
+        # Keep a short-lived marker so duplicate prepare-delete dispatches
+        # (e.g. WS success + HTTP fallback retry) are treated idempotently.
+        self._recent_prepare_delete: dict[str, float] = {}
 
     def start_bot(self, bot_id: str, config: BotConfig, runner_state: RunnerState | None = None) -> None:
         """
@@ -1519,11 +1563,21 @@ class RunnerManager:
         delete_mode: Literal["delete_open_orders", "delete_as_is", "transform_to_base", "transform_to_quote"],
     ) -> dict:
         """Run delete preparation mode for a running bot."""
+        now_ts = time.time()
+        recent_ts = self._recent_prepare_delete.get(bot_id)
+        if recent_ts is not None and now_ts - recent_ts <= 120.0:
+            return {
+                "mode": delete_mode,
+                "actions": [],
+                "already_prepared": True,
+            }
+
         runner = self.runners.get(bot_id)
         if not runner:
             raise RuntimeError("Bot is not running on this agent")
         details = runner.prepare_delete(delete_mode)
         self.runners.pop(bot_id, None)
+        self._recent_prepare_delete[bot_id] = now_ts
         return details
 
     def update_budget(self, bot_id: str, budget: BudgetConfig) -> None:
