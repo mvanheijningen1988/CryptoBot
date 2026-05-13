@@ -924,14 +924,48 @@ function formatNumber(value) {
   }).format(n);
 }
 
-function formatPnlWithPercent(pnlValue, startBudget) {
+function formatPnlWithPercent(pnlValue, startBudget, currency = "") {
   const pnl = Number(pnlValue || 0);
   const start = Number(startBudget || 0);
-  const amount = formatNumber(pnl);
+  const amount = _valueWithUnitText(pnl, currency, true);
   if (!(start > 0)) return amount;
   const pct = (pnl / start) * 100;
   const pctStr = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
   return `${amount} (${pctStr})`;
+}
+
+function _normalizeCurrencyCode(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function _marketCurrencyParts(market) {
+  const normalized = normalizeMarketValue(market || "");
+  const parts = normalized.split("-");
+  return {
+    base: _normalizeCurrencyCode(parts[0] || ""),
+    quote: _normalizeCurrencyCode(parts[1] || ""),
+  };
+}
+
+function _botCurrencies(bot) {
+  const marketParts = _marketCurrencyParts(bot?.config?.market || "");
+  return {
+    quote: _normalizeCurrencyCode(bot?.config?.quote_currency || marketParts.quote),
+    base: _normalizeCurrencyCode(bot?.config?.base_currency || marketParts.base),
+  };
+}
+
+function _valueWithUnitText(value, currency, includePlus = false) {
+  const numeric = Number(value || 0);
+  const unit = _normalizeCurrencyCode(currency);
+  const prefix = includePlus && numeric > 0 ? "+" : "";
+  const amount = `${prefix}${formatNumber(numeric)}`;
+  return unit ? `${amount} ${unit}` : amount;
+}
+
+function _labelWithCurrency(label, currency) {
+  const unit = _normalizeCurrencyCode(currency);
+  return unit ? `${label} (${unit})` : label;
 }
 
 /** Format seconds into human-readable uptime string. */
@@ -1439,6 +1473,7 @@ function startMarketRealtime() {
  */
 async function checkGridProfitability() {
   try {
+    const cfg = currentConfig();
     const market = normalizeMarketValue(getMarketInput()?.value);
     const priceDecimals = getMarketPriceDecimals(market);
     const basePayload = {
@@ -1460,6 +1495,7 @@ async function checkGridProfitability() {
     const appliedPreview = appliedType === "maker" ? makerPreview : takerPreview;
     const combinedPreview = {
       ...appliedPreview,
+      quote_currency: cfg.quote_currency,
       fee_context: {
         maker_rate: makerRate,
         taker_rate: takerRate,
@@ -1508,6 +1544,11 @@ function openGridPreviewModal(r, skipShowModal = false) {
   if (!modal || !tbody || !r) return;
 
   tbody.innerHTML = "";
+  const previewQuoteCurrency = _normalizeCurrencyCode(r?.quote_currency || currentConfig().quote_currency);
+  const netProfitHeader = modal.querySelector('th[data-i18n="th_net_profit"]');
+  if (netProfitHeader) {
+    netProfitHeader.textContent = _labelWithCurrency(t("th_net_profit"), previewQuoteCurrency);
+  }
   for (const trade of (r.trades || [])) {
     const row = document.createElement("tr");
     const displayLevel = Number(trade.level) + 1;
@@ -1519,12 +1560,12 @@ function openGridPreviewModal(r, skipShowModal = false) {
     const totalFees = Number(trade.total_fees_quote || 0);
     const feeTitle = [
       `${tr("lbl_fee_rate", "Fee rate")} ${formatNumber(feeRatePct)}%`,
-      `${tr("lbl_fee_tooltip_buy", "Buy fee")}: ${formatNumber(buyFee)} (${formatNumber(feeRatePct)}% ${tr("lbl_fee_tooltip_of_order_size", "of order size")})`,
-      `${tr("lbl_fee_tooltip_sell", "Sell fee")}: ${formatNumber(sellFee)} (${formatNumber(feeRatePct)}% ${tr("lbl_fee_tooltip_of_sell_value", "of sell value")})`,
-      `${tr("lbl_total_fees", "Total Fees")}: ${formatNumber(totalFees)}`,
+      `${tr("lbl_fee_tooltip_buy", "Buy fee")}: ${_valueWithUnitText(buyFee, previewQuoteCurrency)} (${formatNumber(feeRatePct)}% ${tr("lbl_fee_tooltip_of_order_size", "of order size")})`,
+      `${tr("lbl_fee_tooltip_sell", "Sell fee")}: ${_valueWithUnitText(sellFee, previewQuoteCurrency)} (${formatNumber(feeRatePct)}% ${tr("lbl_fee_tooltip_of_sell_value", "of sell value")})`,
+      `${_labelWithCurrency(tr("lbl_total_fees", "Total Fees"), previewQuoteCurrency)}: ${_valueWithUnitText(totalFees, previewQuoteCurrency)}`,
     ].join("\n");
     const safeFeeTip = feeTitle.replace(/"/g, "&quot;");
-    row.innerHTML = `<td>${displayLevel}</td><td>${formatNumber(trade.buy_price)}</td><td>${formatNumber(trade.sell_price)}</td><td>${formatNumber(trade.order_size_quote)}</td><td class="grid-fee-cell" data-fee-tip="${safeFeeTip}">${formatNumber(totalFees)}</td><td class="${pcls}">${formatNumber(trade.net_profit)}</td><td class="${pcls}">${icon}</td>`;
+    row.innerHTML = `<td>${displayLevel}</td><td>${formatNumber(trade.buy_price)}</td><td>${formatNumber(trade.sell_price)}</td><td>${_valueWithUnitText(trade.order_size_quote, previewQuoteCurrency)}</td><td class="grid-fee-cell" data-fee-tip="${safeFeeTip}">${_valueWithUnitText(totalFees, previewQuoteCurrency)}</td><td class="${pcls}">${_valueWithUnitText(trade.net_profit, previewQuoteCurrency, true)}</td><td class="${pcls}">${icon}</td>`;
     tbody.appendChild(row);
   }
 
@@ -1666,6 +1707,9 @@ function _renderBotDetailModal(bot) {
   const metrics = bot?.latest_metrics || {};
   const grid = bot?.config?.grid || {};
   const budget = bot?.config?.budget || {};
+  const currencies = _botCurrencies(bot);
+  const quoteCurrency = currencies.quote;
+  const baseCurrency = currencies.base;
   const sectionGeneral = t("bot_detail_section_general");
   const sectionBudget = t("lbl_budget");
   const sectionGrid = t("lbl_grid");
@@ -1687,8 +1731,8 @@ function _renderBotDetailModal(bot) {
 
   rows.push(`<h4 class="bot-detail-section">${sectionBudget}</h4>`);
   rows.push("<div class=\"bot-detail-grid\">");
-  addRow(t("lbl_quote_budget"), formatNumber(Number(budget.quote_budget || 0)));
-  addRow(t("bot_detail_base_budget"), formatNumber(Number(budget.base_budget || 0)));
+  addRow(_labelWithCurrency(t("lbl_quote_budget"), quoteCurrency), _valueWithUnitText(Number(budget.quote_budget || 0), quoteCurrency));
+  addRow(_labelWithCurrency(t("bot_detail_base_budget"), baseCurrency), _valueWithUnitText(Number(budget.base_budget || 0), baseCurrency));
   addRow(t("lbl_profit_mode"), String(budget.profit_mode || "-"));
   if (String(budget.profit_mode || "").toLowerCase() === "skim") {
     addRow(t("lbl_skim_ratio"), budget.skim_ratio != null ? formatNumber(Number(budget.skim_ratio || 0), 4, 4) : "-");
@@ -1706,8 +1750,8 @@ function _renderBotDetailModal(bot) {
   rows.push(`<h4 class="bot-detail-section">${sectionPerformance}</h4>`);
   rows.push("<div class=\"bot-detail-grid\">");
   addRow(t("th_last_price"), Number(metrics.price || 0) > 0 ? formatNumber(Number(metrics.price || 0)) : "-");
-  addRow(t("th_equity"), formatNumber(Number(metrics.total_equity_quote || 0)));
-  addRow(t("th_pnl"), formatPnlWithPercent(Number(metrics.dashboard_pnl_quote ?? metrics.realized_pnl_quote ?? 0), Number(budget.quote_budget || 0)));
+  addRow(_labelWithCurrency(t("th_equity"), quoteCurrency), _valueWithUnitText(Number(metrics.total_equity_quote || 0), quoteCurrency));
+  addRow(_labelWithCurrency(t("th_pnl"), quoteCurrency), formatPnlWithPercent(Number(metrics.dashboard_pnl_quote ?? metrics.realized_pnl_quote ?? 0), Number(budget.quote_budget || 0), quoteCurrency));
   addRow(t("th_trades"), String(Number(metrics.trade_count || 0)));
   addRow(t("th_runtime"), formatUptime(Number(metrics.runtime_seconds || 0)));
   rows.push("</div>");
@@ -2654,6 +2698,167 @@ function _bindSettingsSubtabs() {
 
 const _notificationOrderCache = new Map();
 const _notificationTradeCache = new Map();
+const _orderLifecycleToastSeen = new Map();
+const _openOrderLifecycleSnapshot = new Map();
+let _openOrderLifecycleBootstrapped = false;
+let _orderHistoryLifecycleBootstrapped = false;
+const _orderHistorySeenKeys = new Set();
+const _orderLifecycleToastTtlMs = 2 * 60 * 1000;
+const _orderHistorySeenMax = 5000;
+
+function _normalizeOrderStatus(status) {
+  return String(status || "").trim().toLowerCase();
+}
+
+function _orderLifecycleKey(row, fallbackIndex = "") {
+  return String(
+    row?.order_id
+    || row?.id
+    || row?.exchange_order_id
+    || row?.client_order_id
+    || `${row?.market || ""}-${row?.date_time || row?.timestamp || ""}-${fallbackIndex}`
+  );
+}
+
+function _isPartiallyFilledOrderRow(row) {
+  const status = _normalizeOrderStatus(row?.status);
+  if (status.includes("partially")) return true;
+  const filledAmount = Number(row?.filled_amount || 0);
+  const openAmount = Number(row?.open_amount || 0);
+  return filledAmount > 0 && openAmount > 0;
+}
+
+function _trimOrderLifecycleToastSeen(now = Date.now()) {
+  for (const [key, ts] of _orderLifecycleToastSeen.entries()) {
+    if (now - Number(ts || 0) > _orderLifecycleToastTtlMs) {
+      _orderLifecycleToastSeen.delete(key);
+    }
+  }
+}
+
+function _emitOrderLifecycleToast(kind, row, key, detail = "") {
+  const id = String(key || _orderLifecycleKey(row));
+  if (!id) return;
+
+  const stamp = String(row?.date_time || row?.timestamp || "");
+  const dedupeKey = `${kind}|${id}|${detail}|${stamp}`;
+  const now = Date.now();
+  _trimOrderLifecycleToastSeen(now);
+  if (_orderLifecycleToastSeen.has(dedupeKey)) return;
+  _orderLifecycleToastSeen.set(dedupeKey, now);
+
+  const market = String(row?.market || "-");
+  const side = _normalizeSideValue(row?.side);
+  const sideLabel = side ? side.toUpperCase() : "-";
+  const quoteCurrency = _normalizeCurrencyCode(
+    row?.quote_currency
+    || _marketCurrencyParts(market).quote
+    || "EUR"
+  );
+  const priceText = _valueWithUnitText(row?.price || row?.limit_price || 0, quoteCurrency);
+
+  let title = t("toast_trade");
+  if (kind === "placed") title = t("lbl_placed");
+  if (kind === "filled") title = t("lbl_filled");
+  if (kind === "cancelled") title = t("lbl_cancelled");
+  if (kind === "partial") title = lang === "nl" ? "Deels gevuld" : "Partially filled";
+
+  const message = `${market} • ${sideLabel} • ${priceText}`;
+  showToast(title, message, "info", 4200);
+}
+
+function _trimOrderHistorySeen() {
+  if (_orderHistorySeenKeys.size <= _orderHistorySeenMax) return;
+  const overflow = _orderHistorySeenKeys.size - _orderHistorySeenMax;
+  let i = 0;
+  for (const key of _orderHistorySeenKeys) {
+    _orderHistorySeenKeys.delete(key);
+    i += 1;
+    if (i >= overflow) break;
+  }
+}
+
+function _emitOrderHistoryLifecycleToasts(rows) {
+  if (!Array.isArray(rows)) return;
+  if (!_orderHistoryLifecycleBootstrapped) {
+    rows.forEach((row, idx) => {
+      const key = _orderLifecycleKey(row, idx);
+      if (key) _orderHistorySeenKeys.add(key);
+    });
+    _trimOrderHistorySeen();
+    _orderHistoryLifecycleBootstrapped = true;
+    return;
+  }
+
+  rows.forEach((row, idx) => {
+    const key = _orderLifecycleKey(row, idx);
+    if (!key || _orderHistorySeenKeys.has(key)) return;
+    _orderHistorySeenKeys.add(key);
+    const status = _normalizeOrderStatus(row?.status);
+    if (status === "filled") {
+      _emitOrderLifecycleToast("filled", row, key);
+    } else if (status === "canceled" || status === "cancelled") {
+      _emitOrderLifecycleToast("cancelled", row, key);
+    }
+  });
+
+  _trimOrderHistorySeen();
+}
+
+function _emitOpenOrderLifecycleToasts(rows) {
+  if (!Array.isArray(rows)) return;
+
+  if (!_openOrderLifecycleBootstrapped) {
+    _openOrderLifecycleSnapshot.clear();
+    rows.forEach((row, idx) => {
+      const key = _orderLifecycleKey(row, idx);
+      if (!key) return;
+      _openOrderLifecycleSnapshot.set(key, {
+        filled_amount: Number(row?.filled_amount || 0),
+        open_amount: Number(row?.open_amount || 0),
+        status: _normalizeOrderStatus(row?.status),
+      });
+    });
+    _openOrderLifecycleBootstrapped = true;
+    return;
+  }
+
+  const nextSnapshot = new Map();
+
+  rows.forEach((row, idx) => {
+    const key = _orderLifecycleKey(row, idx);
+    if (!key) return;
+
+    const prev = _openOrderLifecycleSnapshot.get(key);
+    const status = _normalizeOrderStatus(row?.status);
+    const filledAmount = Number(row?.filled_amount || 0);
+    const openAmount = Number(row?.open_amount || 0);
+    const partialNow = _isPartiallyFilledOrderRow(row);
+    const partialBefore = prev ? (Number(prev.filled_amount || 0) > 0 && Number(prev.open_amount || 0) > 0) || String(prev.status || "").includes("partially") : false;
+
+    if (!prev) {
+      _emitOrderLifecycleToast("placed", row, key);
+    }
+
+    if (partialNow) {
+      const prevFilled = Number(prev?.filled_amount || 0);
+      if (!partialBefore || filledAmount > prevFilled) {
+        _emitOrderLifecycleToast("partial", row, key, String(filledAmount));
+      }
+    }
+
+    nextSnapshot.set(key, {
+      filled_amount: filledAmount,
+      open_amount: openAmount,
+      status,
+    });
+  });
+
+  _openOrderLifecycleSnapshot.clear();
+  for (const [key, value] of nextSnapshot.entries()) {
+    _openOrderLifecycleSnapshot.set(key, value);
+  }
+}
 
 function _formatDateTime(value) {
   if (!value) return "-";
@@ -2883,6 +3088,7 @@ async function loadOrderHistory() {
     const url = qs.size ? `/api/v1/market/notifications/order-history?${qs.toString()}` : "/api/v1/market/notifications/order-history";
     const resp = await api(url);
     const rows = Array.isArray(resp?.rows) ? resp.rows : [];
+    _emitOrderHistoryLifecycleToasts(rows);
     _notificationOrderCache.clear();
     rows.forEach((row) => {
       const id = row.id || `${row.order_id || ""}-${row.date_time || ""}`;
@@ -3019,6 +3225,7 @@ document.getElementById("trade_history_body")?.addEventListener("click", (e) => 
 let _equityChartMarkers = [];
 let _equityChartHoverX = null;
 let _equityChartRenderState = null;
+let _equityChartQuoteCurrency = "";
 
 const _defaultEquityAggregation = "5m";
 const _equityAggregationOptions = new Set(["1m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1w", "1mo"]);
@@ -3093,13 +3300,14 @@ function updateEquityChartTooltip(marker, event) {
   const priceLabel = lang === "nl" ? "Prijs" : "Price";
   const seriesLabel = lang === "nl" ? "Bot" : "Bot";
   const currencyLabel = lang === "nl" ? "Valuta" : "Currency";
+  const quoteCurrency = _normalizeCurrencyCode(marker.quoteCurrency || "");
 
   const rows = [
     `<div class="tip-row">${timeLabel}: ${pointTime}</div>`,
     marker.seriesLabel ? `<div class="tip-row">${seriesLabel}: ${marker.seriesLabel}</div>` : "",
     marker.quoteCurrency ? `<div class="tip-row">${currencyLabel}: ${marker.quoteCurrency}</div>` : "",
-    `<div class="tip-row">${equityLabel}: ${formatTooltipExactNumber(marker.v)}</div>`,
-    `<div class="tip-row" style="color:${pointPnl >= 0 ? "#22c55e" : "#ef4444"}">${pnlLabel}: ${pointPnl >= 0 ? "+" : ""}${formatTooltipExactNumber(pointPnl)}</div>`,
+    `<div class="tip-row">${_labelWithCurrency(equityLabel, quoteCurrency)}: ${_valueWithUnitText(marker.v, quoteCurrency)}</div>`,
+    `<div class="tip-row" style="color:${pointPnl >= 0 ? "#22c55e" : "#ef4444"}">${_labelWithCurrency(pnlLabel, quoteCurrency)}: ${_valueWithUnitText(pointPnl, quoteCurrency, true)}</div>`,
   ].filter(Boolean);
   if (Number(marker.price || 0) > 0) {
     rows.push(`<div class="tip-row">${priceLabel}: ${formatTooltipExactNumber(marker.price)}</div>`);
@@ -3334,7 +3542,7 @@ function drawEquityChartSeries(seriesEntries, startingBudget = null, hoverX = nu
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = "#cbd5e1";
-    ctx.fillText(t("lbl_starting_budget"), legendX + 28, legendY + 8);
+    ctx.fillText(_labelWithCurrency(t("lbl_starting_budget"), _equityChartQuoteCurrency), legendX + 28, legendY + 8);
     legendY += 14;
   }
 
@@ -3493,6 +3701,7 @@ function drawEquityChart(data, startingBudget, hoverX = null) {
       v: Number(d.v || 0),
       price: Number(d.p || 0),
       startingBudget: Number(startingBudget || 0),
+      quoteCurrency: _equityChartQuoteCurrency,
     });
   }
 
@@ -3577,7 +3786,15 @@ async function loadEquityChart() {
   const botId = document.getElementById("equity_chart_bot")?.value;
   const aggregation = getSelectedEquityAggregation();
   const infoDiv = document.getElementById("equity_chart_info");
+  const selectedBot = (latestBots || []).find((item) => String(item?.id || "") === String(botId || ""));
+  const selectedCurrencies = _botCurrencies(selectedBot);
+  const allQuoteCurrencies = [...new Set((latestBots || []).map((item) => _botCurrencies(item).quote).filter(Boolean))];
+  const effectiveQuoteCurrency = botId === "__total__"
+    ? (allQuoteCurrencies.length === 1 ? allQuoteCurrencies[0] : "MULTI")
+    : selectedCurrencies.quote;
+  _equityChartQuoteCurrency = effectiveQuoteCurrency;
   if (!botId) {
+    _equityChartQuoteCurrency = "";
     _equityChartRenderState = { mode: "single", points: [], startingBudget: 0 };
     drawEquityChart([]);
     if (infoDiv) infoDiv.style.display = "none";
@@ -3610,11 +3827,11 @@ async function loadEquityChart() {
 
         if (infoDiv) {
           infoDiv.style.display = "";
-          document.getElementById("equity_info_budget").textContent = formatNumber(cachedStartingBudget);
+          document.getElementById("equity_info_budget").textContent = _valueWithUnitText(cachedStartingBudget, effectiveQuoteCurrency);
           const pnlEl = document.getElementById("equity_info_pnl");
-          pnlEl.textContent = (cachedPnl >= 0 ? "+" : "") + formatNumber(cachedPnl);
+          pnlEl.textContent = _valueWithUnitText(cachedPnl, effectiveQuoteCurrency, true);
           pnlEl.className = cachedPnl >= 0 ? "pnl-positive" : "pnl-negative";
-          document.getElementById("equity_info_total").textContent = formatNumber(cachedTotalEquity);
+          document.getElementById("equity_info_total").textContent = _valueWithUnitText(cachedTotalEquity, effectiveQuoteCurrency);
         }
 
         const mergedCachedPoints = botId === "__total__" ? _mergeEquitySeriesToTotalPoints(cachedSeries) : [];
@@ -3652,11 +3869,11 @@ async function loadEquityChart() {
     // Update info labels above chart
     if (infoDiv) {
       infoDiv.style.display = "";
-      document.getElementById("equity_info_budget").textContent = formatNumber(startingBudget);
+      document.getElementById("equity_info_budget").textContent = _valueWithUnitText(startingBudget, effectiveQuoteCurrency);
       const pnlEl = document.getElementById("equity_info_pnl");
-      pnlEl.textContent = (pnl >= 0 ? "+" : "") + formatNumber(pnl);
+      pnlEl.textContent = _valueWithUnitText(pnl, effectiveQuoteCurrency, true);
       pnlEl.className = pnl >= 0 ? "pnl-positive" : "pnl-negative";
-      document.getElementById("equity_info_total").textContent = formatNumber(totalEquity);
+      document.getElementById("equity_info_total").textContent = _valueWithUnitText(totalEquity, effectiveQuoteCurrency);
     }
 
     if (botId === "__total__") {
@@ -3680,11 +3897,11 @@ async function loadEquityChart() {
 
       if (infoDiv) {
         infoDiv.style.display = "";
-        document.getElementById("equity_info_budget").textContent = formatNumber(cachedStartingBudget);
+        document.getElementById("equity_info_budget").textContent = _valueWithUnitText(cachedStartingBudget, effectiveQuoteCurrency);
         const pnlEl = document.getElementById("equity_info_pnl");
-        pnlEl.textContent = (cachedPnl >= 0 ? "+" : "") + formatNumber(cachedPnl);
+        pnlEl.textContent = _valueWithUnitText(cachedPnl, effectiveQuoteCurrency, true);
         pnlEl.className = cachedPnl >= 0 ? "pnl-positive" : "pnl-negative";
-        document.getElementById("equity_info_total").textContent = formatNumber(cachedTotalEquity);
+        document.getElementById("equity_info_total").textContent = _valueWithUnitText(cachedTotalEquity, effectiveQuoteCurrency);
       }
 
       const mergedCachedPoints = botId === "__total__" ? _mergeEquitySeriesToTotalPoints(cachedSeries) : [];
@@ -3782,6 +3999,10 @@ const _ordersTableState = {
 
 const _ordersCategoricalFields = new Set(["market", "event_type", "side"]);
 const _ordersNumericFields = new Set(["price", "quote_amount", "fee_paid_quote", "trade_pnl"]);
+
+let _openOrdersLoadSeq = 0;
+let _openOrdersLastNonEmptyAt = 0;
+const _openOrdersEmptyGraceMs = 4000;
 
 function _ordersEscapeHtml(value) {
   return String(value || "")
@@ -4120,7 +4341,8 @@ function _renderOrdersTable() {
       : ev.event_type === "order_filled" ? `✅ ${t("lbl_filled")}`
       : ev.event_type === "order_cancelled" ? `❌ ${t("lbl_cancelled")}`
       : String(ev.event_type || "");
-    const pnlStr = ev.trade_pnl !== 0 ? ((ev.trade_pnl >= 0 ? "+" : "") + formatNumber(ev.trade_pnl)) : "-";
+    const eventQuoteCurrency = _normalizeCurrencyCode(ev.quote_currency || _marketCurrencyParts(ev.market).quote);
+    const pnlStr = ev.trade_pnl !== 0 ? _valueWithUnitText(ev.trade_pnl, eventQuoteCurrency, true) : "-";
     const pnlClass = ev.trade_pnl > 0 ? "pnl-positive" : ev.trade_pnl < 0 ? "pnl-negative" : "";
     const sideClass = normalizedSide === "buy" ? "order-buy" : normalizedSide === "sell" ? "order-sell" : "";
     const marketLabel = ev.market || ev.bot_name || "-";
@@ -4171,6 +4393,7 @@ document.addEventListener("click", (event) => {
 
 /** Load all order events into the Orders tab table. */
 async function loadOrders() {
+  const requestSeq = ++_openOrdersLoadSeq;
   const tbody = document.getElementById("open_orders_body");
   const countEl = document.getElementById("open_orders_count");
   if (!tbody) return;
@@ -4183,17 +4406,24 @@ async function loadOrders() {
     if (markets.length) qs.set("markets", markets.join(","));
     const url = qs.size ? `/api/v1/market/notifications/open-orders?${qs.toString()}` : "/api/v1/market/notifications/open-orders";
     const resp = await api(url);
+    if (requestSeq !== _openOrdersLoadSeq) return;
     const rows = Array.isArray(resp?.rows) ? resp.rows : [];
+    _emitOpenOrderLifecycleToasts(rows);
+    const hasExistingRows = tbody.querySelector("tr[data-notif-order-id]") != null;
+    const hasRecentNonEmpty = hasExistingRows && _openOrdersLastNonEmptyAt > 0 && Date.now() - _openOrdersLastNonEmptyAt < _openOrdersEmptyGraceMs;
+    if (!rows.length) {
+      if (hasRecentNonEmpty) return;
+      if (countEl) countEl.textContent = "(0)";
+      _notificationOrderCache.clear();
+      _renderNotificationEmpty(tbody, 10);
+      return;
+    }
     if (countEl) countEl.textContent = `(${rows.length})`;
     _notificationOrderCache.clear();
     rows.forEach((row) => {
       const id = row.id || `${row.order_id || ""}-${row.date_time || ""}`;
       _notificationOrderCache.set(id, row);
     });
-    if (!rows.length) {
-      _renderNotificationEmpty(tbody, 10);
-      return;
-    }
     _removePlaceholderRows(tbody, "data-notif-order-id");
     _syncRowsByKey(
       tbody,
@@ -4216,9 +4446,15 @@ async function loadOrders() {
         cells[9].textContent = _formatDateTime(row.date_time);
       }
     );
+    _openOrdersLastNonEmptyAt = Date.now();
     await refreshTradeChartOpenOrders();
   } catch {
+    if (requestSeq !== _openOrdersLoadSeq) return;
+    const hasExistingRows = tbody.querySelector("tr[data-notif-order-id]") != null;
+    const hasRecentNonEmpty = hasExistingRows && _openOrdersLastNonEmptyAt > 0 && Date.now() - _openOrdersLastNonEmptyAt < _openOrdersEmptyGraceMs;
+    if (hasRecentNonEmpty) return;
     if (countEl) countEl.textContent = "(0)";
+    _notificationOrderCache.clear();
     _renderNotificationEmpty(tbody, 10);
   }
 }
@@ -4259,13 +4495,15 @@ async function openOrderDetail(eventId) {
   try {
     const ev = await api(`/api/v1/trade-events/${eventId}`);
     const normalizedSide = _normalizeSideValue(ev.side);
+    const quoteCurrency = _normalizeCurrencyCode(ev.quote_currency || _marketCurrencyParts(ev.market).quote);
+    const baseCurrency = _normalizeCurrencyCode(ev.base_currency || _marketCurrencyParts(ev.market).base);
     const typeLabel = ev.event_type === "order_placed" ? `📋 ${t("lbl_placed")}`
       : ev.event_type === "order_filled" ? `✅ ${t("lbl_filled")}`
       : ev.event_type === "order_cancelled" ? `❌ ${t("lbl_cancelled")}`
       : `🔄 ${t("toast_trade")}`;
     const sideClass = normalizedSide === "buy" ? "order-buy" : normalizedSide === "sell" ? "order-sell" : "";
     const pnlClass = ev.trade_pnl > 0 ? "pnl-positive" : ev.trade_pnl < 0 ? "pnl-negative" : "";
-    const pnlStr = ev.trade_pnl !== 0 ? ((ev.trade_pnl >= 0 ? "+" : "") + formatNumber(ev.trade_pnl)) : "-";
+    const pnlStr = ev.trade_pnl !== 0 ? _valueWithUnitText(ev.trade_pnl, quoteCurrency, true) : "-";
 
     let html = `<div class="order-detail-grid">`;
     html += `<div class="od-row"><span class="od-label">${t("th_type")}</span><span>${typeLabel}</span></div>`;
@@ -4273,15 +4511,15 @@ async function openOrderDetail(eventId) {
     html += `<div class="od-row"><span class="od-label">${t("lbl_exchange_order_id")}</span><span>${ev.exchange_order_id || "-"}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_side")}</span><span class="${sideClass}">${normalizedSide ? normalizedSide.toUpperCase() : "-"}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_market")}</span><span>${ev.market || ev.bot_name || "-"}</span></div>`;
-    html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(ev.price)}</span></div>`;
-    html += `<div class="od-row"><span class="od-label">${t("th_amount")}</span><span>${formatNumber(ev.quote_amount)}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("th_price"), quoteCurrency)}</span><span>${_valueWithUnitText(ev.price, quoteCurrency)}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("th_amount"), quoteCurrency)}</span><span>${_valueWithUnitText(ev.quote_amount, quoteCurrency)}</span></div>`;
     if (ev.event_type === "order_filled") {
       html += `<div class="od-row"><span class="od-label">${t("lbl_fill_parts")}</span><span>${Number(ev.fill_count || 0) > 0 ? Number(ev.fill_count) : "-"}</span></div>`;
     }
-    html += `<div class="od-row"><span class="od-label">${t("th_fee_amount")}</span><span>${Number(ev.fee_paid_quote || 0) > 0 ? formatNumber(ev.fee_paid_quote) : "-"}</span></div>`;
+    html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("th_fee_amount"), quoteCurrency)}</span><span>${Number(ev.fee_paid_quote || 0) > 0 ? _valueWithUnitText(ev.fee_paid_quote, quoteCurrency) : "-"}</span></div>`;
     html += `<div class="od-row"><span class="od-label">${t("th_time")}</span><span>${new Date(ev.timestamp).toLocaleString()}</span></div>`;
     if (normalizedSide !== "buy") {
-      html += `<div class="od-row"><span class="od-label">${t("lbl_pnl")}</span><span class="${pnlClass}">${pnlStr}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("lbl_pnl"), quoteCurrency)}</span><span class="${pnlClass}">${pnlStr}</span></div>`;
     }
     html += `<div class="od-row"><span class="od-label">${t("th_level")}</span><span>${ev.level_index != null ? ev.level_index : "-"}</span></div>`;
     html += `</div>`;
@@ -4289,14 +4527,14 @@ async function openOrderDetail(eventId) {
     if (ev.pair_metrics) {
       const pm = ev.pair_metrics;
       const pairPnlClass = pm.realized_pnl_quote > 0 ? "pnl-positive" : pm.realized_pnl_quote < 0 ? "pnl-negative" : "";
-      const pairPnlStr = `${pm.realized_pnl_quote >= 0 ? "+" : ""}${formatNumber(pm.realized_pnl_quote)}`;
-      const grossProfitStr = `${pm.gross_profit_quote >= 0 ? "+" : ""}${formatNumber(pm.gross_profit_quote)}`;
+      const pairPnlStr = _valueWithUnitText(pm.realized_pnl_quote, quoteCurrency, true);
+      const grossProfitStr = _valueWithUnitText(pm.gross_profit_quote, quoteCurrency, true);
       html += `<h4 style="margin:14px 0 6px;">${t("lbl_realized_pair_pnl")}</h4>`;
       html += `<div class="order-detail-grid">`;
-      html += `<div class="od-row"><span class="od-label">${t("lbl_realized_pair_pnl")}</span><span class="${pairPnlClass}">${pairPnlStr}</span></div>`;
-      html += `<div class="od-row"><span class="od-label">${t("lbl_gross_profit")}</span><span>${grossProfitStr}</span></div>`;
-      html += `<div class="od-row"><span class="od-label">${t("lbl_total_fees")}</span><span>${formatNumber(pm.total_fees_quote)}</span></div>`;
-      html += `<div class="od-row"><span class="od-label">${t("lbl_quantity")}</span><span>${formatNumber(pm.quantity_base)}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("lbl_realized_pair_pnl"), quoteCurrency)}</span><span class="${pairPnlClass}">${pairPnlStr}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("lbl_gross_profit"), quoteCurrency)}</span><span>${grossProfitStr}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("lbl_total_fees"), quoteCurrency)}</span><span>${_valueWithUnitText(pm.total_fees_quote, quoteCurrency)}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("lbl_quantity"), baseCurrency)}</span><span>${_valueWithUnitText(pm.quantity_base, baseCurrency)}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("lbl_fee_rate")}</span><span>${(pm.fee_rate * 100).toFixed(2)}%</span></div>`;
       html += `</div>`;
     } else if (normalizedSide === "buy") {
@@ -4309,7 +4547,7 @@ async function openOrderDetail(eventId) {
       const loSide = _normalizeSideValue(lo.side);
       const loSideClass = loSide === "buy" ? "order-buy" : loSide === "sell" ? "order-sell" : "";
       const loTypeLabel = lo.event_type === "order_filled" ? `✅ ${t("lbl_filled")}` : lo.event_type;
-      const loPnlStr = lo.trade_pnl !== 0 ? ((lo.trade_pnl >= 0 ? "+" : "") + formatNumber(lo.trade_pnl)) : "-";
+      const loPnlStr = lo.trade_pnl !== 0 ? _valueWithUnitText(lo.trade_pnl, quoteCurrency, true) : "-";
       const linkedLabel = normalizedSide === "sell" ? t("lbl_linked_buy") : t("lbl_linked_sell");
       html += `<h4 style="margin:14px 0 6px;">${linkedLabel}</h4>`;
       html += `<div class="order-detail-grid">`;
@@ -4317,14 +4555,14 @@ async function openOrderDetail(eventId) {
       html += `<div class="od-row"><span class="od-label">${t("lbl_local_order_id")}</span><span>${lo.order_id || "-"}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("lbl_exchange_order_id")}</span><span>${lo.exchange_order_id || "-"}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_side")}</span><span class="${loSideClass}">${loSide ? loSide.toUpperCase() : "-"}</span></div>`;
-      html += `<div class="od-row"><span class="od-label">${t("th_price")}</span><span>${formatNumber(lo.price)}</span></div>`;
-      html += `<div class="od-row"><span class="od-label">${t("th_amount")}</span><span>${formatNumber(lo.quote_amount)}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("th_price"), quoteCurrency)}</span><span>${_valueWithUnitText(lo.price, quoteCurrency)}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("th_amount"), quoteCurrency)}</span><span>${_valueWithUnitText(lo.quote_amount, quoteCurrency)}</span></div>`;
       if (lo.event_type === "order_filled") {
         html += `<div class="od-row"><span class="od-label">${t("lbl_fill_parts")}</span><span>${Number(lo.fill_count || 0) > 0 ? Number(lo.fill_count) : "-"}</span></div>`;
       }
-      html += `<div class="od-row"><span class="od-label">${t("th_fee_amount")}</span><span>${Number(lo.fee_paid_quote || 0) > 0 ? formatNumber(lo.fee_paid_quote) : "-"}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("th_fee_amount"), quoteCurrency)}</span><span>${Number(lo.fee_paid_quote || 0) > 0 ? _valueWithUnitText(lo.fee_paid_quote, quoteCurrency) : "-"}</span></div>`;
       html += `<div class="od-row"><span class="od-label">${t("th_time")}</span><span>${new Date(lo.timestamp).toLocaleString()}</span></div>`;
-      html += `<div class="od-row"><span class="od-label">${t("lbl_pnl")}</span><span>${loPnlStr}</span></div>`;
+      html += `<div class="od-row"><span class="od-label">${_labelWithCurrency(t("lbl_pnl"), quoteCurrency)}</span><span>${loPnlStr}</span></div>`;
       html += `</div>`;
     } else {
       html += `<p style="color:#94a3b8;margin-top:12px;font-size:0.9rem;">${t("lbl_no_linked_order")}</p>`;
@@ -4806,8 +5044,8 @@ function _updateTradeChartTooltip(marker, canvas, mx) {
         ${rows.map(([label, value]) => `<div style="color:#94a3b8;">${_notificationEscapeHtml(String(label))}</div><div style="text-align:right;color:#e2e8f0;">${value}</div>`).join("")}
       </div>
       <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(148,163,184,.25);display:flex;justify-content:space-between;align-items:center;">
-        <div style="color:#94a3b8;">PnL</div>
-        <div style="font-weight:700;color:${pnlColor};">${pnl >= 0 ? "+" : ""}${formatNumber(pnl)}</div>
+        <div style="color:#94a3b8;">${_labelWithCurrency("PnL", quoteCurrency)}</div>
+        <div style="font-weight:700;color:${pnlColor};">${_valueWithUnitText(pnl, quoteCurrency, true)}</div>
       </div>
     `;
   } else {

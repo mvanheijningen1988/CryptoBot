@@ -151,8 +151,45 @@ class BotRunner:
         self.skimmed_quote = 0.0
         self.trade_count = 0
         self._pending_trade_events: list[dict] = []
+        self._cancelled_level_repost_block_until: dict[tuple[int, str], float] = {}
+        self._cancel_repost_cooldown_seconds = max(0.0, get_runtime_float("EXTERNAL_CANCEL_REPOST_COOLDOWN_SECONDS", 20.0))
         self.started_at: datetime | None = None
         self.trace_id = get_correlation_id()
+
+    def _level_repost_cooldown_active(self, level_index: int, side: str) -> bool:
+        """Return True when reposting this level/side is still in cooldown."""
+        now = time.time()
+        key = (int(level_index), str(side or "").lower())
+        block_until = float(self._cancelled_level_repost_block_until.get(key, 0.0) or 0.0)
+        if block_until <= 0:
+            return False
+        if block_until <= now:
+            self._cancelled_level_repost_block_until.pop(key, None)
+            return False
+        return True
+
+    def _mark_level_repost_cooldown(self, level_index: int, side: str, *, source_context: str, status: str) -> None:
+        """Block immediate reposts for a cancelled level/side for a short period."""
+        cooldown = float(self._cancel_repost_cooldown_seconds or 0.0)
+        if cooldown <= 0:
+            return
+        normalized_side = str(side or "").lower()
+        key = (int(level_index), normalized_side)
+        block_until = time.time() + cooldown
+        self._cancelled_level_repost_block_until[key] = block_until
+        with scoped_context(bot_id=self.bot_id, component="agent.runner"):
+            debug_log(
+                logger,
+                "runner_exchange_cancel_repost_cooldown",
+                "Runner enabled repost cooldown after external exchange cancellation",
+                bot_id=self.bot_id,
+                context=source_context,
+                side=normalized_side,
+                level_index=int(level_index),
+                cooldown_seconds=round(cooldown, 3),
+                status=str(status or "").lower(),
+                blocked_until=datetime.fromtimestamp(block_until, timezone.utc).isoformat(),
+            )
 
     def _wait_for_initial_price(self) -> bool:
         """Block until the exchange provides the first usable price."""
@@ -1112,6 +1149,7 @@ class BotRunner:
             removed_count += 1
             limit_price = self.strategy.levels[level_index]
             status = str(cancelled.get("status", "canceled") or "canceled").lower()
+            self._mark_level_repost_cooldown(level_index, current_side, source_context=context, status=status)
             with scoped_context(bot_id=self.bot_id, component="agent.runner"):
                 debug_log(
                     logger,
@@ -1162,6 +1200,8 @@ class BotRunner:
         """Place a single limit order on the exchange for a grid level."""
         side = self.state.open_orders.get(level_idx)
         if side is None:
+            return
+        if self._level_repost_cooldown_active(level_idx, side):
             return
         limit_price = self.strategy.levels[level_idx]
         quote_amount = self._quote_amount_for_new_order(side, level_idx, limit_price)
